@@ -8,6 +8,16 @@ The upstream release this tree is based on is recorded in
 `pkg/cli/daemon_wiring.go` as `UpstreamVersion` and printed by
 `maestro-d --version`.
 
+## Branches
+
+| Branch | Holds |
+| --- | --- |
+| `master` | The fork. This is the default branch: build from it, branch from it, release from it. |
+| `main` | Upstream maestro-runner, unmodified. It is only ever moved to a newer upstream release, never committed to. |
+
+`master` is `main` plus the fork's commits, so `git log main..master` is
+exactly what the fork adds.
+
 ## Design rule
 
 Everything the daemon adds lives in **new files**. Upstream files are touched
@@ -64,7 +74,8 @@ If an upstream change breaks the build, it is almost certainly one of these.
 
 ```sh
 git fetch devicelab                     # git@github.com:devicelab-dev/maestro-runner.git
-git rebase v1.1.27                      # or cherry-pick the fork commits onto the tag
+git branch -f main v1.1.27              # main is upstream, unmodified
+git rebase main master                  # or cherry-pick the fork commits onto the tag
 make gen                                # regenerate command tables if step structs changed
 go test ./...                           # includes the e2e test in pkg/cli
 ```

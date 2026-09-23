@@ -172,7 +172,7 @@ field the command does not have; from plain JavaScript the daemon does, with
 `MaestroError` code `USAGE`. `command(name, value?, opts?)` is the untyped
 form for commands the library does not know yet.
 
-[commands]: https://github.com/EdgeApp/maestro-d/blob/main/docs/daemon/commands.md
+[commands]: https://github.com/EdgeApp/maestro-d/blob/master/docs/daemon/commands.md
 
 #### Batches
 
