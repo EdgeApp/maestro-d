@@ -42,7 +42,12 @@ curl http://127.0.0.1:7788 ──┘   (or TCP)         (one process per --daemo
    `maestro-runner test` would, using the same run configuration
    (`--platform`, `--team-id`, `--app-file`, …). A daemon can hold several
    devices; each has its own session — variables, JavaScript engine, report
-   directory.
+   directory. Attaching never launches or restarts an app: the driver
+   session it opens (WebDriverAgent's, on iOS) names no app, so whatever
+   is on screen stays as it is, and `--app-id` only becomes the default
+   for a later `launchApp`. An attach that cannot open that session fails
+   with `DEVICE_ERROR` rather than leaving a device on which every tap
+   would fail.
 3. **Steps go through the runner unchanged.** A command arrives as the YAML
    value it would have in a flow file (`Login`, `{id: submit}`), is parsed by
    the flow parser and executed by the flow runner with the device's session.

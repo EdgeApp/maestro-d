@@ -34,6 +34,7 @@ never copies their code.
 | `pkg/cli/cli.go` | `app.Commands = append(app.Commands, daemonCommands()...)`; app name, usage text and version printer say `maestro-d` | ~15 |
 | `pkg/driver/mock/mock.go` | `takeScreenshot` returns the PNG bytes in `result.Data`, as real drivers do (lets the mock e2e test save a screenshot) | 6 |
 | `Makefile` | `BINARY_NAME=maestro-d`; `INSTALL_DIR=$(HOME)/.maestro-d` (its own home, so installing cannot disturb a maestro-runner install); `gen` / `gen-check` targets; `build` replaces the installed binary's inode (a running daemon plus an in-place `cp` gets the next exec SIGKILLed on macOS) | ~16 |
+| `pkg/driver/wda/client.go` | `CreateSession` sends `bundleId` only when it has one, so the daemon's attach can open a session without launching an app | 4 |
 | `pkg/driver/browser/cdp/driver.go` | Downloaded browsers cache in `~/.maestro-d/browsers` rather than `~/.maestro-runner/browsers` (two hard-coded paths; upstream does not route this one through `config.GetHome()`, and it must not — under `go test` that resolves to the package directory) | 3 |
 | `README.md` | Replaced wholesale with the fork's own README; upstream's is kept at `docs/maestro-runner.md`. On a rebase, keep ours and re-read theirs for anything new worth carrying over | whole file |
 | `.gitignore` | Ignore the `maestro-d` binary and `npm/dist-maestro-d/` | 6 |

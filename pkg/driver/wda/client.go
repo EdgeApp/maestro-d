@@ -38,10 +38,14 @@ func NewClient(port uint16) *Client {
 // in the session capabilities, enabling WDA's auto alert handling for permission dialogs.
 func (c *Client) CreateSession(bundleID string, alertAction string) error {
 	alwaysMatch := map[string]interface{}{
-		"bundleId":                bundleID,
 		"shouldWaitForQuiescence": false,
 		"waitForIdleTimeout":      0,
 		"shouldUseTestManagerForVisibilityDetection": false,
+	}
+	// maestro-d: a bundleId makes WDA launch that app, so a session that
+	// must not disturb the foreground app (the daemon's attach) sends none.
+	if bundleID != "" {
+		alwaysMatch["bundleId"] = bundleID
 	}
 	if alertAction != "" {
 		alwaysMatch["defaultAlertAction"] = alertAction

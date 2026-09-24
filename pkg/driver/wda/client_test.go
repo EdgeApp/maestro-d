@@ -1287,3 +1287,45 @@ func TestSource_RetriesOnTransientAXError(t *testing.T) {
 		t.Errorf("expected source XML after retry, got empty")
 	}
 }
+
+// TestCreateSessionBundleID checks that bundleId is sent only when there is
+// one: WDA launches the app a session names, so a session meant to leave the
+// foreground app alone (the daemon's attach) must not name any.
+func TestCreateSessionBundleID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		bundleID string
+		want     bool
+	}{
+		{"with bundle id", "com.example.app", true},
+		{"without bundle id", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var alwaysMatch map[string]interface{}
+			server := mockWDAServer(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]interface{}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				alwaysMatch, _ = body["capabilities"].(map[string]interface{})["alwaysMatch"].(map[string]interface{})
+				jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"sessionId": "sid"}})
+			})
+			defer server.Close()
+
+			client := &Client{baseURL: server.URL, httpClient: http.DefaultClient}
+			if err := client.CreateSession(tc.bundleID, ""); err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			got, present := alwaysMatch["bundleId"]
+			if present != tc.want {
+				t.Fatalf("bundleId present = %v (value %v), want present = %v", present, got, tc.want)
+			}
+			if tc.want && got != tc.bundleID {
+				t.Fatalf("bundleId = %v, want %q", got, tc.bundleID)
+			}
+			if !client.HasSession() {
+				t.Fatal("client has no session after CreateSession")
+			}
+		})
+	}
+}

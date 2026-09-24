@@ -227,10 +227,15 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 		preparer.PrepareForFlow(prepare)
 	}
 	if ensurer, ok := inner.(core.SessionEnsurer); ok {
-		if appID := fr.script.ExpandVariables(fr.flow.Config.EffectiveAppID()); appID != "" {
-			if err := ensurer.EnsureSession(appID); err != nil {
-				logger.Warn("session: failed to ensure driver session: %v", err)
-			}
+		// A session is what makes the driver's interactive commands work
+		// (on WDA every tap, swipe and key press is a session-scoped
+		// route). It is created with no app id on purpose: WDA launches
+		// the app named in a session request, and attaching must leave
+		// whatever is on screen alone. AppID stays the default for an
+		// explicit launchApp step. Without a session nothing interactive
+		// can succeed, so failing here is an attach failure, not a warning.
+		if err := ensurer.EnsureSession(""); err != nil {
+			return nil, fmt.Errorf("session: %w", err)
 		}
 	}
 	resetConsoleLogs(driver)
