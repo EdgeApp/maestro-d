@@ -236,7 +236,7 @@ export interface AttachOptions {
   outputDir?: string
   /** Base directory for relative paths in steps. */
   flowDir?: string
-  /** Driver-specific extras: headed, browser, windowSize, userDataDir, androidTcpForward, capsFile, newCommandTimeout. */
+  /** Driver-specific extras: headed, browser, windowSize, followWindow, userDataDir, androidTcpForward, capsFile, newCommandTimeout. */
   extra?: Record<string, unknown>
 }
 

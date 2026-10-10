@@ -40,12 +40,13 @@ func CreateWebDriver(cfg *RunConfig) (core.Driver, func(), error) {
 func buildWebDriverConfig(cfg *RunConfig) cdpdriver.Config {
 	w, h := parseWindowSize(cfg.WindowSize)
 	return cdpdriver.Config{
-		Headless:    !cfg.Headed,
-		URL:         expandRunnerVars(cfg.AppID, cfg.Env),
-		Browser:     cfg.Browser,
-		UserDataDir: cfg.UserDataDir,
-		ViewportW:   w,
-		ViewportH:   h,
+		Headless:     !cfg.Headed,
+		URL:          expandRunnerVars(cfg.AppID, cfg.Env),
+		Browser:      cfg.Browser,
+		UserDataDir:  cfg.UserDataDir,
+		ViewportW:    w,
+		ViewportH:    h,
+		FollowWindow: cfg.FollowWindow,
 	}
 }
 

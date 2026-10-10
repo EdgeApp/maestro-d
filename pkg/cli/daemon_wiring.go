@@ -104,6 +104,9 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	if v, ok := cfg.Extra["windowSize"].(string); ok {
 		rc.WindowSize = v
 	}
+	if v, ok := cfg.Extra["followWindow"].(bool); ok {
+		rc.FollowWindow = v
+	}
 	if v, ok := cfg.Extra["androidTcpForward"].(bool); ok {
 		rc.AndroidTCPForward = v
 	}

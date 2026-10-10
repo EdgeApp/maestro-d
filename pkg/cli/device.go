@@ -224,6 +224,7 @@ func buildDeviceRunConfig(c *cli.Context) (*RunConfig, error) {
 		Browser:            getString("browser"),
 		UserDataDir:        getString("user-data-dir"),
 		WindowSize:         getString("window-size"),
+		FollowWindow:       getBool("follow-window"),
 		Platform:           getString("platform"),
 		Devices:            parseDevices(getString("device")),
 		Driver:             getString("driver"),

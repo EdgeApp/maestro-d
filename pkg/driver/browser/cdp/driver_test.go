@@ -752,6 +752,65 @@ func TestSetOrientation(t *testing.T) {
 	}
 }
 
+// TestFollowWindow verifies that with FollowWindow the page takes the
+// window's size, follows it when the window is resized, and that
+// setOrientation turns the window itself.
+func TestFollowWindow(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d, err := New(Config{
+		Headless:     true,
+		URL:          ts.URL,
+		ViewportW:    900,
+		ViewportH:    700,
+		FollowWindow: true,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create driver: %v", err)
+	}
+	defer d.Close()
+
+	innerWidth := func() int {
+		obj, err := d.page.Eval(`() => window.innerWidth`)
+		if err != nil {
+			t.Fatalf("read innerWidth: %v", err)
+		}
+		return obj.Value.Int()
+	}
+
+	info := d.GetPlatformInfo()
+	if info.ScreenWidth <= 0 || info.ScreenWidth > 900 || info.ScreenWidth != innerWidth() {
+		t.Fatalf("initial width = %d (innerWidth %d), want the 900-wide window's viewport", info.ScreenWidth, innerWidth())
+	}
+
+	w, h := 600, 800
+	if err := d.page.SetWindow(&proto.BrowserBounds{Width: &w, Height: &h}); err != nil {
+		t.Fatalf("resize window: %v", err)
+	}
+	info = d.GetPlatformInfo()
+	if info.ScreenWidth > 600 || info.ScreenWidth != innerWidth() {
+		t.Errorf("width after resize = %d (innerWidth %d), want the 600-wide window's viewport", info.ScreenWidth, innerWidth())
+	}
+	if d.GetState().Orientation != "portrait" {
+		t.Errorf("600x800 window should be portrait")
+	}
+
+	if result := d.Execute(&flow.SetOrientationStep{Orientation: "LANDSCAPE"}); !result.Success {
+		t.Fatalf("setOrientation LANDSCAPE: %s", result.Message)
+	}
+	win, err := d.page.GetWindow()
+	if err != nil {
+		t.Fatalf("read window: %v", err)
+	}
+	if *win.Width != 800 || *win.Height != 600 {
+		t.Errorf("window after LANDSCAPE = %dx%d, want 800x600", *win.Width, *win.Height)
+	}
+	if d.GetState().Orientation != "landscape" {
+		t.Errorf("expected orientation 'landscape' after LANDSCAPE")
+	}
+}
+
 func TestWaitUntilVisible(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()

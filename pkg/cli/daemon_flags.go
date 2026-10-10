@@ -266,6 +266,8 @@ var (
 			func(a *daemon.AttachConfig, v string) { extra(a, "windowSize", v) }),
 		attachStr("user-data-dir", "Browser profile directory (web)", nil,
 			func(a *daemon.AttachConfig, v string) { extra(a, "userDataDir", v) }),
+		attachBool("follow-window", "Size the window to --window-size and let the page follow window resizes (web)", nil,
+			func(a *daemon.AttachConfig, v bool) { extra(a, "followWindow", v) }),
 		attachBool("android-tcp-forward", "Use adb TCP forwarding instead of the default transport (android)", nil,
 			func(a *daemon.AttachConfig, v bool) { extra(a, "androidTcpForward", v) }),
 	}

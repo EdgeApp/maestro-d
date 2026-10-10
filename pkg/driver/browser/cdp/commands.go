@@ -359,8 +359,9 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 		if err != nil {
 			return errorResult(err, "Failed to parse point coordinates")
 		}
-		x = int(px * float64(d.viewportW))
-		y = int(py * float64(d.viewportH))
+		w, h := d.viewport()
+		x = int(px * float64(w))
+		y = int(py * float64(h))
 	}
 
 	mouse := d.page.Mouse
@@ -656,7 +657,8 @@ func (d *Driver) inputRandom(step *flow.InputRandomStep) *core.CommandResult {
 
 // viewportCenter returns the center point of the viewport.
 func (d *Driver) viewportCenter() proto.Point {
-	return proto.NewPoint(float64(d.viewportW)/2, float64(d.viewportH)/2)
+	w, h := d.viewport()
+	return proto.NewPoint(float64(w)/2, float64(h)/2)
 }
 
 // scroll scrolls the page in the given direction.
@@ -739,9 +741,10 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 					inIframe = v.Value.Bool()
 				}
 			}
-			boundsKnown := info.Bounds.Width > 0 && info.Bounds.Height > 0 && d.viewportW > 0 && d.viewportH > 0
+			vw, vh := d.viewport()
+			boundsKnown := info.Bounds.Width > 0 && info.Bounds.Height > 0 && vw > 0 && vh > 0
 			if inIframe || !boundsKnown ||
-				core.MeetsVisibility(info.Bounds, d.viewportW, d.viewportH, step.VisibilityPercentage) {
+				core.MeetsVisibility(info.Bounds, vw, vh, step.VisibilityPercentage) {
 				return successResult(
 					fmt.Sprintf("Element visible after %d scrolls", i),
 					info,
@@ -798,7 +801,8 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 // element and uses its center.
 func (d *Driver) resolveDragEnd(sel flow.Selector, timeoutMs int) (float64, float64, *core.ElementInfo, error) {
 	if sel.Point != "" && sel.IsEmpty() {
-		x, y, err := core.ParsePointCoords(sel.Point, d.viewportW, d.viewportH)
+		w, h := d.viewport()
+		x, y, err := core.ParsePointCoords(sel.Point, w, h)
 		return float64(x), float64(y), nil, err
 	}
 	_, info, err := d.findElement(sel, false, timeoutMs)
@@ -1130,8 +1134,17 @@ func (d *Driver) setClipboard(step *flow.SetClipboardStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Set clipboard: %s", step.Text), nil)
 }
 
-// setOrientation changes viewport dimensions to simulate orientation.
+// setOrientation changes viewport dimensions to simulate orientation. With
+// FollowWindow it swaps the window's own width and height instead.
 func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResult {
+	if d.config.FollowWindow {
+		win, err := d.page.GetWindow()
+		if err != nil {
+			return errorResult(err, "Failed to read window bounds")
+		}
+		d.viewportW, d.viewportH = *win.Width, *win.Height
+	}
+
 	switch strings.ToUpper(step.Orientation) {
 	case "LANDSCAPE", "LANDSCAPE_LEFT", "LANDSCAPE_RIGHT":
 		if d.viewportW < d.viewportH {
@@ -1143,10 +1156,19 @@ func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResu
 		}
 	}
 
-	err := d.page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:  d.viewportW,
-		Height: d.viewportH,
-	})
+	var err error
+	if d.config.FollowWindow {
+		err = d.page.SetWindow(&proto.BrowserBounds{
+			Width:       &d.viewportW,
+			Height:      &d.viewportH,
+			WindowState: proto.BrowserWindowStateNormal,
+		})
+	} else {
+		err = d.page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:  d.viewportW,
+			Height: d.viewportH,
+		})
+	}
 	if err != nil {
 		return errorResult(err, "Failed to set orientation")
 	}
@@ -1870,13 +1892,16 @@ func (d *Driver) resetPermissions() *core.CommandResult {
 	return successResult("Reset all permissions", nil)
 }
 
-// initPage sets viewport and injects JS helpers on a new page.
+// initPage sets viewport and injects JS helpers on a new page. With
+// FollowWindow the page keeps the window's own size.
 func (d *Driver) initPage(page *rod.Page) error {
-	if err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:  d.viewportW,
-		Height: d.viewportH,
-	}); err != nil {
-		return err
+	if !d.config.FollowWindow {
+		if err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:  d.viewportW,
+			Height: d.viewportH,
+		}); err != nil {
+			return err
+		}
 	}
 	_, err := page.EvalOnNewDocument(jsHelperCode)
 	return err

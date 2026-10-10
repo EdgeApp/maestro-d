@@ -121,7 +121,7 @@ The rest are maestro-runner's run configuration, camel-cased: `platform`
 (`none | on-failure | all`), `noAppInstall`, `noDriverInstall`,
 `driverStartTimeout` (s), `waitForIdleTimeout`, `conditionTimeout`,
 `stepDelay`, `commandTimeout` (ms), `typingFrequency`, and `extra` for
-driver-specific keys (`headed`, `browser`, `windowSize`, `userDataDir`, …).
+driver-specific keys (`headed`, `browser`, `windowSize`, `followWindow`, `userDataDir`, …).
 
 ### `MaestroDevice`
 

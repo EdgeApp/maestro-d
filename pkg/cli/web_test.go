@@ -60,3 +60,21 @@ func TestParseWindowSize(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildWebDriverConfig_FollowWindow(t *testing.T) {
+	got := buildWebDriverConfig(&RunConfig{WindowSize: "900x700", FollowWindow: true})
+	if !got.FollowWindow || got.ViewportW != 900 || got.ViewportH != 700 {
+		t.Fatalf("config = %+v, want FollowWindow at 900x700", got)
+	}
+}
+
+func TestAttachFollowWindowReachesRunConfig(t *testing.T) {
+	opts, _, err := parseDaemonArgs([]string{"--follow-window", "--window-size", "900x700"}, attachFlags, nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	rc := attachToRunConfig("web-1", opts.Attach)
+	if !rc.FollowWindow || rc.WindowSize != "900x700" {
+		t.Fatalf("run config FollowWindow=%v WindowSize=%q, want true and 900x700", rc.FollowWindow, rc.WindowSize)
+	}
+}

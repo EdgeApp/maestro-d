@@ -152,8 +152,13 @@ Attach flags map one to one onto maestro-runner's `test` flags:
 `--no-driver-install`, `--driver-start-timeout`, `--wait-for-idle-timeout`,
 `--condition-timeout`, `--step-delay`, `--typing-frequency`,
 `--command-timeout`, `--new-command-timeout`, `--alert-monitor[=false]`,
-`--headed`, `--browser`, `--window-size`, `--user-data-dir`,
-`--android-tcp-forward`.
+`--headed`, `--browser`, `--window-size`, `--follow-window`,
+`--user-data-dir`, `--android-tcp-forward`.
+
+On the web, `--window-size` pins the page to an emulated viewport of that
+size whatever the window does. Add `--follow-window` to size the real window
+instead, so the page reflows when the window is resized by hand; taps by
+percentage and visibility checks then use the window's current size.
 
 ```sh
 udid=$(maestro-d device start "iPhone 16" --platform ios --json | jq -r .device.id)

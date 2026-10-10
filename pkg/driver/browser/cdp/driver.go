@@ -37,6 +37,12 @@ type Config struct {
 	UserDataDir string // Persistent profile directory (empty = ephemeral profile)
 	ViewportW   int
 	ViewportH   int
+
+	// FollowWindow sizes the browser window to ViewportW x ViewportH instead
+	// of pinning the page to an emulated viewport, so the page reflows when
+	// the window is resized by hand. Coordinates are then read from the live
+	// layout viewport on every use.
+	FollowWindow bool
 }
 
 // Driver implements core.Driver for desktop browser testing using Rod + CDP.
@@ -148,13 +154,23 @@ func New(cfg Config) (*Driver, error) {
 		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 
-	// Set viewport
-	err = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:  cfg.ViewportW,
-		Height: cfg.ViewportH,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to set viewport: %w", err)
+	if cfg.FollowWindow {
+		err = page.SetWindow(&proto.BrowserBounds{
+			Width:       &cfg.ViewportW,
+			Height:      &cfg.ViewportH,
+			WindowState: proto.BrowserWindowStateNormal,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to size window: %w", err)
+		}
+	} else {
+		err = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:  cfg.ViewportW,
+			Height: cfg.ViewportH,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to set viewport: %w", err)
+		}
 	}
 
 	// Inject JS helper (persists across navigations)
@@ -654,10 +670,26 @@ func (d *Driver) Hierarchy() ([]byte, error) {
 	return json.Marshal(result.Nodes)
 }
 
+// viewport returns the page's viewport size in CSS pixels: the emulated size,
+// or with FollowWindow the window's current layout viewport, falling back to
+// the configured size when the page cannot report one.
+func (d *Driver) viewport() (int, int) {
+	if !d.config.FollowWindow {
+		return d.viewportW, d.viewportH
+	}
+	m, err := proto.PageGetLayoutMetrics{}.Call(d.page)
+	if err != nil || m.CSSLayoutViewport == nil ||
+		m.CSSLayoutViewport.ClientWidth <= 0 || m.CSSLayoutViewport.ClientHeight <= 0 {
+		return d.viewportW, d.viewportH
+	}
+	return m.CSSLayoutViewport.ClientWidth, m.CSSLayoutViewport.ClientHeight
+}
+
 // GetState returns the current browser state.
 func (d *Driver) GetState() *core.StateSnapshot {
+	w, h := d.viewport()
 	orientation := "portrait"
-	if d.viewportW > d.viewportH {
+	if w > h {
 		orientation = "landscape"
 	}
 	return &core.StateSnapshot{
@@ -668,12 +700,13 @@ func (d *Driver) GetState() *core.StateSnapshot {
 
 // GetPlatformInfo returns platform information.
 func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
+	w, h := d.viewport()
 	return &core.PlatformInfo{
 		Platform:     "web",
 		DeviceName:   "Chrome",
 		IsSimulator:  true,
-		ScreenWidth:  d.viewportW,
-		ScreenHeight: d.viewportH,
+		ScreenWidth:  w,
+		ScreenHeight: h,
 	}
 }
 

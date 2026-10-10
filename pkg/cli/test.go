@@ -146,6 +146,11 @@ Examples:
 			Usage:   "Browser viewport as WxH, e.g. 390x844 (web only, default 1280x800). Lets one suite run against phone, tablet and desktop breakpoints.",
 			EnvVars: []string{"MAESTRO_WINDOW_SIZE"},
 		},
+		&cli.BoolFlag{
+			Name:    "follow-window",
+			Usage:   "Size the browser window to --window-size and let the page follow it when the window is resized, instead of pinning an emulated viewport (web only)",
+			EnvVars: []string{"MAESTRO_FOLLOW_WINDOW"},
+		},
 
 		// Driver settings
 		&cli.IntFlag{
@@ -511,11 +516,12 @@ type RunConfig struct {
 	Parallel int // Number of devices to use (0 = single device mode)
 
 	// Execution
-	Continuous  bool
-	Headed      bool   // Show browser window (web only, default is headless)
-	Browser     string // chrome, chromium, or path to binary (web only)
-	UserDataDir string // Persistent Chrome profile directory (web only)
-	WindowSize  string // Browser viewport as WxH (web only, empty = 1280x800)
+	Continuous   bool
+	Headed       bool   // Show browser window (web only, default is headless)
+	Browser      string // chrome, chromium, or path to binary (web only)
+	UserDataDir  string // Persistent Chrome profile directory (web only)
+	WindowSize   string // Browser viewport as WxH (web only, empty = 1280x800)
+	FollowWindow bool   // Page follows the real window size instead of an emulated viewport (web only)
 
 	// Device
 	Platform string
@@ -757,6 +763,7 @@ func runTest(c *cli.Context) error {
 		Browser:            getString("browser"),
 		UserDataDir:        getString("user-data-dir"),
 		WindowSize:         getString("window-size"),
+		FollowWindow:       getBool("follow-window"),
 		Platform:           getString("platform"),
 		Devices:            parseDevices(getString("device")),
 		Verbose:            getBool("verbose"),
