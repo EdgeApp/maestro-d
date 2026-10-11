@@ -37,6 +37,12 @@ type Config struct {
 	UserDataDir string // Persistent profile directory (empty = ephemeral profile)
 	ViewportW   int
 	ViewportH   int
+
+	// FollowWindow sizes the browser window to ViewportW x ViewportH instead
+	// of emulating a fixed viewport, so the page lays out to whatever size the
+	// window has and relays out when someone resizes it. Meant for headed
+	// runs; a headless browser has no window for anyone to resize.
+	FollowWindow bool
 }
 
 // Driver implements core.Driver for desktop browser testing using Rod + CDP.
@@ -111,6 +117,9 @@ func New(cfg Config) (*Driver, error) {
 	if os.Getenv("CI") != "" || os.Getenv("MAESTRO_NO_SANDBOX") != "" {
 		l = l.Set("no-sandbox")
 	}
+	if cfg.FollowWindow {
+		l = l.Set("window-size", fmt.Sprintf("%d,%d", cfg.ViewportW, cfg.ViewportH))
+	}
 	if cfg.UserDataDir != "" {
 		// Persistent profile: cookies / localStorage / extensions survive
 		// across runs. Caller is responsible for the directory's lifecycle.
@@ -148,13 +157,15 @@ func New(cfg Config) (*Driver, error) {
 		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 
-	// Set viewport
-	err = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:  cfg.ViewportW,
-		Height: cfg.ViewportH,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to set viewport: %w", err)
+	// Set viewport, unless the page is to follow the window
+	if !cfg.FollowWindow {
+		err = page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:  cfg.ViewportW,
+			Height: cfg.ViewportH,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to set viewport: %w", err)
+		}
 	}
 
 	// Inject JS helper (persists across navigations)
@@ -657,7 +668,7 @@ func (d *Driver) Hierarchy() ([]byte, error) {
 // GetState returns the current browser state.
 func (d *Driver) GetState() *core.StateSnapshot {
 	orientation := "portrait"
-	if d.viewportW > d.viewportH {
+	if w, h := d.viewportSize(); w > h {
 		orientation = "landscape"
 	}
 	return &core.StateSnapshot{
@@ -668,13 +679,28 @@ func (d *Driver) GetState() *core.StateSnapshot {
 
 // GetPlatformInfo returns platform information.
 func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
+	w, h := d.viewportSize()
 	return &core.PlatformInfo{
 		Platform:     "web",
 		DeviceName:   "Chrome",
 		IsSimulator:  true,
-		ScreenWidth:  d.viewportW,
-		ScreenHeight: d.viewportH,
+		ScreenWidth:  w,
+		ScreenHeight: h,
 	}
+}
+
+// viewportSize returns the page's viewport in CSS pixels. Under
+// FollowWindow the window can be resized at any time, so it is read from the
+// page; otherwise it is the emulated size the driver set.
+func (d *Driver) viewportSize() (int, int) {
+	if d.config.FollowWindow && d.page != nil {
+		if v, err := d.page.Eval(`() => [window.innerWidth, window.innerHeight]`); err == nil {
+			if a := v.Value.Arr(); len(a) == 2 && a[0].Int() > 0 && a[1].Int() > 0 {
+				d.viewportW, d.viewportH = a[0].Int(), a[1].Int()
+			}
+		}
+	}
+	return d.viewportW, d.viewportH
 }
 
 // SetFindTimeout sets the default timeout for finding elements.

@@ -46,6 +46,9 @@ func buildWebDriverConfig(cfg *RunConfig) cdpdriver.Config {
 		UserDataDir: cfg.UserDataDir,
 		ViewportW:   w,
 		ViewportH:   h,
+		// A headed browser is one someone can resize, so its page follows
+		// the window; --window-size then sizes the window itself.
+		FollowWindow: cfg.Headed,
 	}
 }
 
