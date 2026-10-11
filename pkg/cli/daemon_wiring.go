@@ -85,6 +85,11 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 		OutputDir:          cfg.OutputDir,
 		ShutdownAfter:      false,
 	}
+	// The web driver's start URL travels as the appId, which is how a flow
+	// header names it; attach takes it as --url.
+	if rc.AppID == "" && cfg.URL != "" {
+		rc.AppID = cfg.URL
+	}
 	if rc.AppiumURL == "" {
 		rc.AppiumURL = "http://127.0.0.1:4723"
 	}
