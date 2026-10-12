@@ -50,7 +50,26 @@ type Driver struct {
 	appDeathCount    int
 	appDeathFirstAt  time.Time
 	crashAbortReason string
+
+	// Last viewport read from WDA's /window/size; see orientedSize.
+	viewport viewportCache
 }
+
+// viewportCache holds the app's viewport in interface-orientation points, as
+// last measured from WDA, with the session and time it was measured in.
+type viewportCache struct {
+	mu      sync.Mutex
+	width   int
+	height  int
+	session string
+	at      time.Time
+}
+
+// viewportCacheTTL is how long a measured viewport is reused before WDA is
+// asked again. Short enough that a rotation the flow did not cause (the app
+// locking itself to landscape, a user turning the device) is seen within one
+// polling round; long enough that a find loop does not double its requests.
+const viewportCacheTTL = 500 * time.Millisecond
 
 // Crash-loop detection thresholds.
 const (
@@ -133,12 +152,58 @@ func (d *Driver) EnsureSession(appID string) error {
 	return nil
 }
 
-// screenSize returns cached screen dimensions from PlatformInfo.
+// screenSize returns the app's viewport in the coordinates WDA uses for
+// element frames and taps: the interface orientation's, so width and height
+// swap while the app is in landscape. It is read live (see orientedSize);
+// when WDA cannot answer, the size last stored in PlatformInfo is used.
 func (d *Driver) screenSize() (int, int, error) {
+	if w, h, ok := d.orientedSize(); ok {
+		return w, h, nil
+	}
 	if d.info != nil && d.info.ScreenWidth > 0 && d.info.ScreenHeight > 0 {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
 	return 0, 0, fmt.Errorf("screen dimensions not available")
+}
+
+// orientedSize reads the viewport from WDA's /window/size, which follows the
+// app's interface orientation, and caches it for viewportCacheTTL within one
+// session. A fresh reading is written back to PlatformInfo so code that only
+// sees PlatformInfo (the Flutter wrapper) gets the current shape too. It
+// reports false when WDA does not give a usable size.
+func (d *Driver) orientedSize() (int, int, bool) {
+	if d.client == nil || d.client.httpClient == nil {
+		return 0, 0, false
+	}
+	d.viewport.mu.Lock()
+	defer d.viewport.mu.Unlock()
+
+	session := d.client.SessionID()
+	if d.viewport.width > 0 && d.viewport.session == session &&
+		time.Since(d.viewport.at) < viewportCacheTTL {
+		return d.viewport.width, d.viewport.height, true
+	}
+
+	w, h, err := d.client.WindowSize()
+	if err != nil || w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	d.viewport.width, d.viewport.height = w, h
+	d.viewport.session = session
+	d.viewport.at = time.Now()
+	if d.info != nil {
+		d.info.ScreenWidth, d.info.ScreenHeight = w, h
+	}
+	return w, h, true
+}
+
+// invalidateViewport drops the cached viewport, so the next screenSize asks
+// WDA. Called after anything that can rotate the interface: setOrientation,
+// and launchApp (a newly launched app may support only landscape).
+func (d *Driver) invalidateViewport() {
+	d.viewport.mu.Lock()
+	d.viewport.width, d.viewport.height = 0, 0
+	d.viewport.mu.Unlock()
 }
 
 // SetContext sets the parent context for element-finding operations.

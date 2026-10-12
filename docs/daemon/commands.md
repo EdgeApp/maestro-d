@@ -1763,7 +1763,7 @@ await m.setOrientation({ orientation: '<orientation>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `orientation` | `string` | PORTRAIT, LANDSCAPE |
+| `orientation` | `string` | PORTRAIT, LANDSCAPE, LANDSCAPE_LEFT, LANDSCAPE_RIGHT or UPSIDE_DOWN |
 
 ## `setPermissions`
 

@@ -102,3 +102,56 @@ func CropScreenshot(data []byte, bounds Bounds, screenW, screenH int) ([]byte, e
 	}
 	return out.Bytes(), nil
 }
+
+// RotateScreenshot turns a PNG or JPEG screenshot clockwise by degrees, which
+// must be 0, 90, 180 or 270, and re-encodes it in its input format. 0 returns
+// data unchanged.
+//
+// Used by drivers whose screenshot is the device's portrait framebuffer, to
+// turn a crop of it back to the app's interface orientation.
+func RotateScreenshot(data []byte, degrees int) ([]byte, error) {
+	if degrees == 0 {
+		return data, nil
+	}
+	if degrees != 90 && degrees != 180 && degrees != 270 {
+		return nil, fmt.Errorf("rotate screenshot: unsupported rotation %d", degrees)
+	}
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode screenshot: %w", err)
+	}
+	in := img.Bounds()
+	w, h := in.Dx(), in.Dy()
+	outW, outH := h, w
+	if degrees == 180 {
+		outW, outH = w, h
+	}
+	out := image.NewRGBA(image.Rect(0, 0, outW, outH))
+	for y := 0; y < outH; y++ {
+		for x := 0; x < outW; x++ {
+			var sx, sy int
+			switch degrees {
+			case 90:
+				sx, sy = y, h-1-x
+			case 180:
+				sx, sy = w-1-x, h-1-y
+			case 270:
+				sx, sy = w-1-y, x
+			}
+			out.Set(x, y, img.At(in.Min.X+sx, in.Min.Y+sy))
+		}
+	}
+
+	var buf bytes.Buffer
+	switch format {
+	case "jpeg":
+		if err := jpeg.Encode(&buf, out, &jpeg.Options{Quality: 90}); err != nil {
+			return nil, fmt.Errorf("encode rotated jpeg: %w", err)
+		}
+	default:
+		if err := png.Encode(&buf, out); err != nil {
+			return nil, fmt.Errorf("encode rotated png: %w", err)
+		}
+	}
+	return buf.Bytes(), nil
+}
