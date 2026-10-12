@@ -1161,7 +1161,7 @@ export interface SetOrientationParams {
   timeout?: number
   /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
   platform?: string
-  /** PORTRAIT, LANDSCAPE */
+  /** PORTRAIT, LANDSCAPE, LANDSCAPE_LEFT, LANDSCAPE_RIGHT or UPSIDE_DOWN */
   orientation?: string
 }
 

@@ -2779,9 +2779,21 @@ func TestTapOnPointDirectPixelCoordinates(t *testing.T) {
 // tapOnPointWithCoords additional tests
 // =============================================================================
 
-// TestTapOnPointPercentageScreenSizeNotAvailable tests tapOnPointWithCoords when screen size not cached.
+// TestTapOnPointPercentageWindowSizeFails tests tapOnPointWithCoords when WDA
+// cannot report the window size and none was stored at attach.
 func TestTapOnPointPercentageWindowSizeFails(t *testing.T) {
-	client := &Client{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/window/size") {
+			jsonResponse(w, map[string]interface{}{
+				"value": map[string]interface{}{"error": "unknown error", "message": "no window"},
+			})
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		jsonResponse(w, map[string]interface{}{"status": 0})
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, httpClient: http.DefaultClient, sessionID: "test-session"}
 	// No screen size in PlatformInfo
 	driver := NewDriver(client, &core.PlatformInfo{Platform: "ios"}, "")
 
@@ -5172,5 +5184,48 @@ func TestInputTextFallsBackWhenElementRejectsSendKeys(t *testing.T) {
 	}
 	if !sentKeys {
 		t.Error("expected the text to be typed via the keyboard path")
+	}
+}
+
+// TestLaunchAppStopAppRelaunches checks stopApp: true terminates a running
+// app before launching it: WDA's launch only activates a running app, so
+// without the terminate the process would survive.
+func TestLaunchAppStopAppRelaunches(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name          string
+		stopApp       *bool
+		wantTerminate bool
+	}{
+		{"stopApp true", &yes, true},
+		{"stopApp false", &no, false},
+		{"stopApp absent", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.Contains(r.URL.Path, "/wda/apps/terminate"):
+					calls = append(calls, "terminate")
+				case strings.Contains(r.URL.Path, "/wda/apps/launch"):
+					calls = append(calls, "launch")
+				}
+				jsonResponse(w, map[string]interface{}{"status": 0})
+			}))
+			defer server.Close()
+			driver := createTestDriver(server)
+
+			result := driver.launchApp(&flow.LaunchAppStep{AppID: "com.test.app", StopApp: tc.stopApp})
+			if !result.Success {
+				t.Fatalf("Expected success, got: %s", result.Message)
+			}
+			want := []string{"launch"}
+			if tc.wantTerminate {
+				want = []string{"terminate", "launch"}
+			}
+			if strings.Join(calls, ",") != strings.Join(want, ",") {
+				t.Errorf("WDA calls %v, want %v", calls, want)
+			}
+		})
 	}
 }

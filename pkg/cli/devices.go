@@ -162,7 +162,7 @@ func physicalIOSEntries() []DeviceEntry {
 		// locked or untrusted phone. That is worth reporting rather than
 		// hiding: the UDID alone is enough to run, but "trust this computer"
 		// is the most common reason a connected phone won't work.
-		if info, infoErr := getPhysicalDeviceInfo(udid); infoErr == nil {
+		if info, infoErr := getPhysicalDeviceInfo(udid, nil); infoErr == nil {
 			entry.Name = info.Name
 			entry.OSVersion = info.OSVersion
 		} else {

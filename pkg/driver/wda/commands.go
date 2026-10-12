@@ -1,8 +1,12 @@
 package wda
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	_ "image/jpeg" // screenshot formats screenshotCropSpace reads
+	_ "image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -900,6 +904,9 @@ func iosKeyboardKey(name string) string {
 // App lifecycle
 
 func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
+	// The launched app may come up in another interface orientation.
+	defer d.invalidateViewport()
+
 	bundleID := step.AppID
 	if bundleID == "" {
 		return errorResult(fmt.Errorf("bundleID required"), "Bundle ID is required for launchApp")
@@ -1062,6 +1069,9 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 	}
 
 	hasArgs := len(launchArgs) > 0 || len(launchEnv) > 0
+	// stopApp: true asks for a fresh process. WDA's launch only activates
+	// an app that is already running, so it must be terminated first.
+	stopFirst := step.StopApp != nil && *step.StopApp
 
 	// If no session exists, create one (which also launches the app)
 	newSession := false
@@ -1092,9 +1102,9 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 		return successResult(fmt.Sprintf("Launched app: %s", bundleID), nil)
 	}
 
-	// Terminate the app first so WDA calls launch (not activate),
-	// which is required for arguments/environment to take effect
-	if hasArgs {
+	// Terminate the app first so WDA calls launch (not activate), which
+	// arguments/environment and stopApp need to take effect.
+	if hasArgs || stopFirst {
 		_ = d.client.TerminateApp(bundleID)
 	}
 
@@ -1370,19 +1380,34 @@ func (d *Driver) setClipboard(step *flow.SetClipboardStep) *core.CommandResult {
 // Device control
 
 func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResult {
-	orientation := step.Orientation
-	switch orientation {
-	case "portrait":
-		orientation = "PORTRAIT"
-	case "landscape":
-		orientation = "LANDSCAPE"
-	}
+	// Whatever WDA answers, the interface may have started to turn.
+	defer d.invalidateViewport()
 
-	if err := d.client.SetOrientation(orientation); err != nil {
+	if err := d.client.SetOrientation(wdaOrientation(step.Orientation)); err != nil {
 		return errorResult(err, "Set orientation failed")
 	}
 
 	return successResult(fmt.Sprintf("Set orientation to %s", step.Orientation), nil)
+}
+
+// wdaOrientations maps maestro's orientation names to the keys the bundled
+// WebDriverAgent accepts on POST /orientation (FBOrientationCommands.m). WDA's
+// LANDSCAPE is UIDeviceOrientationLandscapeLeft.
+var wdaOrientations = map[string]string{
+	"PORTRAIT":        "PORTRAIT",
+	"LANDSCAPE":       "LANDSCAPE",
+	"LANDSCAPE_LEFT":  "LANDSCAPE",
+	"LANDSCAPE_RIGHT": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT",
+	"UPSIDE_DOWN":     "UIA_DEVICE_ORIENTATION_PORTRAIT_UPSIDEDOWN",
+}
+
+// wdaOrientation returns WDA's key for a maestro orientation name, in any
+// case. A name it does not know (one of WDA's own keys, say) passes through.
+func wdaOrientation(name string) string {
+	if key, ok := wdaOrientations[strings.ToUpper(name)]; ok {
+		return key
+	}
+	return name
 }
 
 // setLocation sets the device's simulated GPS location.
@@ -1593,7 +1618,10 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 		if dimErr != nil {
 			return errorResult(dimErr, "cropOn requires screen dimensions")
 		}
-		cropped, cropErr := core.CropScreenshot(data, info.Bounds, sw, sh)
+		bounds, sw, sh, turn := d.screenshotCropSpace(data, info.Bounds, sw, sh)
+		// The crop is cut from the portrait framebuffer and turned back so it
+		// looks the way the element does on screen.
+		cropped, cropErr := core.CropRotatedScreenshot(data, bounds, sw, sh, turn)
 		if cropErr != nil {
 			return errorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
 		}
@@ -1605,6 +1633,84 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 		Message: "Screenshot captured",
 		Data:    data,
 	}
+}
+
+// screenshotCropSpace converts an element's bounds, in interface-orientation
+// points on a viewW×viewH viewport, into the space of the screenshot WDA
+// took: it returns the bounds, the screen size CropScreenshot scales
+// against, and the clockwise turn (0, 90, 180 or 270) that brings the crop
+// back to the interface orientation. WDA's screenshot is the raw portrait
+// framebuffer, so when the app is rotated the bounds are rotated to match, by
+// the rotation GET /rotation reports. When the screenshot cannot be read or
+// the rotation is unknown the bounds are returned unchanged, with no turn.
+func (d *Driver) screenshotCropSpace(data []byte, b core.Bounds, viewW, viewH int) (core.Bounds, int, int, int) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Height <= cfg.Width {
+		return b, viewW, viewH, 0
+	}
+	rotation, err := d.client.GetRotation()
+	if err != nil {
+		return b, viewW, viewH, 0
+	}
+	pb, pw, ph := portraitCropBounds(b, rotation, viewW, viewH)
+	return pb, pw, ph, framebufferTurn(rotation, viewW, viewH)
+}
+
+// framebufferTurn is how far the interface on a viewW×viewH viewport is
+// turned clockwise from the portrait framebuffer, for WDA's GET /rotation z:
+// 90 and 270 count only on a landscape viewport, 180 only on a portrait one,
+// and anything else is 0. portraitCropBounds maps bounds for exactly these
+// turns, and a crop of the framebuffer turned clockwise by this many degrees
+// is upright again.
+func framebufferTurn(rotation, viewW, viewH int) int {
+	landscape := viewW > viewH
+	switch {
+	case (rotation == 90 || rotation == 270) && landscape:
+		return rotation
+	case rotation == 180 && !landscape:
+		return 180
+	}
+	return 0
+}
+
+// portraitCropBounds maps bounds on a viewW×viewH interface viewport turned
+// by rotation degrees (WDA's GET /rotation z) into the device's portrait
+// framebuffer, returning the mapped bounds and the portrait screen size.
+//
+//   - 90: interface landscape-left (the top of the device on the right).
+//     Interface x runs up the portrait screen, interface y left to right.
+//   - 270: interface landscape-right (the top of the device on the left).
+//     Interface x runs down the portrait screen, interface y right to left.
+//   - 180: portrait upside down; both axes reverse.
+//
+// The 90 and 270 maps apply only to a landscape viewport, the 180 map only to
+// a portrait one; any other combination already matches the framebuffer.
+func portraitCropBounds(b core.Bounds, rotation, viewW, viewH int) (core.Bounds, int, int) {
+	switch framebufferTurn(rotation, viewW, viewH) {
+	case 90:
+		// Portrait size is viewH wide, viewW tall.
+		return core.Bounds{
+			X:      b.Y,
+			Y:      viewW - (b.X + b.Width),
+			Width:  b.Height,
+			Height: b.Width,
+		}, viewH, viewW
+	case 270:
+		return core.Bounds{
+			X:      viewH - (b.Y + b.Height),
+			Y:      b.X,
+			Width:  b.Height,
+			Height: b.Width,
+		}, viewH, viewW
+	case 180:
+		return core.Bounds{
+			X:      viewW - (b.X + b.Width),
+			Y:      viewH - (b.Y + b.Height),
+			Width:  b.Width,
+			Height: b.Height,
+		}, viewW, viewH
+	}
+	return b, viewW, viewH
 }
 
 // Helper functions
