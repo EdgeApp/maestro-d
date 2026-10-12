@@ -778,7 +778,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "orientation", Type: "string", Doc: "PORTRAIT, LANDSCAPE"},
+		{Key: "orientation", Type: "string", Doc: "PORTRAIT, LANDSCAPE, LANDSCAPE_LEFT, LANDSCAPE_RIGHT or UPSIDE_DOWN"},
 	}},
 	"setPermissions": {Name: "setPermissions", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets app permissions. Permission values: \"allow\", \"deny\", \"unset\" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

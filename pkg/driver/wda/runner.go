@@ -15,7 +15,6 @@ import (
 	"time"
 
 	goios "github.com/danielpaulus/go-ios/ios"
-	"github.com/danielpaulus/go-ios/ios/forward"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -66,6 +65,8 @@ type Runner struct {
 	logFile             *os.File
 	portForwardListener io.Closer // Port forwarding for physical devices (go-ios)
 	isSimulatorCache    bool      // Cached device type
+	baseURL             string    // Where WDA answers; "" means localhost:port
+	reach               *reachDeps
 }
 
 // NewRunner creates a new WDA runner.
@@ -83,6 +84,16 @@ func NewRunner(deviceUDID, teamID, wdaBundleID string) *Runner {
 // Port returns the WDA port allocated for this runner's device.
 func (r *Runner) Port() uint16 {
 	return r.port
+}
+
+// BaseURL returns the address the WDA client should use: localhost:port
+// for a simulator or a usbmuxd-forwarded device, else the address Start
+// reached WDA at.
+func (r *Runner) BaseURL() string {
+	if r.baseURL != "" {
+		return r.baseURL
+	}
+	return fmt.Sprintf("http://localhost:%d", r.port)
 }
 
 // PortFromUDID derives a deterministic port from a device UDID.
@@ -242,7 +253,7 @@ func (r *Runner) Start(ctx context.Context) error {
 			}
 			// For physical devices, forward the WDA port from device to localhost.
 			if !r.isSimulatorCache {
-				if pferr := r.startPortForward(); pferr != nil {
+				if pferr := r.startPortForward(logPath); pferr != nil {
 					r.Stop()
 					return fmt.Errorf("failed to start port forwarding: %w", pferr)
 				}
@@ -322,22 +333,24 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 	return nil
 }
 
-// startPortForward uses go-ios to forward the WDA port from a physical device to localhost.
-func (r *Runner) startPortForward() error {
-	entry, err := goios.GetDevice(r.deviceUDID)
-	if err != nil {
-		return fmt.Errorf("device %s not found: %w", r.deviceUDID, err)
+// startPortForward makes WDA on a physical device reachable from the host:
+// through usbmuxd when it lists the device, otherwise through CoreDevice or
+// the address WDA printed in logPath. It records the address in baseURL.
+func (r *Runner) startPortForward(logPath string) error {
+	content, _ := os.ReadFile(logPath)
+	deps := r.reach
+	if deps == nil {
+		d := defaultReachDeps()
+		deps = &d
 	}
-
-	listener, err := forward.Forward(entry, r.port, r.port)
+	ep, err := reachWDA(r.deviceUDID, r.port, reportedServerURL(string(content)), *deps)
 	if err != nil {
-		return fmt.Errorf("port forward %d->%d failed: %w", r.port, r.port, err)
+		return err
 	}
-	r.portForwardListener = listener
-
-	// Give the forward a moment to establish
-	time.Sleep(500 * time.Millisecond)
-
+	if ep.closer != nil {
+		r.portForwardListener = ep.closer
+	}
+	r.baseURL = ep.baseURL
 	return nil
 }
 
