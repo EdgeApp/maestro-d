@@ -570,7 +570,7 @@ type SetLocationStep struct {
 // SetOrientationStep sets device orientation.
 type SetOrientationStep struct {
 	BaseStep    `yaml:",inline"`
-	Orientation string `yaml:"orientation"` // PORTRAIT, LANDSCAPE
+	Orientation string `yaml:"orientation"` // PORTRAIT, LANDSCAPE, LANDSCAPE_LEFT, LANDSCAPE_RIGHT or UPSIDE_DOWN
 }
 
 // SetAirplaneModeStep sets airplane mode.

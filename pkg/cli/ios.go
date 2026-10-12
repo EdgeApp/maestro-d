@@ -129,7 +129,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 
 	// 5. Create WDA client
 	printSetupSuccess(fmt.Sprintf("WDA port: %d", runner.Port()))
-	client := wdadriver.NewClient(runner.Port())
+	client := wdadriver.NewClientURL(runner.BaseURL())
 
 	// 6. Get device info
 	deviceInfo, err := getIOSDeviceInfo(udid)
@@ -338,7 +338,18 @@ func isIOSSimulator(udid string) bool {
 func getPhysicalDeviceInfo(udid string) (*iosDeviceInfo, error) {
 	entry, err := goios.GetDevice(udid)
 	if err != nil {
-		return nil, fmt.Errorf("device %s not found: %w (is the device connected and trusted?)", udid, err)
+		// usbmuxd does not list every paired device (an iPad on a USB-C
+		// network link is reachable only through CoreDevice), so ask
+		// devicectl before giving up.
+		dev, derr := devicectlDeviceInfo(udid)
+		if derr != nil {
+			return nil, fmt.Errorf("device %s not found: %w (is the device connected and trusted?)", udid, err)
+		}
+		name := dev.Name
+		if name == "" {
+			name = "iOS Device"
+		}
+		return &iosDeviceInfo{Name: name, OSVersion: dev.OSVersion, IsSimulator: false}, nil
 	}
 
 	values, err := goios.GetValues(entry)
@@ -360,6 +371,9 @@ func getPhysicalDeviceInfo(udid string) (*iosDeviceInfo, error) {
 		IsSimulator: false,
 	}, nil
 }
+
+// devicectlDeviceInfo is wdadriver.DevicectlDeviceInfo, swappable in tests.
+var devicectlDeviceInfo = wdadriver.DevicectlDeviceInfo
 
 // getIOSDeviceInfo gets information about an iOS device (simulator or physical).
 func getIOSDeviceInfo(udid string) (*iosDeviceInfo, error) {
