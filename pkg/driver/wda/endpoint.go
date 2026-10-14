@@ -9,6 +9,7 @@ package wda
 // printed when it started, and logs the path it used.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -275,6 +276,11 @@ type DevicectlDevice struct {
 	TunnelIP string
 }
 
+// devicectlInfoTimeout bounds one `devicectl device info details` call.
+// devicectl hangs on a locked device or one still pairing, and attach would
+// freeze with it.
+var devicectlInfoTimeout = 10 * time.Second
+
 // DevicectlDeviceInfo reads udid's details from devicectl. It works for
 // devices usbmuxd does not list.
 func DevicectlDeviceInfo(udid string) (DevicectlDevice, error) {
@@ -286,8 +292,17 @@ func DevicectlDeviceInfo(udid string) (DevicectlDevice, error) {
 	_ = f.Close()
 	defer func() { _ = os.Remove(path) }()
 
-	out, err := exec.Command("xcrun", "devicectl", "device", "info", "details",
-		"--device", udid, "--json-output", path, "-q").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), devicectlInfoTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "info", "details",
+		"--device", udid, "--json-output", path, "-q")
+	// A child that outlives xcrun and holds its output open must not keep
+	// CombinedOutput waiting past the timeout.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return DevicectlDevice{}, fmt.Errorf("devicectl device info details timed out after %v", devicectlInfoTimeout)
+	}
 	if err != nil {
 		return DevicectlDevice{}, fmt.Errorf("devicectl device info details: %w: %s", err, strings.TrimSpace(string(out)))
 	}

@@ -428,6 +428,42 @@ func TestDevicectlDeviceInfoFails(t *testing.T) {
 	}
 }
 
+func TestDevicectlDeviceInfoTimesOut(t *testing.T) {
+	// devicectl hangs on a locked device or one still pairing; the query
+	// must give up instead of freezing attach.
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "xcrun"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := devicectlInfoTimeout
+	devicectlInfoTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { devicectlInfoTimeout = old })
+
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		_, err := DevicectlDeviceInfo(testUDID)
+		done <- result{err, time.Since(start)}
+	}()
+	select {
+	case r := <-done:
+		if r.err == nil || !strings.Contains(r.err.Error(), "timed out") {
+			t.Errorf("got %v, want a timeout error", r.err)
+		}
+		if r.elapsed > 5*time.Second {
+			t.Errorf("took %v", r.elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DevicectlDeviceInfo still running after 10 s")
+	}
+}
+
 func TestCoreDeviceIPWithoutTunnel(t *testing.T) {
 	fakeXcrun(t, devicectlDisconnected)
 	if _, err := coreDeviceIP(testUDID); err == nil || !strings.Contains(err.Error(), "no connected tunnel") {
