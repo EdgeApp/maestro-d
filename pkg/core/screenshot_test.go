@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"testing"
 )
@@ -132,5 +133,73 @@ func TestCropScreenshot_SizeStableAcrossSubPixelShift(t *testing.T) {
 			t.Errorf("crop size drifted as the element moved sub-pixel: %v", sizes)
 			break
 		}
+	}
+}
+
+func TestRotateScreenshot(t *testing.T) {
+	// A 4×3 gradient: pixel (x,y) carries R=x, G=y, so every rotated pixel
+	// names the source pixel it came from.
+	src := encodeGradientPNG(t, 4, 3)
+	cases := []struct {
+		degrees      int
+		wantW, wantH int
+		// source of output pixel (x,y), on the 4×3 input
+		from func(x, y int) (int, int)
+	}{
+		{90, 3, 4, func(x, y int) (int, int) { return y, 2 - x }},
+		{180, 4, 3, func(x, y int) (int, int) { return 3 - x, 2 - y }},
+		{270, 3, 4, func(x, y int) (int, int) { return 3 - y, x }},
+	}
+	for _, c := range cases {
+		out, err := RotateScreenshot(src, c.degrees)
+		if err != nil {
+			t.Fatalf("%d: %v", c.degrees, err)
+		}
+		img, err := png.Decode(bytes.NewReader(out))
+		if err != nil {
+			t.Fatalf("%d: decode: %v", c.degrees, err)
+		}
+		if b := img.Bounds(); b.Dx() != c.wantW || b.Dy() != c.wantH {
+			t.Fatalf("%d: got %dx%d, want %dx%d", c.degrees, b.Dx(), b.Dy(), c.wantW, c.wantH)
+		}
+		for y := 0; y < c.wantH; y++ {
+			for x := 0; x < c.wantW; x++ {
+				r, g, _, _ := img.At(x, y).RGBA()
+				sx, sy := c.from(x, y)
+				if int(r>>8) != sx || int(g>>8) != sy {
+					t.Errorf("%d: pixel (%d,%d) came from (%d,%d), want (%d,%d)", c.degrees, x, y, r>>8, g>>8, sx, sy)
+				}
+			}
+		}
+	}
+
+	// 0 is the input itself.
+	if out, err := RotateScreenshot(src, 0); err != nil || !bytes.Equal(out, src) {
+		t.Errorf("0: changed the data (err %v)", err)
+	}
+}
+
+func TestRotateScreenshot_KeepsJPEG(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RotateScreenshot(buf.Bytes(), 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(out))
+	if err != nil || format != "jpeg" || cfg.Width != 4 || cfg.Height != 8 {
+		t.Errorf("got %s %dx%d, %v; want jpeg 4x8", format, cfg.Width, cfg.Height, err)
+	}
+}
+
+func TestRotateScreenshot_Rejects(t *testing.T) {
+	if _, err := RotateScreenshot(encodeGradientPNG(t, 2, 2), 45); err == nil {
+		t.Error("45 degrees: want an error")
+	}
+	if _, err := RotateScreenshot([]byte("not an image"), 90); err == nil {
+		t.Error("undecodable: want an error")
 	}
 }

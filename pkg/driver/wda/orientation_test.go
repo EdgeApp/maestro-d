@@ -399,6 +399,15 @@ func TestPortraitCropBounds(t *testing.T) {
 		if got != c.want || w != c.wantW || h != c.wantH {
 			t.Errorf("%s: got %+v on %dx%d, want %+v on %dx%d", c.name, got, w, h, c.want, c.wantW, c.wantH)
 		}
+		// A mapped element turns back by the rotation; an unmapped one not
+		// at all.
+		wantTurn := 0
+		if got != c.el {
+			wantTurn = c.rotation
+		}
+		if turn := framebufferTurn(c.rotation, c.viewW, c.viewH); turn != wantTurn {
+			t.Errorf("%s: turn %d, want %d", c.name, turn, wantTurn)
+		}
 	}
 }
 
@@ -422,22 +431,51 @@ func portraitPNG(t *testing.T, w, h int, r image.Rectangle) []byte {
 	return buf.Bytes()
 }
 
+// splitPNG is a white w×h PNG with red painted red and blue painted blue.
+func splitPNG(t *testing.T, w, h int, red, blue image.Rectangle) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			p := image.Point{X: x, Y: y}
+			c := color.RGBA{255, 255, 255, 255}
+			switch {
+			case p.In(red):
+				c = color.RGBA{255, 0, 0, 255}
+			case p.In(blue):
+				c = color.RGBA{0, 0, 255, 255}
+			}
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func TestTakeScreenshotCropOnInLandscape(t *testing.T) {
-	// The element sits at (600,100 100×40) in landscape points. In the
-	// portrait framebuffer it is the 40×100 block each rotation maps it to.
+	// The element sits at (600,100 100×40) in landscape points: its left half
+	// red, its right half blue. In the portrait framebuffer it is the 40×100
+	// block each rotation maps it to, with the halves along the long side.
+	// The crop comes back as the element looks on screen: 100×40, red on the
+	// left.
 	cases := []struct {
-		rotation float64
-		block    image.Rectangle
+		rotation  float64
+		red, blue image.Rectangle
 	}{
-		{270, image.Rect(253, 600, 293, 700)},
-		{90, image.Rect(100, 152, 140, 252)},
+		// Interface x runs down the portrait screen.
+		{270, image.Rect(253, 600, 293, 650), image.Rect(253, 650, 293, 700)},
+		// Interface x runs up the portrait screen.
+		{90, image.Rect(100, 202, 140, 252), image.Rect(100, 152, 140, 202)},
 	}
 	for _, c := range cases {
 		f := newLandscapeWDA()
 		f.rotation = c.rotation
 		f.rect = map[string]interface{}{"x": 600.0, "y": 100.0, "width": 100.0, "height": 40.0}
 		f.displayed = true
-		f.screenshot = portraitPNG(t, 393, 852, c.block)
+		f.screenshot = splitPNG(t, 393, 852, c.red, c.blue)
 		d := startLandscapeWDA(t, f)
 
 		sel := flow.Selector{ID: "record"}
@@ -451,13 +489,16 @@ func TestTakeScreenshotCropOnInLandscape(t *testing.T) {
 			t.Fatalf("z=%v: decode crop: %v", c.rotation, err)
 		}
 		b := img.Bounds()
-		if b.Dx() != 40 || b.Dy() != 100 {
-			t.Fatalf("z=%v: crop is %dx%d, want 40x100", c.rotation, b.Dx(), b.Dy())
+		if b.Dx() != 100 || b.Dy() != 40 {
+			t.Fatalf("z=%v: crop is %dx%d, want 100x40", c.rotation, b.Dx(), b.Dy())
 		}
 		for y := b.Min.Y; y < b.Max.Y; y++ {
 			for x := b.Min.X; x < b.Max.X; x++ {
-				if r, g, _, _ := img.At(x, y).RGBA(); r>>8 != 255 || g>>8 != 0 {
-					t.Fatalf("z=%v: pixel (%d,%d) is not the element's", c.rotation, x, y)
+				r, g, bl, _ := img.At(x, y).RGBA()
+				wantRed := x-b.Min.X < 50
+				if g>>8 != 0 || (wantRed && (r>>8 != 255 || bl>>8 != 0)) || (!wantRed && (r>>8 != 0 || bl>>8 != 255)) {
+					t.Fatalf("z=%v: pixel (%d,%d) is %v, want the element's %s half", c.rotation, x, y, img.At(x, y),
+						map[bool]string{true: "red", false: "blue"}[wantRed])
 				}
 			}
 		}
@@ -471,19 +512,19 @@ func TestScreenshotCropSpaceLeavesBoundsWhenItCannotTell(t *testing.T) {
 	d := startLandscapeWDA(t, f)
 
 	// Not an image.
-	if b, w, h := d.screenshotCropSpace([]byte("not a png"), el, 852, 393); b != el || w != 852 || h != 393 {
-		t.Errorf("undecodable: got %+v %dx%d", b, w, h)
+	if b, w, h, turn := d.screenshotCropSpace([]byte("not a png"), el, 852, 393); b != el || w != 852 || h != 393 || turn != 0 {
+		t.Errorf("undecodable: got %+v %dx%d turn %d", b, w, h, turn)
 	}
 	// A landscape-shaped screenshot already matches the viewport.
 	wide := portraitPNG(t, 852, 393, image.Rectangle{})
-	if b, w, h := d.screenshotCropSpace(wide, el, 852, 393); b != el || w != 852 || h != 393 {
-		t.Errorf("landscape PNG: got %+v %dx%d", b, w, h)
+	if b, w, h, turn := d.screenshotCropSpace(wide, el, 852, 393); b != el || w != 852 || h != 393 || turn != 0 {
+		t.Errorf("landscape PNG: got %+v %dx%d turn %d", b, w, h, turn)
 	}
 	// No rotation from WDA.
 	f.set(func() { f.rotation = nil })
 	tall := portraitPNG(t, 393, 852, image.Rectangle{})
-	if b, w, h := d.screenshotCropSpace(tall, el, 852, 393); b != el || w != 852 || h != 393 {
-		t.Errorf("rotation unknown: got %+v %dx%d", b, w, h)
+	if b, w, h, turn := d.screenshotCropSpace(tall, el, 852, 393); b != el || w != 852 || h != 393 || turn != 0 {
+		t.Errorf("rotation unknown: got %+v %dx%d turn %d", b, w, h, turn)
 	}
 }
 

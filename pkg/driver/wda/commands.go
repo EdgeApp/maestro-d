@@ -1618,12 +1618,18 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 		if dimErr != nil {
 			return errorResult(dimErr, "cropOn requires screen dimensions")
 		}
-		bounds, sw, sh := d.screenshotCropSpace(data, info.Bounds, sw, sh)
+		bounds, sw, sh, turn := d.screenshotCropSpace(data, info.Bounds, sw, sh)
 		cropped, cropErr := core.CropScreenshot(data, bounds, sw, sh)
 		if cropErr != nil {
 			return errorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
 		}
-		data = cropped
+		// The crop was cut from the portrait framebuffer; turn it back so it
+		// looks the way the element does on screen.
+		upright, rotErr := core.RotateScreenshot(cropped, turn)
+		if rotErr != nil {
+			return errorResult(rotErr, fmt.Sprintf("cropOn: %v", rotErr))
+		}
+		data = upright
 	}
 
 	return &core.CommandResult{
@@ -1635,21 +1641,40 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 
 // screenshotCropSpace converts an element's bounds, in interface-orientation
 // points on a viewW×viewH viewport, into the space of the screenshot WDA
-// took: it returns the bounds and the screen size CropScreenshot scales
-// against. WDA's screenshot is the raw portrait framebuffer, so when the app
-// is rotated the bounds are rotated to match, by the rotation GET /rotation
-// reports. When the screenshot cannot be read or the rotation is unknown the
-// bounds are returned unchanged.
-func (d *Driver) screenshotCropSpace(data []byte, b core.Bounds, viewW, viewH int) (core.Bounds, int, int) {
+// took: it returns the bounds, the screen size CropScreenshot scales
+// against, and the clockwise turn (0, 90, 180 or 270) that brings the crop
+// back to the interface orientation. WDA's screenshot is the raw portrait
+// framebuffer, so when the app is rotated the bounds are rotated to match, by
+// the rotation GET /rotation reports. When the screenshot cannot be read or
+// the rotation is unknown the bounds are returned unchanged, with no turn.
+func (d *Driver) screenshotCropSpace(data []byte, b core.Bounds, viewW, viewH int) (core.Bounds, int, int, int) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || cfg.Height <= cfg.Width {
-		return b, viewW, viewH
+		return b, viewW, viewH, 0
 	}
 	rotation, err := d.client.GetRotation()
 	if err != nil {
-		return b, viewW, viewH
+		return b, viewW, viewH, 0
 	}
-	return portraitCropBounds(b, rotation, viewW, viewH)
+	pb, pw, ph := portraitCropBounds(b, rotation, viewW, viewH)
+	return pb, pw, ph, framebufferTurn(rotation, viewW, viewH)
+}
+
+// framebufferTurn is how far the interface on a viewW×viewH viewport is
+// turned clockwise from the portrait framebuffer, for WDA's GET /rotation z:
+// 90 and 270 count only on a landscape viewport, 180 only on a portrait one,
+// and anything else is 0. portraitCropBounds maps bounds for exactly these
+// turns, and a crop of the framebuffer turned clockwise by this many degrees
+// is upright again.
+func framebufferTurn(rotation, viewW, viewH int) int {
+	landscape := viewW > viewH
+	switch {
+	case (rotation == 90 || rotation == 270) && landscape:
+		return rotation
+	case rotation == 180 && !landscape:
+		return 180
+	}
+	return 0
 }
 
 // portraitCropBounds maps bounds on a viewW×viewH interface viewport turned
@@ -1665,9 +1690,8 @@ func (d *Driver) screenshotCropSpace(data []byte, b core.Bounds, viewW, viewH in
 // The 90 and 270 maps apply only to a landscape viewport, the 180 map only to
 // a portrait one; any other combination already matches the framebuffer.
 func portraitCropBounds(b core.Bounds, rotation, viewW, viewH int) (core.Bounds, int, int) {
-	landscape := viewW > viewH
-	switch {
-	case rotation == 90 && landscape:
+	switch framebufferTurn(rotation, viewW, viewH) {
+	case 90:
 		// Portrait size is viewH wide, viewW tall.
 		return core.Bounds{
 			X:      b.Y,
@@ -1675,14 +1699,14 @@ func portraitCropBounds(b core.Bounds, rotation, viewW, viewH int) (core.Bounds,
 			Width:  b.Height,
 			Height: b.Width,
 		}, viewH, viewW
-	case rotation == 270 && landscape:
+	case 270:
 		return core.Bounds{
 			X:      viewH - (b.Y + b.Height),
 			Y:      b.X,
 			Width:  b.Height,
 			Height: b.Width,
 		}, viewH, viewW
-	case rotation == 180 && !landscape:
+	case 180:
 		return core.Bounds{
 			X:      viewW - (b.X + b.Width),
 			Y:      viewH - (b.Y + b.Height),
