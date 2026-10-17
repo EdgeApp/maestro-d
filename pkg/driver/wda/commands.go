@@ -1619,17 +1619,13 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 			return errorResult(dimErr, "cropOn requires screen dimensions")
 		}
 		bounds, sw, sh, turn := d.screenshotCropSpace(data, info.Bounds, sw, sh)
-		cropped, cropErr := core.CropScreenshot(data, bounds, sw, sh)
+		// The crop is cut from the portrait framebuffer and turned back so it
+		// looks the way the element does on screen.
+		cropped, cropErr := core.CropRotatedScreenshot(data, bounds, sw, sh, turn)
 		if cropErr != nil {
 			return errorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
 		}
-		// The crop was cut from the portrait framebuffer; turn it back so it
-		// looks the way the element does on screen.
-		upright, rotErr := core.RotateScreenshot(cropped, turn)
-		if rotErr != nil {
-			return errorResult(rotErr, fmt.Sprintf("cropOn: %v", rotErr))
-		}
-		data = upright
+		data = cropped
 	}
 
 	return &core.CommandResult{
