@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"math"
@@ -22,6 +23,20 @@ import (
 //
 // Used by takeScreenshot's cropOn selector (Maestro compatibility).
 func CropScreenshot(data []byte, bounds Bounds, screenW, screenH int) ([]byte, error) {
+	return CropRotatedScreenshot(data, bounds, screenW, screenH, 0)
+}
+
+// CropRotatedScreenshot crops like CropScreenshot, then turns the crop
+// clockwise by degrees, which must be 0, 90, 180 or 270, before encoding it.
+// The crop is turned in memory and encoded once, so a JPEG is compressed only
+// the once CropScreenshot would compress it.
+//
+// Used by drivers whose screenshot is the device's portrait framebuffer, to
+// turn a crop of it back to the app's interface orientation.
+func CropRotatedScreenshot(data []byte, bounds Bounds, screenW, screenH, degrees int) ([]byte, error) {
+	if degrees != 0 && degrees != 90 && degrees != 180 && degrees != 270 {
+		return nil, fmt.Errorf("rotate screenshot: unsupported rotation %d", degrees)
+	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty screenshot data")
 	}
@@ -87,6 +102,9 @@ func CropScreenshot(data []byte, bounds Bounds, screenW, screenH int) ([]byte, e
 		return nil, fmt.Errorf("decoded image type %T does not support SubImage", img)
 	}
 	cropped := subImager.SubImage(cropRect)
+	if degrees != 0 {
+		cropped = rotateImage(cropped, degrees)
+	}
 
 	var out bytes.Buffer
 	switch format {
@@ -101,4 +119,54 @@ func CropScreenshot(data []byte, bounds Bounds, screenW, screenH int) ([]byte, e
 		}
 	}
 	return out.Bytes(), nil
+}
+
+// rotateImage turns img clockwise by degrees (90, 180 or 270). RGBA and
+// NRGBA pixels are copied four bytes at a time from the source's Pix, keeping
+// its type; any other image (a decoded JPEG's YCbCr, a paletted PNG) is
+// converted to RGBA first.
+func rotateImage(img image.Image, degrees int) image.Image {
+	in := img.Bounds()
+	w, h := in.Dx(), in.Dy()
+	var pix []uint8
+	var stride int
+	nrgba := false
+	switch src := img.(type) {
+	case *image.RGBA:
+		pix, stride = src.Pix[src.PixOffset(in.Min.X, in.Min.Y):], src.Stride
+	case *image.NRGBA:
+		pix, stride, nrgba = src.Pix[src.PixOffset(in.Min.X, in.Min.Y):], src.Stride, true
+	default:
+		rgba := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(rgba, rgba.Rect, img, in.Min, draw.Src)
+		pix, stride = rgba.Pix, rgba.Stride
+	}
+
+	outW, outH := h, w
+	if degrees == 180 {
+		outW, outH = w, h
+	}
+	outStride := 4 * outW
+	out := make([]uint8, outStride*outH)
+	for y := 0; y < outH; y++ {
+		row := out[y*outStride : (y+1)*outStride]
+		for x := 0; x < outW; x++ {
+			var sx, sy int
+			switch degrees {
+			case 90:
+				sx, sy = y, h-1-x
+			case 180:
+				sx, sy = w-1-x, h-1-y
+			case 270:
+				sx, sy = w-1-y, x
+			}
+			at := sy*stride + 4*sx
+			copy(row[4*x:4*x+4], pix[at:at+4])
+		}
+	}
+	rect := image.Rect(0, 0, outW, outH)
+	if nrgba {
+		return &image.NRGBA{Pix: out, Stride: outStride, Rect: rect}
+	}
+	return &image.RGBA{Pix: out, Stride: outStride, Rect: rect}
 }

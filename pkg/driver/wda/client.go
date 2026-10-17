@@ -21,10 +21,16 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient creates a new WDA client.
+// NewClient creates a new WDA client for WDA on localhost:port.
 func NewClient(port uint16) *Client {
+	return NewClientURL(fmt.Sprintf("http://localhost:%d", port))
+}
+
+// NewClientURL creates a new WDA client for WDA at baseURL, such as the
+// address Runner.BaseURL returns.
+func NewClientURL(baseURL string) *Client {
 	return &Client{
-		baseURL: fmt.Sprintf("http://localhost:%d", port),
+		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -372,6 +378,30 @@ func (c *Client) SetOrientation(orientation string) error {
 		"orientation": orientation,
 	})
 	return err
+}
+
+// GetRotation returns how far the active app's interface is turned from
+// portrait, in degrees: 0, 90, 180 or 270 (WDA's GET /rotation z). It tells
+// the two landscapes apart, which GET /orientation reports as one.
+func (c *Client) GetRotation() (int, error) {
+	resp, err := c.get(c.sessionPath("/rotation"))
+	if err != nil {
+		return 0, err
+	}
+	value, ok := resp["value"].(map[string]interface{})
+	if !ok {
+		return 0, fmt.Errorf("invalid rotation response")
+	}
+	z, ok := value["z"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("invalid rotation response")
+	}
+	switch rotation := int(z); rotation {
+	case 0, 90, 180, 270:
+		return rotation, nil
+	default:
+		return 0, fmt.Errorf("unknown rotation %v", z)
+	}
 }
 
 // DeepLink opens a URL or deep link on the device.

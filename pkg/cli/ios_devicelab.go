@@ -86,7 +86,7 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	}
 	printSetupSuccess(fmt.Sprintf("Runner port: %d", runner.Port()))
 
-	deviceInfo, err := getIOSDeviceInfo(udid)
+	deviceInfo, err := getIOSDeviceInfo(udid, nil)
 	if err != nil {
 		_ = dliosdriver.GracefulShutdown(ctx, client, runner)
 		return nil, nil, fmt.Errorf("get device info: %w", err)
