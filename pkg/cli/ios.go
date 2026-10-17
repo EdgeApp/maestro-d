@@ -132,7 +132,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	client := wdadriver.NewClientURL(runner.BaseURL())
 
 	// 6. Get device info
-	deviceInfo, err := getIOSDeviceInfo(udid)
+	deviceInfo, err := getIOSDeviceInfo(udid, runner.Devicectl())
 	if err != nil {
 		runner.Cleanup()
 		return nil, nil, fmt.Errorf("get device info: %w", err)
@@ -334,17 +334,26 @@ func isIOSSimulator(udid string) bool {
 	return false
 }
 
-// getPhysicalDeviceInfo gets information about a physical iOS device using go-ios.
-func getPhysicalDeviceInfo(udid string) (*iosDeviceInfo, error) {
+// getPhysicalDeviceInfo gets information about a physical iOS device using
+// go-ios. known is what devicectl already said about the device (the WDA
+// runner asks it while reaching WDA), or nil to ask it here if needed.
+func getPhysicalDeviceInfo(udid string, known *wdadriver.DevicectlLookup) (*iosDeviceInfo, error) {
 	entry, err := goios.GetDevice(udid)
 	if err != nil {
 		// usbmuxd does not list every paired device (an iPad on a USB-C
 		// network link is reachable only through CoreDevice), so ask
 		// devicectl before giving up.
-		dev, derr := devicectlDeviceInfo(udid)
-		if derr != nil {
-			return nil, fmt.Errorf("device %s not found: %w (is the device connected and trusted?)", udid, err)
+		lookup := known
+		if lookup == nil {
+			dev, derr := devicectlDeviceInfo(udid)
+			lookup = &wdadriver.DevicectlLookup{Device: dev, Err: derr}
 		}
+		if lookup.Err != nil {
+			// devicectl's error says why: it times out on a locked or
+			// still-pairing device.
+			return nil, fmt.Errorf("device %s not found (is the device connected, unlocked and trusted?): usbmuxd: %w; devicectl: %w", udid, err, lookup.Err)
+		}
+		dev := lookup.Device
 		name := dev.Name
 		if name == "" {
 			name = "iOS Device"
@@ -376,7 +385,8 @@ func getPhysicalDeviceInfo(udid string) (*iosDeviceInfo, error) {
 var devicectlDeviceInfo = wdadriver.DevicectlDeviceInfo
 
 // getIOSDeviceInfo gets information about an iOS device (simulator or physical).
-func getIOSDeviceInfo(udid string) (*iosDeviceInfo, error) {
+// known is passed to getPhysicalDeviceInfo.
+func getIOSDeviceInfo(udid string, known *wdadriver.DevicectlLookup) (*iosDeviceInfo, error) {
 	if isIOSSimulator(udid) {
 		simInfo, err := getSimulatorInfo(udid)
 		if err != nil {
@@ -389,7 +399,7 @@ func getIOSDeviceInfo(udid string) (*iosDeviceInfo, error) {
 		}, nil
 	}
 
-	return getPhysicalDeviceInfo(udid)
+	return getPhysicalDeviceInfo(udid, known)
 }
 
 // installIOSApp installs an app on an iOS device (simulator or physical).

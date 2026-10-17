@@ -67,6 +67,7 @@ type Runner struct {
 	isSimulatorCache    bool      // Cached device type
 	baseURL             string    // Where WDA answers; "" means localhost:port
 	reach               *reachDeps
+	devicectl           *DevicectlLookup // What devicectl said while Start reached WDA
 }
 
 // NewRunner creates a new WDA runner.
@@ -79,6 +80,14 @@ func NewRunner(deviceUDID, teamID, wdaBundleID string) *Runner {
 		wdaBundleID: wdaBundleID,
 		port:        PortFromUDID(deviceUDID),
 	}
+}
+
+// Devicectl returns what devicectl said about the device while Start reached
+// WDA, or nil when Start did not ask it (a simulator, or a device usbmuxd or
+// a go-ios tunnel reached). devicectl takes up to 10 s on a locked device, so
+// callers reuse this reading rather than ask again.
+func (r *Runner) Devicectl() *DevicectlLookup {
+	return r.devicectl
 }
 
 // Port returns the WDA port allocated for this runner's device.
@@ -343,7 +352,15 @@ func (r *Runner) startPortForward(logPath string) error {
 		d := defaultReachDeps()
 		deps = &d
 	}
-	ep, err := reachWDA(r.deviceUDID, r.port, reportedServerURL(string(content)), *deps)
+	r.devicectl = nil
+	d := *deps
+	read := d.devicectlInfo
+	d.devicectlInfo = func(udid string) (DevicectlDevice, error) {
+		dev, err := read(udid)
+		r.devicectl = &DevicectlLookup{Device: dev, Err: err}
+		return dev, err
+	}
+	ep, err := reachWDA(r.deviceUDID, r.port, reportedServerURL(string(content)), d)
 	if err != nil {
 		return err
 	}

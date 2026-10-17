@@ -33,8 +33,8 @@ func failingDeps(t *testing.T) reachDeps {
 			t.Fatal("tunnelForward called without an agent tunnel")
 			return nil, nil
 		},
-		coreDeviceIP: func(string) (string, error) { return "", errors.New("no tunnel") },
-		probe:        func(string) error { return errors.New("refused") },
+		devicectlInfo: func(string) (DevicectlDevice, error) { return DevicectlDevice{}, errors.New("no tunnel") },
+		probe:         func(string) error { return errors.New("refused") },
 	}
 }
 
@@ -90,7 +90,7 @@ func TestReachWDAClosesUnansweredTunnelAndUsesCoreDevice(t *testing.T) {
 	d := failingDeps(t)
 	d.agentTunnel = func(string) (goIOSTunnel, error) { return goIOSTunnel{Address: "fd00::1"}, nil }
 	d.tunnelForward = func(goIOSTunnel, uint16) (io.Closer, error) { return c, nil }
-	d.coreDeviceIP = func(string) (string, error) { return "fd7d::1", nil }
+	d.devicectlInfo = func(string) (DevicectlDevice, error) { return DevicectlDevice{TunnelIP: "fd7d::1"}, nil }
 	d.probe = func(u string) error {
 		if u == "http://[fd7d::1]:8480" {
 			return nil
@@ -113,7 +113,7 @@ func TestReachWDAFallsBackToReportedAddress(t *testing.T) {
 	d := failingDeps(t)
 	d.agentTunnel = func(string) (goIOSTunnel, error) { return goIOSTunnel{Address: "fd00::1"}, nil }
 	d.tunnelForward = func(goIOSTunnel, uint16) (io.Closer, error) { return nil, errors.New("port busy") }
-	d.coreDeviceIP = func(string) (string, error) { return "fd7d::1", nil }
+	d.devicectlInfo = func(string) (DevicectlDevice, error) { return DevicectlDevice{TunnelIP: "fd7d::1"}, nil }
 	d.probe = func(u string) error {
 		if u == "http://192.0.2.1:8480" {
 			return nil
@@ -152,7 +152,7 @@ func TestReachWDAReportsEveryPathTried(t *testing.T) {
 
 func TestReachWDACoreDeviceProbeFails(t *testing.T) {
 	d := failingDeps(t)
-	d.coreDeviceIP = func(string) (string, error) { return "fd7d::1", nil }
+	d.devicectlInfo = func(string) (DevicectlDevice, error) { return DevicectlDevice{TunnelIP: "fd7d::1"}, nil }
 	_, err := reachWDA(testUDID, 8480, "", d)
 	if err == nil || !strings.Contains(err.Error(), reachCoreDevice+": refused") {
 		t.Fatalf("got %v", err)
@@ -412,9 +412,9 @@ func TestDevicectlDeviceInfo(t *testing.T) {
 	if dev.Name != "Test iPad" || dev.TunnelIP != "fd7d::1" {
 		t.Errorf("got %+v", dev)
 	}
-	ip, err := coreDeviceIP(testUDID)
+	ip, err := tunnelIP(DevicectlDeviceInfo(testUDID))
 	if err != nil || ip != "fd7d::1" {
-		t.Errorf("coreDeviceIP: got %q, %v", ip, err)
+		t.Errorf("tunnelIP: got %q, %v", ip, err)
 	}
 }
 
@@ -423,8 +423,8 @@ func TestDevicectlDeviceInfoFails(t *testing.T) {
 	if _, err := DevicectlDeviceInfo(testUDID); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("got %v", err)
 	}
-	if _, err := coreDeviceIP(testUDID); err == nil {
-		t.Error("coreDeviceIP: expected an error")
+	if _, err := tunnelIP(DevicectlDeviceInfo(testUDID)); err == nil {
+		t.Error("tunnelIP: expected an error")
 	}
 }
 
@@ -464,9 +464,9 @@ func TestDevicectlDeviceInfoTimesOut(t *testing.T) {
 	}
 }
 
-func TestCoreDeviceIPWithoutTunnel(t *testing.T) {
+func TestTunnelIPWithoutTunnel(t *testing.T) {
 	fakeXcrun(t, devicectlDisconnected)
-	if _, err := coreDeviceIP(testUDID); err == nil || !strings.Contains(err.Error(), "no connected tunnel") {
+	if _, err := tunnelIP(DevicectlDeviceInfo(testUDID)); err == nil || !strings.Contains(err.Error(), "no connected tunnel") {
 		t.Errorf("got %v", err)
 	}
 }
@@ -479,7 +479,7 @@ func TestUSBMuxForwardUnknownDevice(t *testing.T) {
 
 func TestDefaultReachDepsAreTheRealOperations(t *testing.T) {
 	d := defaultReachDeps()
-	if d.usbmuxForward == nil || d.agentTunnel == nil || d.tunnelForward == nil || d.coreDeviceIP == nil || d.probe == nil {
+	if d.usbmuxForward == nil || d.agentTunnel == nil || d.tunnelForward == nil || d.devicectlInfo == nil || d.probe == nil {
 		t.Fatalf("missing operations: %+v", d)
 	}
 }
@@ -556,5 +556,45 @@ func TestStartPortForwardDefaultsToRealOperations(t *testing.T) {
 		if !strings.Contains(err.Error(), part) {
 			t.Errorf("error %q lacks %q", err, part)
 		}
+	}
+}
+
+func TestStartPortForwardKeepsWhatDevicectlSaid(t *testing.T) {
+	// A locked device: devicectl times out while WDA is reached at the
+	// address it printed. The reading is kept for the device's description,
+	// so devicectl is not asked, and waited for, a second time.
+	logPath := filepath.Join(t.TempDir(), "runner.log")
+	if err := os.WriteFile(logPath, []byte("ServerURLHere->http://192.0.2.1:8480<-ServerURLHere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	timedOut := errors.New("devicectl device info details timed out after 10s")
+	asked := 0
+	d := failingDeps(t)
+	d.devicectlInfo = func(string) (DevicectlDevice, error) {
+		asked++
+		return DevicectlDevice{}, timedOut
+	}
+	d.probe = func(u string) error {
+		if u == "http://192.0.2.1:8480" {
+			return nil
+		}
+		return errors.New("refused")
+	}
+	r := &Runner{deviceUDID: testUDID, port: 8480, reach: &d}
+	if err := r.startPortForward(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Devicectl(); asked != 1 || got == nil || !errors.Is(got.Err, timedOut) {
+		t.Fatalf("asked %d times, kept %+v", asked, got)
+	}
+
+	// A start that usbmuxd reaches asks devicectl nothing, and keeps no
+	// reading from before.
+	d.usbmuxForward = func(string, uint16) (io.Closer, error) { return &fakeCloser{}, nil }
+	if err := r.startPortForward(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Devicectl(); asked != 1 || got != nil {
+		t.Errorf("asked %d times, kept %+v", asked, got)
 	}
 }

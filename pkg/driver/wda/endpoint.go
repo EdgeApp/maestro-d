@@ -68,8 +68,9 @@ type reachDeps struct {
 	// tunnelForward forwards 127.0.0.1:port to the device's port through
 	// a go-ios tunnel.
 	tunnelForward func(t goIOSTunnel, port uint16) (io.Closer, error)
-	// coreDeviceIP returns the device's CoreDevice tunnel address.
-	coreDeviceIP func(udid string) (string, error)
+	// devicectlInfo reads the device's details from devicectl, its
+	// CoreDevice tunnel address among them.
+	devicectlInfo func(udid string) (DevicectlDevice, error)
 	// probe checks WDA answers at baseURL.
 	probe func(baseURL string) error
 }
@@ -80,7 +81,7 @@ func defaultReachDeps() reachDeps {
 		usbmuxForward: usbmuxForward,
 		agentTunnel:   agentTunnel,
 		tunnelForward: tunnelForward,
-		coreDeviceIP:  coreDeviceIP,
+		devicectlInfo: DevicectlDeviceInfo,
 		probe:         probeWDA,
 	}
 }
@@ -119,7 +120,7 @@ func reachWDA(udid string, port uint16, reportedURL string, d reachDeps) (wdaEnd
 		}
 	}
 
-	if ip, err := d.coreDeviceIP(udid); err != nil {
+	if ip, err := tunnelIP(d.devicectlInfo(udid)); err != nil {
 		fail(reachCoreDevice, err)
 	} else {
 		u := "http://" + net.JoinHostPort(ip, strconv.Itoa(int(port)))
@@ -341,9 +342,15 @@ func parseDevicectlDetails(data []byte) (DevicectlDevice, error) {
 	return dev, nil
 }
 
-// coreDeviceIP returns udid's CoreDevice tunnel address from devicectl.
-func coreDeviceIP(udid string) (string, error) {
-	dev, err := DevicectlDeviceInfo(udid)
+// DevicectlLookup is one devicectl reading of a device: what it said, or
+// why it could not say.
+type DevicectlLookup struct {
+	Device DevicectlDevice
+	Err    error
+}
+
+// tunnelIP returns the CoreDevice tunnel address from a devicectl reading.
+func tunnelIP(dev DevicectlDevice, err error) (string, error) {
 	if err != nil {
 		return "", err
 	}
