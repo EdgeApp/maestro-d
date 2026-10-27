@@ -22,11 +22,15 @@ type hNode struct {
 	// Element states. Enabled is reported on every element whose driver
 	// reports it, true or false, so a phone's tree reads like a simulator's;
 	// Checked only for checkable elements; Selected/Focused only when true.
-	Enabled  *bool   `json:"enabled,omitempty"`
-	Checked  *bool   `json:"checked,omitempty"`
-	Selected *bool   `json:"selected,omitempty"`
-	Focused  *bool   `json:"focused,omitempty"`
-	Children []hNode `json:"children,omitempty"`
+	Enabled  *bool `json:"enabled,omitempty"`
+	Checked  *bool `json:"checked,omitempty"`
+	Selected *bool `json:"selected,omitempty"`
+	Focused  *bool `json:"focused,omitempty"`
+	// Truncated is set on the root when the driver stopped listing elements
+	// at a node cap (the devicelab iOS runner's snapshot limit), so the tree
+	// is known to be incomplete.
+	Truncated *bool   `json:"truncated,omitempty"`
+	Children  []hNode `json:"children,omitempty"`
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -51,6 +55,9 @@ func formatHierarchy(raw []byte, compact bool, find string) (string, error) {
 		renderFind(root, strings.ToLower(find), &b)
 		out := strings.TrimRight(b.String(), "\n")
 		if out == "" {
+			if root.Truncated != nil && *root.Truncated {
+				return fmt.Sprintf("(no elements matching %q; the hierarchy was truncated at the driver's node cap, so some elements are not listed)", find), nil
+			}
 			return fmt.Sprintf("(no elements matching %q)", find), nil
 		}
 		return out, nil
@@ -135,6 +142,7 @@ func parseFlatJSON(raw []byte) (hNode, error) {
 			Selected    *bool    `json:"selected"`
 			ParentIndex *int     `json:"parentIndex"`
 		} `json:"nodes"`
+		Truncated bool `json:"truncated"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return hNode{}, fmt.Errorf("parse hierarchy JSON: %w", err)
@@ -183,10 +191,14 @@ func parseFlatJSON(raw []byte) (hNode, error) {
 	for _, r := range rootIdx {
 		roots = append(roots, assemble(r))
 	}
+	root := hNode{Type: "Root", Children: roots}
 	if len(roots) == 1 {
-		return roots[0], nil
+		root = roots[0]
 	}
-	return hNode{Type: "Root", Children: roots}, nil
+	if doc.Truncated {
+		root.Truncated = boolPtr(true)
+	}
+	return root, nil
 }
 
 // ---- XML (Android UIAutomator + iOS WDA) ----
@@ -420,6 +432,9 @@ func compactLine(n hNode, depth int) string {
 	}
 	if n.Focused != nil && *n.Focused {
 		b.WriteString("  [focused]")
+	}
+	if n.Truncated != nil && *n.Truncated {
+		b.WriteString("  [truncated]")
 	}
 	return b.String()
 }

@@ -56,6 +56,12 @@ type Driver struct {
 	snapshotCache     []SnapshotNode
 	snapshotCacheTime time.Time
 
+	// snapshotTruncated is true when the runner stopped the last snapshot at
+	// its node cap, so elements past the cap were never listed.
+	// warnedTruncation keeps the log warning to one per session.
+	snapshotTruncated bool
+	warnedTruncation  bool
+
 	// Runtime — owned by setup.go; the Driver only reads it for orderly
 	// shutdown.
 	runner *RunnerHandle

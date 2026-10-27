@@ -12,6 +12,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
 // executeStep dispatches a maestro flow step to the right handler. The
@@ -397,8 +398,8 @@ func (d *Driver) assertVisibleCount(s *flow.AssertVisibleStep, want int) *core.C
 			return core.SuccessResult(fmt.Sprintf("%d visible", got), nil)
 		}
 		if !time.Now().Before(deadline) {
-			err := fmt.Errorf("expected %d visible matches of %s, found %d",
-				want, describeSelector(s.Selector), got)
+			err := fmt.Errorf("expected %d visible matches of %s, found %d%s",
+				want, describeSelector(s.Selector), got, d.truncationNote())
 			return core.ErrorResult(err, err.Error())
 		}
 		// No explicit sleep — snapshotMatching does a real HTTP round-trip
@@ -448,7 +449,7 @@ func (d *Driver) handleAssertNotVisible(s *flow.AssertNotVisibleStep) *core.Comm
 			return core.ErrorResult(err, "assertNotVisible: "+err.Error())
 		}
 		if countDisplayed(nodes) == 0 {
-			return core.SuccessResult("not visible", nil)
+			return core.SuccessResult("not visible"+d.truncationNote(), nil)
 		}
 		if !time.Now().Before(deadline) {
 			err := fmt.Errorf("element %s still visible after %d ms", describeSelector(s.Selector), timeoutMs)
@@ -1251,7 +1252,7 @@ func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int
 			if optional {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("element not found: %s", describeSelector(sel))
+			return nil, fmt.Errorf("element not found: %s%s", describeSelector(sel), d.truncationNote())
 		}
 		// No explicit sleep — strategies 1 and 2 each do real HTTP round-trips
 		// (~100-200ms snapshot + ~50ms query) which paces the loop naturally.
@@ -1322,11 +1323,26 @@ func (d *Driver) fetchSnapshot() ([]SnapshotNode, error) {
 		return nil, err
 	}
 	if data == nil {
+		d.snapshotTruncated = false
 		return nil, nil
 	}
 	d.snapshotCache = data.Nodes
 	d.snapshotCacheTime = time.Now()
+	d.snapshotTruncated = data.Truncated != nil && *data.Truncated
+	if d.snapshotTruncated && !d.warnedTruncation {
+		d.warnedTruncation = true
+		logger.Warn("devicelab iOS runner truncated the snapshot at %d nodes; elements past the cap are not listed, so selectors may miss them", len(data.Nodes))
+	}
 	return data.Nodes, nil
+}
+
+// truncationNote explains a selector miss or an absence when the last
+// snapshot stopped at the runner's node cap: the element may lie past it.
+func (d *Driver) truncationNote() string {
+	if !d.snapshotTruncated {
+		return ""
+	}
+	return fmt.Sprintf(" (the runner's snapshot stopped at its cap of %d nodes; elements past it were not checked)", len(d.snapshotCache))
 }
 
 func (d *Driver) invalidateSnapshotCache() {
@@ -1397,7 +1413,13 @@ func (d *Driver) hierarchyJSON() ([]byte, error) {
 	if data == nil {
 		return []byte("{\"nodes\":[]}"), nil
 	}
-	return json.Marshal(map[string]any{"nodes": data.Nodes})
+	out := map[string]any{"nodes": data.Nodes}
+	if data.Truncated != nil && *data.Truncated {
+		// The runner stopped at its node cap; say so rather than hand back
+		// a tree that looks complete.
+		out["truncated"] = true
+	}
+	return json.Marshal(out)
 }
 
 // ---------- utilities ----------

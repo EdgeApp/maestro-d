@@ -173,6 +173,8 @@ export interface HierarchyNode {
   checked?: boolean
   selected?: boolean
   focused?: boolean
+  /** On the root only: the driver stopped at a node cap, so elements are missing. */
+  truncated?: boolean
   children?: HierarchyNode[]
 }
 

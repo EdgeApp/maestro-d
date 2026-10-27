@@ -368,3 +368,38 @@ func TestParseHierarchy_FlatJSONFractionalFrames(t *testing.T) {
 		t.Errorf("NormalizeHierarchy returned %T, want the normalized tree", tree)
 	}
 }
+
+// A snapshot the runner cut off at its node cap says so on the root, in the
+// compact listing, and when --find comes up empty.
+func TestParseHierarchy_TruncatedSnapshotIsMarked(t *testing.T) {
+	const raw = `{"truncated":true,"nodes":[
+  {"index":0,"type":"Application","identifier":"App","rect":{"x":0,"y":0,"width":390,"height":844},"enabled":true},
+  {"index":1,"type":"Cell","identifier":"row-1","rect":{"x":0,"y":0,"width":390,"height":40},"enabled":true,"parentIndex":0}
+]}`
+	root, err := parseHierarchy([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Truncated == nil || !*root.Truncated {
+		t.Errorf("root.Truncated = %v, want true", root.Truncated)
+	}
+	if child := findByID(t, root, "row-1"); child.Truncated != nil {
+		t.Errorf("only the root carries truncated, row-1 has %v", *child.Truncated)
+	}
+	compact, _ := formatHierarchy([]byte(raw), true, "")
+	if !strings.Contains(compact, "[truncated]") {
+		t.Errorf("compact listing should mark the truncation:\n%s", compact)
+	}
+	none, _ := formatHierarchy([]byte(raw), false, "chat-composer")
+	if !strings.Contains(none, "truncated") {
+		t.Errorf("an empty --find on a truncated tree should say so, got %q", none)
+	}
+
+	whole, err := parseHierarchy([]byte(flatJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.Truncated != nil {
+		t.Errorf("a complete snapshot must not be marked truncated")
+	}
+}
