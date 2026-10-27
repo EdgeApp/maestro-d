@@ -417,17 +417,45 @@ func countDisplayed(nodes []SnapshotNode) int {
 	return count
 }
 
+// defaultNotVisibleTimeoutMs is how long assertNotVisible waits for an
+// element to go when the step names no timeout, as on the other drivers.
+const defaultNotVisibleTimeoutMs = 5_000
+
+// notVisiblePollInterval spaces assertNotVisible's snapshots.
+var notVisiblePollInterval = 250 * time.Millisecond
+
+// handleAssertNotVisible waits for every element matching the selector to
+// leave the screen: it passes on the first snapshot with none displayed, and
+// fails once the step's timeout (5 s by default) passes with one still shown.
 func (d *Driver) handleAssertNotVisible(s *flow.AssertNotVisibleStep) *core.CommandResult {
-	nodes, err := d.snapshotMatching(s.Selector)
-	if err != nil {
-		return core.ErrorResult(err, "assertNotVisible: "+err.Error())
+	timeoutMs := s.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = defaultNotVisibleTimeoutMs
 	}
-	for i := range nodes {
-		if isDisplayed(&nodes[i]) {
-			return core.ErrorResult(fmt.Errorf("element unexpectedly visible"), "element visible")
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+
+	firstPass := true
+	for {
+		if !firstPass {
+			// A fresh snapshot each pass, so the cache cannot hold the
+			// element on screen after it has gone.
+			d.invalidateSnapshotCache()
 		}
+		firstPass = false
+
+		nodes, err := d.snapshotMatching(s.Selector)
+		if err != nil {
+			return core.ErrorResult(err, "assertNotVisible: "+err.Error())
+		}
+		if countDisplayed(nodes) == 0 {
+			return core.SuccessResult("not visible", nil)
+		}
+		if !time.Now().Before(deadline) {
+			err := fmt.Errorf("element %s still visible after %d ms", describeSelector(s.Selector), timeoutMs)
+			return core.ErrorResult(err, err.Error())
+		}
+		time.Sleep(notVisiblePollInterval)
 	}
-	return core.SuccessResult("not visible", nil)
 }
 
 // handleTakeScreenshot uses simctl io booted screenshot for a host-side
