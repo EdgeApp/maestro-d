@@ -218,46 +218,77 @@ func hasNodeChildren(r rawXML) bool {
 }
 
 func convertXML(n rawXML, android bool) hNode {
+	if !android {
+		nodes := convertWDA(n, map[string]bool{})
+		if len(nodes) == 1 {
+			return nodes[0]
+		}
+		return hNode{Type: "Root", Children: nodes}
+	}
 	out := hNode{}
-	if android {
-		out.Type = shortClass(n.attr("class"))
-		out.ID = n.attr("resource-id")
-		out.Text = n.attr("text")
-		if out.Text == "" {
-			out.Text = n.attr("content-desc")
-		}
-		out.Bounds = parseAndroidBounds(n.attr("bounds"))
-		out.Enabled = enabledAttr(n)
-		if n.attr("checkable") == "true" {
-			out.Checked = boolPtr(n.attr("checked") == "true")
-		}
-		if n.attr("selected") == "true" {
-			out.Selected = boolPtr(true)
-		}
-		if n.attr("focused") == "true" {
-			out.Focused = boolPtr(true)
-		}
-	} else {
-		// iOS WDA: the element tag name is the type; attrs carry name/label.
-		out.Type = strings.TrimPrefix(n.XMLName.Local, "XCUIElementType")
-		if t := n.attr("type"); t != "" {
-			out.Type = strings.TrimPrefix(t, "XCUIElementType")
-		}
-		out.ID = n.attr("name")
-		out.Text = n.attr("label")
-		if out.Text == "" {
-			out.Text = n.attr("value")
-		}
-		out.Bounds = parseWDABounds(n)
-		out.Enabled = enabledAttr(n)
-		if n.attr("selected") == "true" {
-			out.Selected = boolPtr(true)
-		}
+	out.Type = shortClass(n.attr("class"))
+	out.ID = n.attr("resource-id")
+	out.Text = n.attr("text")
+	if out.Text == "" {
+		out.Text = n.attr("content-desc")
+	}
+	out.Bounds = parseAndroidBounds(n.attr("bounds"))
+	out.Enabled = enabledAttr(n)
+	if n.attr("checkable") == "true" {
+		out.Checked = boolPtr(n.attr("checked") == "true")
+	}
+	if n.attr("selected") == "true" {
+		out.Selected = boolPtr(true)
+	}
+	if n.attr("focused") == "true" {
+		out.Focused = boolPtr(true)
 	}
 	for _, c := range n.Children {
-		out.Children = append(out.Children, convertXML(c, android))
+		out.Children = append(out.Children, convertXML(c, true))
 	}
 	return out
+}
+
+// convertWDA normalizes a WebDriverAgent element and its subtree.
+//
+// WebDriverAgent lists some elements twice: a React Native Text nested in a
+// Text is a StaticText inside a StaticText with the same label and frame. The
+// devicelab runner's simulator snapshot keeps the first element with a given
+// type, label, identifier and origin and drops every later one, attaching its
+// children to the kept element's parent. convertWDA applies that same rule
+// in the same depth-first order, so a phone and a simulator list the text
+// once. A dropped element returns its converted children in its place.
+func convertWDA(n rawXML, seen map[string]bool) []hNode {
+	out := hNode{}
+	// The element tag name is the type; attrs carry name/label.
+	out.Type = strings.TrimPrefix(n.XMLName.Local, "XCUIElementType")
+	if t := n.attr("type"); t != "" {
+		out.Type = strings.TrimPrefix(t, "XCUIElementType")
+	}
+	out.ID = n.attr("name")
+	out.Text = n.attr("label")
+	if out.Text == "" {
+		out.Text = n.attr("value")
+	}
+	out.Bounds = parseWDABounds(n)
+	out.Enabled = enabledAttr(n)
+	if n.attr("selected") == "true" {
+		out.Selected = boolPtr(true)
+	}
+
+	key := strings.Join([]string{out.Type, n.attr("label"), out.ID, n.attr("x"), n.attr("y")}, "\x00")
+	duplicate := seen[key]
+	seen[key] = true
+
+	var children []hNode
+	for _, c := range n.Children {
+		children = append(children, convertWDA(c, seen)...)
+	}
+	if duplicate {
+		return children
+	}
+	out.Children = children
+	return []hNode{out}
 }
 
 // enabledAttr reads a node's enabled attribute, which UIAutomator and

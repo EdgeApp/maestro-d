@@ -256,3 +256,88 @@ func TestParseHierarchy_EnabledAbsentStaysAbsent(t *testing.T) {
 		}
 	}
 }
+
+// WebDriverAgent lists a React Native Text nested in a Text as a StaticText
+// inside a StaticText with the same label and frame. The normalized tree lists
+// it once, as the devicelab runner's simulator snapshot does, and keeps the
+// inner element's children.
+func TestParseHierarchy_WDANestedDuplicateListedOnce(t *testing.T) {
+	const raw = `<?xml version="1.0"?>
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="App" label="App" enabled="true" x="0" y="0" width="390" height="844">
+  <XCUIElementTypeOther type="XCUIElementTypeOther" name="chat-bubble-1" enabled="true" x="48" y="400" width="281" height="96">
+    <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Hello there" enabled="true" x="60" y="410" width="200" height="40">
+      <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Hello there" enabled="true" x="60" y="410" width="200" height="40">
+        <XCUIElementTypeLink type="XCUIElementTypeLink" label="there" enabled="true" x="100" y="410" width="40" height="20"/>
+      </XCUIElementTypeStaticText>
+    </XCUIElementTypeStaticText>
+    <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Hello there" enabled="true" x="60" y="460" width="200" height="40"/>
+  </XCUIElementTypeOther>
+</XCUIElementTypeApplication>`
+	root, err := parseHierarchy([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bubble := findByID(t, root, "chat-bubble-1")
+	if len(bubble.Children) != 2 {
+		t.Fatalf("bubble children = %d, want 2 (the outer text and the text below it)\n%+v", len(bubble.Children), bubble.Children)
+	}
+	outer := bubble.Children[0]
+	if outer.Type != "StaticText" || outer.Text != "Hello there" || outer.Bounds.Y != 410 {
+		t.Errorf("first child = %+v, want the outer StaticText at y=410", outer)
+	}
+	if len(outer.Children) != 1 || outer.Children[0].Type != "Link" {
+		t.Errorf("outer StaticText children = %+v, want the inner text's Link moved up", outer.Children)
+	}
+	// Same words at another origin are a different element and stay.
+	if below := bubble.Children[1]; below.Type != "StaticText" || below.Bounds.Y != 460 {
+		t.Errorf("second child = %+v, want the StaticText at y=460", below)
+	}
+
+	var all []hNode
+	collect(root, &all)
+	count := 0
+	for _, n := range all {
+		if n.Type == "StaticText" && n.Text == "Hello there" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("StaticText %q listed %d times, want 2 (one per origin)", "Hello there", count)
+	}
+}
+
+// Elements that differ in type, label, identifier or origin are all kept,
+// and Android trees are never de-duplicated.
+func TestParseHierarchy_DistinctElementsKept(t *testing.T) {
+	const raw = `<?xml version="1.0"?>
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="App" x="0" y="0" width="390" height="844">
+  <XCUIElementTypeOther type="XCUIElementTypeOther" name="row" label="Send" x="10" y="10" width="100" height="40">
+    <XCUIElementTypeButton type="XCUIElementTypeButton" name="row" label="Send" x="10" y="10" width="100" height="40"/>
+    <XCUIElementTypeButton type="XCUIElementTypeButton" name="other" label="Send" x="10" y="10" width="100" height="40"/>
+    <XCUIElementTypeButton type="XCUIElementTypeButton" name="row" label="Sent" x="10" y="10" width="100" height="40"/>
+  </XCUIElementTypeOther>
+</XCUIElementTypeApplication>`
+	root, err := parseHierarchy([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all []hNode
+	collect(root, &all)
+	if len(all) != 5 {
+		t.Errorf("node count = %d, want 5 (nothing dropped)", len(all))
+	}
+
+	const android = `<?xml version="1.0"?>
+<hierarchy>
+  <node class="android.widget.TextView" resource-id="t" text="Hi" bounds="[0,0][10,10]">
+    <node class="android.widget.TextView" resource-id="t" text="Hi" bounds="[0,0][10,10]"/>
+  </node>
+</hierarchy>`
+	aroot, err := parseHierarchy([]byte(android))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aroot.Children) != 1 {
+		t.Errorf("android nested TextView dropped: %+v", aroot)
+	}
+}
