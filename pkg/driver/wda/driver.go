@@ -981,7 +981,7 @@ func (d *Driver) getElementInfo(elemID string) (*core.ElementInfo, error) {
 		info.Bounds = core.Bounds{X: x, Y: y, Width: w, Height: h}
 	}
 	if nameErr == nil {
-		info.Class = elemName
+		info.Class = shortElementType(elemName)
 	}
 	info.Visible = dispErr == nil && displayed
 
@@ -1121,6 +1121,7 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 		Bounds:  selected.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,
+		Class:   shortElementType(selected.Type),
 	}
 	if note := rescueNote(selected); note != "" {
 		info.MatchNote = note
@@ -1177,6 +1178,7 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 		Bounds:  clickableElem.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,
+		Class:   shortElementType(selected.Type),
 	}
 	if note := rescueNote(selected); note != "" {
 		info.MatchNote = note

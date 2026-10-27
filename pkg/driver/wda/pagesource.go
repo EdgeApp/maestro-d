@@ -31,6 +31,13 @@ type ParsedElement struct {
 	Depth            int
 }
 
+// shortElementType drops WebDriverAgent's "XCUIElementType" prefix, so an
+// element's class reads "Button" or "StaticText" on a physical iPhone exactly
+// as it does from the devicelab runner on a simulator.
+func shortElementType(t string) string {
+	return strings.TrimPrefix(t, "XCUIElementType")
+}
+
 // ParsePageSource parses iOS UI hierarchy XML into elements.
 // iOS WDA uses XCUIElement types with attributes:
 // - type: XCUIElementTypeButton, XCUIElementTypeTextField, etc.
