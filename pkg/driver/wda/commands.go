@@ -2106,8 +2106,9 @@ func (d *Driver) currentDarkMode() (bool, error) {
 
 func (d *Driver) requireSimulatorForAppearance(what string) error {
 	if d.info == nil || !d.info.IsSimulator {
-		return fmt.Errorf("%s is not supported on a physical device with the wda driver — "+
-			"WebDriverAgent has no appearance endpoint; use --driver devicelab_ios for dark mode on real hardware", what)
+		return fmt.Errorf("%s is not supported on a physical iPhone: "+
+			"WebDriverAgent has no appearance endpoint, and the devicelab iOS driver runs only on simulators. "+
+			"Run the flow on an iOS simulator, or set the appearance in the iPhone's Settings before the flow", what)
 	}
 	if d.udid == "" {
 		return fmt.Errorf("%s requires a simulator UDID", what)

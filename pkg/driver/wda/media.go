@@ -1,6 +1,7 @@
 package wda
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -8,12 +9,22 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
+// errPhysicalAddMedia says what a physical iPhone can and cannot do about
+// media, so the hint never sends anyone to a driver that refuses the device.
+var errPhysicalAddMedia = errors.New("addMedia is not supported on a physical iPhone: " +
+	"iOS gives the host no way to write to a device's Photos library, and the devicelab iOS driver " +
+	"(which adds media on-device) runs only on simulators. " +
+	"Run the flow on an iOS simulator, or put the media in the iPhone's Photos library before the flow " +
+	"(AirDrop, iCloud Photos, or a Finder sync)")
+
 // addMedia adds photos/videos to the target's Photos library.
 //
 // On the WDA driver this is simulator-only: `xcrun simctl addmedia` writes real
-// PHAssets the app's picker can select. Real iOS devices have no host-side path
-// to the Photos database (Apple restriction) — use the `devicelab` iOS driver,
-// whose on-device runner adds media via PhotoKit. (#131)
+// PHAssets the app's picker can select. A physical iPhone has no host-side path
+// to its Photos library (an Apple restriction), and WebDriverAgent has no
+// endpoint for it. The devicelab iOS runner's PhotoKit path cannot stand in
+// either: this fork's devicelab iOS driver starts only on simulators, so a
+// physical iPhone is always on WDA. (#131)
 func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	if err := core.ValidateMediaFiles(step.Files); err != nil {
 		return errorResult(err, err.Error())
@@ -25,8 +36,7 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	}
 
 	if d.info == nil || !d.info.IsSimulator {
-		err := fmt.Errorf("addMedia is only supported on iOS simulators with the wda driver; " +
-			"for real iOS devices use --driver devicelab (adds media on-device via PhotoKit)")
+		err := errPhysicalAddMedia
 		return errorResult(err, err.Error())
 	}
 
