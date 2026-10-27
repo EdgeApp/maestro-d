@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -102,19 +103,37 @@ func parseJSON(raw []byte) (hNode, error) {
 
 // ---- devicelab flat-JSON ({"nodes":[{index,type,identifier,label,value,rect,parentIndex}...]}) ----
 
+// flatRect is a devicelab snapshot frame. XCUITest frames are in points and
+// often fractional (y 700.67), so they are read as floats and rounded.
+type flatRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+func (r flatRect) bounds() *hBounds {
+	return &hBounds{
+		X:      int(math.Round(r.X)),
+		Y:      int(math.Round(r.Y)),
+		Width:  int(math.Round(r.Width)),
+		Height: int(math.Round(r.Height)),
+	}
+}
+
 func parseFlatJSON(raw []byte) (hNode, error) {
 	var doc struct {
 		Nodes []struct {
-			Index       int     `json:"index"`
-			Type        string  `json:"type"`
-			Label       string  `json:"label"`
-			Identifier  string  `json:"identifier"`
-			Value       string  `json:"value"`
-			Rect        hBounds `json:"rect"`
-			Enabled     *bool   `json:"enabled"`
-			Focused     *bool   `json:"focused"`
-			Selected    *bool   `json:"selected"`
-			ParentIndex *int    `json:"parentIndex"`
+			Index       int      `json:"index"`
+			Type        string   `json:"type"`
+			Label       string   `json:"label"`
+			Identifier  string   `json:"identifier"`
+			Value       string   `json:"value"`
+			Rect        flatRect `json:"rect"`
+			Enabled     *bool    `json:"enabled"`
+			Focused     *bool    `json:"focused"`
+			Selected    *bool    `json:"selected"`
+			ParentIndex *int     `json:"parentIndex"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -128,8 +147,7 @@ func parseFlatJSON(raw []byte) (hNode, error) {
 		if text == "" {
 			text = n.Value
 		}
-		b := n.Rect
-		node := hNode{Type: n.Type, ID: n.Identifier, Text: text, Bounds: &b}
+		node := hNode{Type: n.Type, ID: n.Identifier, Text: text, Bounds: n.Rect.bounds()}
 		if n.Enabled != nil {
 			node.Enabled = boolPtr(*n.Enabled)
 		}

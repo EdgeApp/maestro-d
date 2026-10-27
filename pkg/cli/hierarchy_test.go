@@ -341,3 +341,30 @@ func TestParseHierarchy_DistinctElementsKept(t *testing.T) {
 		t.Errorf("android nested TextView dropped: %+v", aroot)
 	}
 }
+
+// XCUITest frames are often fractional. A simulator snapshot with one must
+// still normalize, or the daemon hands back the raw flat list instead of the
+// tree every other device gets.
+func TestParseHierarchy_FlatJSONFractionalFrames(t *testing.T) {
+	const raw = `{"nodes":[
+  {"index":0,"type":"Application","identifier":"App","rect":{"x":0,"y":0,"width":390,"height":844},"enabled":true},
+  {"index":1,"type":"Other","identifier":"chat-composer-band","rect":{"x":16,"y":700.6666870117188,"width":370,"height":54.4},"enabled":true,"parentIndex":0}
+]}`
+	root, err := parseHierarchy([]byte(raw))
+	if err != nil {
+		t.Fatalf("parseHierarchy: %v", err)
+	}
+	band := findByID(t, root, "chat-composer-band")
+	want := hBounds{X: 16, Y: 701, Width: 370, Height: 54}
+	if band.Bounds == nil || *band.Bounds != want {
+		t.Errorf("bounds = %+v, want %+v", band.Bounds, want)
+	}
+
+	tree, err := NormalizeHierarchy([]byte(raw))
+	if err != nil {
+		t.Fatalf("NormalizeHierarchy: %v", err)
+	}
+	if _, ok := tree.(hNode); !ok {
+		t.Errorf("NormalizeHierarchy returned %T, want the normalized tree", tree)
+	}
+}
