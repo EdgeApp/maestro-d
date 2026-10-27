@@ -167,8 +167,9 @@ export interface HierarchyNode {
   id?: string
   text?: string
   bounds?: { x: number; y: number; width: number; height: number }
-  /** Only present when notable: enabled false, checked for checkables, selected/focused true. */
+  /** Present whenever the driver reports it, true or false. */
   enabled?: boolean
+  /** Only present when notable: checked for checkables, selected/focused true. */
   checked?: boolean
   selected?: boolean
   focused?: boolean

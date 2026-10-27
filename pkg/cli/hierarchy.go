@@ -18,9 +18,9 @@ type hNode struct {
 	ID     string   `json:"id,omitempty"`
 	Text   string   `json:"text,omitempty"`
 	Bounds *hBounds `json:"bounds,omitempty"`
-	// Element states, emitted only when notable so the tree stays uncluttered:
-	// Enabled is set false only when disabled; Checked only for checkable
-	// elements; Selected/Focused only when true.
+	// Element states. Enabled is reported on every element whose driver
+	// reports it, true or false, so a phone's tree reads like a simulator's;
+	// Checked only for checkable elements; Selected/Focused only when true.
 	Enabled  *bool   `json:"enabled,omitempty"`
 	Checked  *bool   `json:"checked,omitempty"`
 	Selected *bool   `json:"selected,omitempty"`
@@ -111,7 +111,7 @@ func parseFlatJSON(raw []byte) (hNode, error) {
 			Identifier  string  `json:"identifier"`
 			Value       string  `json:"value"`
 			Rect        hBounds `json:"rect"`
-			Enabled     bool    `json:"enabled"`
+			Enabled     *bool   `json:"enabled"`
 			Focused     *bool   `json:"focused"`
 			Selected    *bool   `json:"selected"`
 			ParentIndex *int    `json:"parentIndex"`
@@ -130,8 +130,8 @@ func parseFlatJSON(raw []byte) (hNode, error) {
 		}
 		b := n.Rect
 		node := hNode{Type: n.Type, ID: n.Identifier, Text: text, Bounds: &b}
-		if !n.Enabled {
-			node.Enabled = boolPtr(false)
+		if n.Enabled != nil {
+			node.Enabled = boolPtr(*n.Enabled)
 		}
 		if n.Focused != nil && *n.Focused {
 			node.Focused = boolPtr(true)
@@ -227,9 +227,7 @@ func convertXML(n rawXML, android bool) hNode {
 			out.Text = n.attr("content-desc")
 		}
 		out.Bounds = parseAndroidBounds(n.attr("bounds"))
-		if n.attr("enabled") == "false" {
-			out.Enabled = boolPtr(false)
-		}
+		out.Enabled = enabledAttr(n)
 		if n.attr("checkable") == "true" {
 			out.Checked = boolPtr(n.attr("checked") == "true")
 		}
@@ -251,9 +249,7 @@ func convertXML(n rawXML, android bool) hNode {
 			out.Text = n.attr("value")
 		}
 		out.Bounds = parseWDABounds(n)
-		if n.attr("enabled") == "false" {
-			out.Enabled = boolPtr(false)
-		}
+		out.Enabled = enabledAttr(n)
 		if n.attr("selected") == "true" {
 			out.Selected = boolPtr(true)
 		}
@@ -262,6 +258,17 @@ func convertXML(n rawXML, android bool) hNode {
 		out.Children = append(out.Children, convertXML(c, android))
 	}
 	return out
+}
+
+// enabledAttr reads a node's enabled attribute, which UIAutomator and
+// WebDriverAgent write on every element; nil when the node has none.
+func enabledAttr(n rawXML) *bool {
+	for _, a := range n.Attrs {
+		if a.Name.Local == "enabled" {
+			return boolPtr(a.Value != "false")
+		}
+	}
+	return nil
 }
 
 func shortClass(class string) string {

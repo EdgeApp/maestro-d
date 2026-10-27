@@ -180,3 +180,79 @@ func TestCaptureHierarchyScreenshot(t *testing.T) {
 		}
 	})
 }
+
+// collect walks a normalized tree in document order.
+func collect(n hNode, out *[]hNode) {
+	*out = append(*out, n)
+	for _, c := range n.Children {
+		collect(c, out)
+	}
+}
+
+func findByID(t *testing.T, root hNode, id string) hNode {
+	t.Helper()
+	var all []hNode
+	collect(root, &all)
+	for _, n := range all {
+		if n.ID == id {
+			return n
+		}
+	}
+	t.Fatalf("no node with id %q", id)
+	return hNode{}
+}
+
+// Every driver reports enabled on every element, true or false, so a
+// physical phone's tree carries enabled:true the way the simulator's does.
+func TestParseHierarchy_EnabledOnEveryElement(t *testing.T) {
+	const wdaXML = `<?xml version="1.0"?>
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="App" enabled="true" x="0" y="0" width="390" height="844">
+  <XCUIElementTypeButton type="XCUIElementTypeButton" name="send" label="Send" enabled="true" x="0" y="0" width="44" height="44"/>
+  <XCUIElementTypeButton type="XCUIElementTypeButton" name="copy" label="Copy" enabled="false" x="50" y="0" width="44" height="44"/>
+</XCUIElementTypeApplication>`
+	const flat = `{"nodes":[
+  {"index":0,"type":"Application","identifier":"App","rect":{"x":0,"y":0,"width":390,"height":844},"enabled":true},
+  {"index":1,"type":"Button","identifier":"send","label":"Send","rect":{"x":0,"y":0,"width":44,"height":44},"enabled":true,"parentIndex":0},
+  {"index":2,"type":"Button","identifier":"copy","label":"Copy","rect":{"x":50,"y":0,"width":44,"height":44},"enabled":false,"parentIndex":0}
+]}`
+	cases := []struct {
+		name, raw, on, off string
+	}{
+		{"android", androidStatesXML, "agree", "submit"},
+		{"wda", wdaXML, "send", "copy"},
+		{"devicelab flat JSON", flat, "send", "copy"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, err := parseHierarchy([]byte(c.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			on := findByID(t, root, c.on)
+			if on.Enabled == nil || !*on.Enabled {
+				t.Errorf("%s: enabled = %v, want true", c.on, on.Enabled)
+			}
+			off := findByID(t, root, c.off)
+			if off.Enabled == nil || *off.Enabled {
+				t.Errorf("%s: enabled = %v, want false", c.off, off.Enabled)
+			}
+		})
+	}
+}
+
+// A node with no enabled attribute stays silent rather than claiming a state.
+func TestParseHierarchy_EnabledAbsentStaysAbsent(t *testing.T) {
+	for _, raw := range []string{androidXML, iosXML, flatJSON} {
+		root, err := parseHierarchy([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var all []hNode
+		collect(root, &all)
+		for _, n := range all {
+			if n.Enabled != nil {
+				t.Errorf("node %q: enabled = %v, want absent", n.ID, *n.Enabled)
+			}
+		}
+	}
+}
