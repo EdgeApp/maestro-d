@@ -102,7 +102,7 @@ Unknown fields are ignored. Missing required fields produce `INVALID_ARGUMENT`.
 | `appLaunch` | `appBundleId`, `arguments[]?`, `environment{}?` | `{ pid, launched: true }` | `XCUIApplication(bundleIdentifier:).launch()`. Replaces cached `currentApp`. |
 | `appActivate` | `appBundleId` | `{ pid, activated: true }` | Foreground without relaunch. |
 | `appTerminate` | `appBundleId` | `{ terminated: true }` | |
-| `appState` | `appBundleId` | `{ state: "running"|"notRunning"|"runningBackground" }` | |
+| `appState` | `appBundleId` | `{ appState: "runningForeground"|"runningBackground"|"runningBackgroundSuspended"|"notRunning"|"unknown" }` | `XCUIApplication(bundleIdentifier:).state`. Never activates the app or delays the next interaction, so a crashed app reads `notRunning`. |
 | `appCurrent` | (none) | `{ appBundleId?, pid? }` | Returns currently foregrounded app. |
 | `shutdown` | (none) | `{ shuttingDown: true }` | Runner exits cleanly. |
 | `ping` | (none) | `{ uptimeMs }` | Round-trip baseline. |

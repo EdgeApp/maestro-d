@@ -1003,6 +1003,25 @@ http://127.0.0.1:7788/v1/viewer#device=EXAMPLE0001&token=<token>&fps=15
 `device`, `token`, `lease` (a hub lease id), `fps` and `audio=true`. See
 [streaming.md](streaming.md#the-viewer).
 
+### Screenshot comparison
+
+`assertScreenshot` takes three options for unattended runs: `mask`, selectors whose
+element bounds are left out of the comparison on both images, and which fail the step if
+an element is missing or has empty bounds; `requireBaseline`, which fails with
+`BASELINE_MISSING` instead of creating a missing reference (with `--update-screenshots`
+it writes the missing reference instead); and `captureOut`, where the
+settled frame is always written. With either of the last two, every result's `data`,
+passing or failing, holds `code`, `matchPercentage`, `differingPixels`, `totalPixels`,
+`diffPath` and `capturePath`. A screen that changed size always fails with code
+`SIZE_MISMATCH`; it is compared on a common canvas only for its diff and numbers.
+A step that compared nothing passes with code `BASELINE_CREATED` when it wrote a
+missing reference, or `BASELINE_UPDATED` when it rewrote one under
+`--update-screenshots`, and its match figures are zero; a comparison has no code.
+Paths must sit inside the device's `flowDir`; a call's `cwd` does not apply to them.
+`captureOut` is an output, like `takeScreenshot`'s path: a remote caller's lands in the
+call's outputs directory and a client targeting a hub fetches it back. It may not name
+the step's reference or its diff, which it would overwrite before the comparison.
+
 ### `GET /v1/devices/{id}/hierarchy`
 
 `{"ok": true, "data": {…}}` where `data` is the normalized tree
@@ -1020,8 +1039,14 @@ JSON) with its content type.
 
 ### `GET /v1/devices/{id}/state`
 
-`{"ok": true, "data": {…}}` — foreground app, orientation and whatever else
-the platform reports.
+`{"ok": true, "data": {…}}` — `appState`, `foregroundApp` (the bundle or package id
+in front), orientation and whatever else the platform reports. The foreground lookup
+has a two-second limit; on timeout the two fields are absent and the rest still answer.
+`appState` is `foreground` when the session's app (the one last launched) is in front
+and `background` when another app is, which is also what a crashed app looks like;
+WDA, which does not know the session's app, reports only `foregroundApp`.
+`devicelab_ios` reports the state of the attached app itself, so a crashed app reads
+`not_running`.
 
 ### `GET /v1/devices/{id}/info`
 

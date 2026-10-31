@@ -142,6 +142,9 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "path", Type: "string", Doc: "", Path: true},
 		{Key: "cropOn", Type: "*Selector", Doc: ""},
 		{Key: "thresholdPercentage", Type: "any", Doc: ""},
+		{Key: "mask", Type: "[]Selector", Doc: "Mask lists elements whose bounds are left out of the comparison on both images. It cannot be combined with cropOn."},
+		{Key: "requireBaseline", Type: "bool", Doc: "RequireBaseline fails with BASELINE_MISSING when the reference does not exist, instead of creating it from this capture. With --update-screenshots the missing reference is written."},
+		{Key: "captureOut", Type: "string", Doc: "CaptureOut is where the settled frame is always written, whether the comparison passes, fails or has no baseline. It may not name the reference or its diff.", Output: true},
 	}},
 	"assertTrue": {Name: "assertTrue", Scalar: "condition", BareField: "condition", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts a script condition is true (alias for assertCondition).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

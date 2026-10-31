@@ -356,7 +356,9 @@ func (w *bundleWalk) steps(steps []flow.Step, file, dir string, env map[string]s
 				}
 			}
 		case *flow.AssertScreenshotStep:
-			err = w.screenshotRef(file, dir, s, env)
+			if err = w.screenshotRef(file, dir, s, env); err == nil {
+				err = w.output(file, s, "captureOut", s.CaptureOut, env)
+			}
 		case *flow.RunBrowserScriptStep:
 			err = w.input(file, dir, s, "file", s.File, env)
 		case *flow.RunWebViewScriptStep:

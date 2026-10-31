@@ -339,3 +339,56 @@ func TestParseBlobRef(t *testing.T) {
 		t.Fatal("withPNG")
 	}
 }
+
+// captureOut is an output, as takeScreenshot.path is: a remote caller's capture
+// goes under OutputsDir and is reported, even when it names a bundle file, so
+// a bundle's shared, hard-linked blobs are never written; a path the output
+// rule refuses is FORBIDDEN under the captureOut field.
+func TestPolicy_RemoteCaptureOutIsAnOutput(t *testing.T) {
+	s, report := newTestSession(t, SessionConfig{FlowDir: t.TempDir()}, mock.Config{})
+	bundle := filepath.Join(report, "bundles", "abc")
+	reference := mockPNG(t)
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "ref.png"), reference, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "other.png"), redPNG(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outputs := filepath.Join(report, "outputs")
+	ctx := remoteCtx(CallerPolicy{Remote: true, BundleDir: bundle, FlowDir: bundle, OutputsDir: outputs})
+
+	out := s.Execute(ctx, &flow.AssertScreenshotStep{Path: "ref.png", CaptureOut: "other.png", ThresholdPercentage: 95})
+	if !out.Success {
+		t.Fatalf("assertScreenshot with captureOut: %+v", out.Error)
+	}
+	if strings.Join(out.Outputs, ",") != "outputs/other.png" {
+		t.Fatalf("outputs = %v", out.Outputs)
+	}
+	if got, _ := os.ReadFile(filepath.Join(bundle, "other.png")); !bytes.Equal(got, redPNG(t)) {
+		t.Fatal("the bundle file named by captureOut was overwritten")
+	}
+	if got, _ := os.ReadFile(filepath.Join(outputs, "other.png")); !bytes.Equal(got, reference) {
+		t.Fatal("the capture should be under outputs/")
+	}
+	// captureOut naming the reference itself leaves the reference alone too.
+	if out := s.Execute(ctx, &flow.AssertScreenshotStep{Path: "ref.png", CaptureOut: "ref.png", ThresholdPercentage: 95}); !out.Success {
+		t.Fatalf("captureOut on the reference: %+v", out.Error)
+	}
+	if got, _ := os.ReadFile(filepath.Join(bundle, "ref.png")); !bytes.Equal(got, reference) {
+		t.Fatal("the reference blob was written")
+	}
+
+	host := filepath.Join(t.TempDir(), "host.png")
+	for _, bad := range []string{host, "../escape.png", "a/../../escape.png"} {
+		wantForbidden(t, s.Execute(ctx, &flow.AssertScreenshotStep{Path: "ref.png", CaptureOut: bad}), "captureOut")
+	}
+	if _, err := os.Stat(host); !os.IsNotExist(err) {
+		t.Fatal("a refused capture must not be written on the host")
+	}
+	// No outputs directory: refused, as takeScreenshot is.
+	wantForbidden(t, s.Execute(remoteCtx(CallerPolicy{Remote: true, BundleDir: bundle, FlowDir: bundle}),
+		&flow.AssertScreenshotStep{Path: "ref.png", CaptureOut: "x.png"}), "captureOut")
+}

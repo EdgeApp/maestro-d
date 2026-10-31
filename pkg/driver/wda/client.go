@@ -3,6 +3,7 @@ package wda
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -397,6 +398,30 @@ func (c *Client) AcceptAlert() error {
 func (c *Client) DismissAlert() error {
 	_, err := c.post(c.sessionPath("/alert/dismiss"), nil)
 	return err
+}
+
+// ActiveAppID returns the bundle id of the app in front. The request is
+// abandoned when ctx ends.
+func (c *Client) ActiveAppID(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/wda/activeAppInfo", nil)
+	if err != nil {
+		return "", err
+	}
+	httpResp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+	resp, err := c.parseResponse(httpResp)
+	if err != nil {
+		return "", err
+	}
+	if value, ok := resp["value"].(map[string]interface{}); ok {
+		if id, ok := value["bundleId"].(string); ok {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("invalid activeAppInfo response")
 }
 
 // GetOrientation returns the current orientation.

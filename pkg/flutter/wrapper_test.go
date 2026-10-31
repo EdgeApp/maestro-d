@@ -806,3 +806,78 @@ func TestFlutterDriver_PassThroughs(t *testing.T) {
 	}
 	d.SetContext(context.Background())
 }
+
+type locatingInner struct {
+	mockDriver
+	info *core.ElementInfo
+}
+
+func (m *locatingInner) LocateElement(flow.Selector) (*core.ElementInfo, error) {
+	return m.info, nil
+}
+
+func TestFlutterDriver_LocateElement(t *testing.T) {
+	want := &core.ElementInfo{Bounds: core.Bounds{Width: 4, Height: 4}}
+	located := &FlutterDriver{inner: &locatingInner{info: want}}
+	if got, err := located.LocateElement(flow.Selector{ID: "x"}); err != nil || got != want {
+		t.Errorf("should pass through to the inner locator: %v, %v", got, err)
+	}
+	visible := &FlutterDriver{inner: &mockDriver{executeFunc: func(flow.Step) *core.CommandResult {
+		return &core.CommandResult{Success: true, Element: want}
+	}}}
+	if got, err := visible.LocateElement(flow.Selector{ID: "x"}); err != nil || got != want {
+		t.Errorf("should use the visibility check when the inner driver has no locator: %v, %v", got, err)
+	}
+	failed := &FlutterDriver{inner: &mockDriver{executeFunc: func(flow.Step) *core.CommandResult {
+		return &core.CommandResult{Success: false, Message: "gone"}
+	}}}
+	if _, err := failed.LocateElement(flow.Selector{ID: "x"}); err == nil {
+		t.Error("a failed visibility check should be an error")
+	}
+}
+
+// failingLocator's own lookup finds nothing, as a driver does for a widget only
+// Flutter semantics expose.
+type failingLocator struct {
+	mockDriver
+	info *core.ElementInfo
+	err  error
+}
+
+func (m *failingLocator) LocateElement(flow.Selector) (*core.ElementInfo, error) {
+	return m.info, m.err
+}
+
+func TestFlutterDriver_LocateElementFallsBackToFlutter(t *testing.T) {
+	semanticsDump := `SemanticsNode#0
+ Rect.fromLTRB(0.0, 0.0, 400.0, 800.0)
+ scaled by 2.0x
+ ├─SemanticsNode#1
+   Rect.fromLTRB(10.0, 20.0, 200.0, 60.0)
+   label: "Welcome"
+`
+	wsURL, cleanup := startMockVMService(t, semanticsDump)
+	defer cleanup()
+	client, err := Connect(wsURL)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer client.Close()
+
+	notVisible := func(flow.Step) *core.CommandResult {
+		return core.ErrorResult(fmt.Errorf("Element not visible: text=\"Welcome\""), "")
+	}
+	for name, inner := range map[string]*failingLocator{
+		"lookup error": {mockDriver: mockDriver{executeFunc: notVisible}, err: fmt.Errorf("not found")},
+		"empty bounds": {mockDriver: mockDriver{executeFunc: notVisible}, info: &core.ElementInfo{}},
+	} {
+		fd := &FlutterDriver{inner: inner, client: client}
+		element, err := fd.LocateElement(flow.Selector{Text: "Welcome"})
+		if err != nil {
+			t.Fatalf("%s: the Flutter fallback should find the widget: %v", name, err)
+		}
+		if element == nil || element.Bounds.Width <= 0 || element.Bounds.Height <= 0 {
+			t.Fatalf("%s: element = %+v, want Flutter's bounds", name, element)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package uiautomator2
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3379,3 +3380,60 @@ func TestSimpleSelectorWithIDAndIndex(t *testing.T) {
 }
 
 // Note: App lifecycle tests are in commands_test.go
+
+func TestGetStateForegroundApp(t *testing.T) {
+	shell := &MockShellExecutor{}
+	shell.response = "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"
+	driver := New(&MockUIA2Client{orientationData: "PORTRAIT"}, nil, shell)
+	state := driver.GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "" {
+		t.Errorf("with no app launched only foregroundApp is known: %+v", state)
+	}
+	driver.currentAppID = "app.teamstation.app"
+	state = driver.GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "foreground" {
+		t.Errorf("got %+v", state)
+	}
+	if state.Orientation != "portrait" {
+		t.Errorf("existing fields must keep their values: %+v", state)
+	}
+	// The app crashed and the launcher is in front.
+	shell.response = "  topResumedActivity=ActivityRecord{1b u0 com.android.launcher3/.Launcher t1}"
+	if state := driver.GetState(); state.ForegroundApp != "com.android.launcher3" || state.AppState != "background" {
+		t.Errorf("the launcher in front is not the app in the foreground: %+v", state)
+	}
+	shell.response = "nothing resumed"
+	if state := driver.GetState(); state.ForegroundApp != "" || state.AppState != "" {
+		t.Errorf("no app in front should leave the fields absent: %+v", state)
+	}
+	shell.err = errors.New("adb gone")
+	if state := driver.GetState(); state.ForegroundApp != "" {
+		t.Errorf("a failed shell should leave the field absent: %+v", state)
+	}
+}
+
+// deadlineShell is a device shell that takes a context, as AndroidDevice does.
+type deadlineShell struct {
+	MockShellExecutor
+	deadline time.Time
+	hasLimit bool
+}
+
+func (m *deadlineShell) ShellContext(ctx context.Context, cmd string) (string, error) {
+	m.deadline, m.hasLimit = ctx.Deadline()
+	return m.Shell(cmd)
+}
+
+// The foreground lookup's shell runs under the lookup's limit, so a hung adb
+// is killed rather than left running after GetState gives up.
+func TestGetStateForegroundShellGetsTheLimit(t *testing.T) {
+	shell := &deadlineShell{}
+	shell.response = "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"
+	driver := New(&MockUIA2Client{orientationData: "PORTRAIT"}, nil, shell)
+	if state := driver.GetState(); state.ForegroundApp != "app.teamstation.app" {
+		t.Fatalf("got %+v", state)
+	}
+	if !shell.hasLimit || time.Until(shell.deadline) > core.ForegroundLookupLimit {
+		t.Errorf("the shell should run under the lookup's limit: %v %v", shell.hasLimit, shell.deadline)
+	}
+}

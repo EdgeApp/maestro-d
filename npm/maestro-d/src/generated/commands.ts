@@ -149,6 +149,12 @@ export interface AssertScreenshotParams {
   path?: string
   cropOn?: Selector
   thresholdPercentage?: unknown
+  /** Mask lists elements whose bounds are left out of the comparison on both images. It cannot be combined with cropOn. */
+  mask?: Selector[]
+  /** RequireBaseline fails with BASELINE_MISSING when the reference does not exist, instead of creating it from this capture. With --update-screenshots the missing reference is written. */
+  requireBaseline?: boolean
+  /** CaptureOut is where the settled frame is always written, whether the comparison passes, fails or has no baseline. It may not name the reference or its diff. */
+  captureOut?: string
 }
 
 /** Asserts a script condition is true (alias for assertCondition). */
@@ -1524,7 +1530,7 @@ export const COMMANDS = {
   assertNoDefectsWithAI: { name: 'assertNoDefectsWithAI', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Uses AI to check for visual defects.' },
   assertNoJSErrors: { name: 'assertNoJSErrors', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Asserts that no console errors or uncaught exceptions occurred.' },
   assertNotVisible: { name: 'assertNotVisible', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Asserts element is not visible.' },
-  assertScreenshot: { name: 'assertScreenshot', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Compares a screenshot with a reference image.', files: { path: { kind: 'path' } } },
+  assertScreenshot: { name: 'assertScreenshot', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Compares a screenshot with a reference image.', files: { path: { kind: 'path' }, captureOut: { kind: 'output' } } },
   assertTrue: { name: 'assertTrue', scalar: 'condition', bareField: 'condition', valueLess: false, compound: false, doc: 'Asserts a script condition is true (alias for assertCondition).' },
   assertVisible: { name: 'assertVisible', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Asserts element is visible.' },
   assertWithAI: { name: 'assertWithAI', scalar: 'assertion', bareField: 'assertion', valueLess: false, compound: false, doc: 'Uses AI to verify an assertion.' },

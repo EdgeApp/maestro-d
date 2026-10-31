@@ -333,6 +333,18 @@ extension RunnerTests {
         ok: true,
         data: DataPayload(currentUptimeMs: currentUptimeMs())
       )
+    case .appState:
+      guard let bundleId = command.appBundleId?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !bundleId.isEmpty
+      else {
+        return Response(ok: false, error: ErrorPayload(code: "INVALID_ARGUMENT", message: "appState requires appBundleId"))
+      }
+      // A fresh handle, not currentApp: reading state must not retarget or
+      // activate anything.
+      return Response(
+        ok: true,
+        data: DataPayload(appState: appStateString(XCUIApplication(bundleIdentifier: bundleId)))
+      )
     case .tap:
       if let selectorKey = command.selectorKey, let selectorValue = command.selectorValue {
         let match = findElement(app: activeApp, selectorKey: selectorKey, selectorValue: selectorValue)

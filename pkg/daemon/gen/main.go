@@ -87,7 +87,7 @@ type fileMark struct {
 var fileFields = map[string]map[string]fileMark{
 	"addMedia":         {"files": {Path: true}},
 	"runScript":        {"script": {Path: true, Suffix: ".js"}, "file": {Path: true, Suffix: ".js"}},
-	"assertScreenshot": {"path": {Path: true}},
+	"assertScreenshot": {"path": {Path: true}, "captureOut": {Output: true}},
 	"runBrowserScript": {"file": {Path: true}},
 	"runWebViewScript": {"file": {Path: true}},
 	"uploadFile":       {"path": {Path: true}, "paths": {Path: true}},

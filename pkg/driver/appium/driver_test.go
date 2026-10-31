@@ -1,8 +1,14 @@
 package appium
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2892,4 +2898,232 @@ func TestAccessibilityLabelOf(t *testing.T) {
 			t.Errorf("made %d requests, want 0", calls)
 		}
 	})
+}
+
+func TestAppiumGetStateForegroundApp(t *testing.T) {
+	cases := []struct {
+		platform string
+		value    interface{}
+		want     string
+	}{
+		{"android", "app.teamstation.app", "app.teamstation.app"},
+		{"ios", map[string]interface{}{"bundleId": "app.teamstation.app"}, "app.teamstation.app"},
+		{"ios", map[string]interface{}{}, ""},
+	}
+	for _, tc := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/execute") {
+				writeJSON(w, map[string]interface{}{"value": tc.value})
+				return
+			}
+			writeJSON(w, map[string]interface{}{"value": "PORTRAIT"})
+		}))
+		driver := createTestAppiumDriver(server)
+		driver.platform = tc.platform
+		if state := driver.GetState(); state.ForegroundApp != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.platform, state.ForegroundApp, tc.want)
+		}
+		server.Close()
+	}
+}
+
+// appState compares the app in front with the session's app id.
+func TestAppiumGetStateAppStateFollowsTheSessionApp(t *testing.T) {
+	front := "com.example.app"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/execute") {
+			writeJSON(w, map[string]interface{}{"value": front})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"value": "PORTRAIT"})
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+	if state := driver.GetState(); state.AppState != "foreground" {
+		t.Errorf("the session's app in front: %+v", state)
+	}
+	front = "com.android.launcher3"
+	if state := driver.GetState(); state.AppState != "background" || state.ForegroundApp != front {
+		t.Errorf("the launcher in front: %+v", state)
+	}
+	driver.appID = ""
+	if state := driver.GetState(); state.AppState != "" || state.ForegroundApp != front {
+		t.Errorf("no session app: %+v", state)
+	}
+}
+
+func TestAppiumGetStateForegroundAppErrors(t *testing.T) {
+	for _, platform := range []string{"android", "ios"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/execute") {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]interface{}{"value": map[string]interface{}{"error": "no", "message": "no"}})
+				return
+			}
+			writeJSON(w, map[string]interface{}{"value": "PORTRAIT"})
+		}))
+		driver := createTestAppiumDriver(server)
+		driver.platform = platform
+		if state := driver.GetState(); state.ForegroundApp != "" {
+			t.Errorf("%s: a failed call should leave the field absent: %+v", platform, state)
+		}
+		server.Close()
+	}
+}
+
+// The foreground lookup's request ends with its context, so GetState giving
+// up leaves no request running against Appium.
+func TestExecuteMobileContextHonoursItsContext(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := createTestAppiumDriver(server).client.ExecuteMobileContext(ctx, "getCurrentPackage", map[string]interface{}{}); err == nil {
+		t.Error("a cancelled request should fail")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the request outlived its context: %v", elapsed)
+	}
+}
+
+// appState follows the app launchApp last started, as the Android drivers'
+// does, not only the session capabilities' app: a flow that launches another
+// app is not reported as backgrounded (which reads as a crash).
+func TestAppiumGetStateFollowsTheLaunchedApp(t *testing.T) {
+	front := "com.example.other"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/execute") {
+			writeJSON(w, map[string]interface{}{"value": front})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"value": nil})
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+	if state := driver.GetState(); state.AppState != "background" {
+		t.Fatalf("before the launch, another app is in front: %+v", state)
+	}
+	if result := driver.Execute(&flow.LaunchAppStep{AppID: "com.example.other"}); !result.Success {
+		t.Fatalf("launch: %s", result.Message)
+	}
+	if state := driver.GetState(); state.AppState != "foreground" || state.ForegroundApp != front {
+		t.Errorf("the launched app in front is the session's app: %+v", state)
+	}
+	front = "com.example.app"
+	if state := driver.GetState(); state.AppState != "background" {
+		t.Errorf("the capabilities' app is no longer the session's: %+v", state)
+	}
+}
+
+// deviceInfoServer answers mobile: deviceInfo with info, or fails it when
+// info is nil, and counts the calls.
+func deviceInfoServer(info map[string]interface{}, calls *int) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body struct {
+			Script string `json:"script"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !strings.HasSuffix(r.URL.Path, "/execute/sync") || body.Script != "mobile: deviceInfo" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		*calls++
+		if info == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]interface{}{"value": map[string]interface{}{"error": "unknown error", "message": "no"}})
+			return
+		}
+		writeJSON(w, map[string]interface{}{"value": info})
+	}))
+}
+
+// On Android the window Appium reports leaves out the navigation bar, but
+// element bounds and the screenshot are both whole-display pixels: a mask
+// is scaled by the real display size, so one at the bottom of the screen
+// covers its element's pixels, not ones 100+ px lower.
+func TestAppiumScreenshotSpaceIsTheRealDisplayOnAndroid(t *testing.T) {
+	calls := 0
+	server := deviceInfoServer(map[string]interface{}{"realDisplaySize": "1080x2400"}, &calls)
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+	driver.client.screenW, driver.client.screenH = 1080, 2274 // the window, short of the navigation bar
+
+	width, height, err := core.ScreenshotSpace(driver)
+	if err != nil || width != 1080 || height != 2400 {
+		t.Fatalf("got %dx%d, %v; want the real display 1080x2400", width, height, err)
+	}
+
+	// The capture at a tenth of the display's size, which the mask scales to.
+	img := image.NewRGBA(image.Rect(0, 0, 108, 240))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	masked, err := core.MaskImage(buf.Bytes(), []core.Bounds{{X: 0, Y: 2200, Width: 1080, Height: 100}}, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := png.Decode(bytes.NewReader(masked))
+	if err != nil {
+		t.Fatal(err)
+	}
+	black := func(y int) bool { r, _, _, _ := out.At(54, y).RGBA(); return r == 0 }
+	for _, y := range []int{220, 229} {
+		if !black(y) {
+			t.Errorf("row %d, inside the element, is not masked", y)
+		}
+	}
+	for _, y := range []int{219, 230, 239} {
+		if black(y) {
+			t.Errorf("row %d, outside the element, is masked", y)
+		}
+	}
+}
+
+// iOS bounds are in points of the window Appium reports, which is the whole
+// screen; no device info is asked for.
+func TestAppiumScreenshotSpaceIsTheWindowOnIOS(t *testing.T) {
+	calls := 0
+	server := deviceInfoServer(map[string]interface{}{"realDisplaySize": "1170x2532"}, &calls)
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+	driver.platform = "ios"
+	driver.client.screenW, driver.client.screenH = 390, 844
+
+	width, height, err := core.ScreenshotSpace(driver)
+	if err != nil || width != 390 || height != 844 || calls != 0 {
+		t.Fatalf("got %dx%d, %v after %d device info calls; want the window 390x844", width, height, err, calls)
+	}
+}
+
+// A display size Appium cannot give fails the mask rather than scaling it by
+// the shorter window.
+func TestAppiumScreenshotSpaceErrors(t *testing.T) {
+	for name, info := range map[string]map[string]interface{}{
+		"failed call":      nil,
+		"no display size":  {"apiVersion": "34"},
+		"bad display size": {"realDisplaySize": "wide"},
+	} {
+		calls := 0
+		server := deviceInfoServer(info, &calls)
+		driver := createTestAppiumDriver(server)
+		if width, height, err := core.ScreenshotSpace(driver); err == nil {
+			t.Errorf("%s: got %dx%d with no error", name, width, height)
+		}
+		server.Close()
+	}
 }

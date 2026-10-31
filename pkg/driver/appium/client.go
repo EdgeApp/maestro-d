@@ -3,6 +3,7 @@ package appium
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -820,7 +821,13 @@ func toStringSlice(v interface{}) []string {
 
 // ExecuteMobile executes a mobile: command.
 func (c *Client) ExecuteMobile(command string, args map[string]interface{}) (interface{}, error) {
-	resp, err := c.post(c.sessionPath()+"/execute/sync", map[string]interface{}{
+	return c.ExecuteMobileContext(context.Background(), command, args)
+}
+
+// ExecuteMobileContext is ExecuteMobile whose request is abandoned when ctx
+// ends (maestro-d).
+func (c *Client) ExecuteMobileContext(ctx context.Context, command string, args map[string]interface{}) (interface{}, error) {
+	resp, err := c.requestContext(ctx, "POST", c.sessionPath()+"/execute/sync", map[string]interface{}{
 		"script": "mobile: " + command,
 		"args":   []interface{}{args},
 	})
@@ -853,6 +860,11 @@ func (c *Client) delete(path string) (map[string]interface{}, error) {
 }
 
 func (c *Client) request(method, path string, body interface{}) (map[string]interface{}, error) {
+	return c.requestContext(context.Background(), method, path, body)
+}
+
+// requestContext is request under ctx (maestro-d).
+func (c *Client) requestContext(ctx context.Context, method, path string, body interface{}) (map[string]interface{}, error) {
 	start := time.Now()
 	url := c.serverURL + path
 
@@ -872,7 +884,7 @@ func (c *Client) request(method, path string, body interface{}) (map[string]inte
 
 	logger.Debug("Appium %s %s body=%s", method, path, bodyStr)
 
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return nil, err
 	}

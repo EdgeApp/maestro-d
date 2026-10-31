@@ -780,6 +780,7 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 	if err := d.client.LaunchApp(appID); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to launch app: %s", appID))
 	}
+	d.launchedAppID = appID // maestro-d: GetState's appState
 
 	return successResult(fmt.Sprintf("Launched app: %s", appID), nil)
 }
