@@ -16,9 +16,13 @@ import (
 
 // Driver implements core.Driver using WebDriverAgent for iOS.
 type Driver struct {
-	client *Client
-	info   *core.PlatformInfo
-	udid   string // Device UDID for simctl commands
+	isTV        bool
+	tvRemoteMu  sync.Mutex
+	tvRemote    *tvRemoteProcess
+	tvSwipeSend func(context.Context, string, [4]float64, int, bool) error
+	client      *Client
+	info        *core.PlatformInfo
+	udid        string // Device UDID for simctl commands
 
 	// In-flight --record capture (simulators only)
 	recording *simulator.Recording
