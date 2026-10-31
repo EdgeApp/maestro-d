@@ -449,3 +449,88 @@ func blendRGBA(dst, src color.RGBA) color.RGBA {
 		A: 255,
 	}
 }
+
+// MaskImage paints the given screen-space bounds black, scaling them from the
+// screen's size to the image's, and returns the image as a PNG. Both images in a
+// comparison are masked alike, so a masked region can never differ.
+func MaskImage(data []byte, masks []Bounds, screenW, screenH int) ([]byte, error) {
+	if screenW <= 0 || screenH <= 0 {
+		return nil, fmt.Errorf("mask requires screen dimensions")
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode image to mask: %w", err)
+	}
+	b := decoded.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(out, out.Bounds(), decoded, b.Min, draw.Src)
+	scaleX := float64(b.Dx()) / float64(screenW)
+	scaleY := float64(b.Dy()) / float64(screenH)
+	black := image.NewUniform(color.RGBA{A: 255})
+	for _, m := range masks {
+		rect := image.Rect(
+			int(math.Floor(float64(m.X)*scaleX)),
+			int(math.Floor(float64(m.Y)*scaleY)),
+			int(math.Ceil(float64(m.X+m.Width)*scaleX)),
+			int(math.Ceil(float64(m.Y+m.Height)*scaleY)),
+		).Intersect(out.Bounds())
+		draw.Draw(out, rect, black, image.Point{}, draw.Src)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, fmt.Errorf("encode masked image: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// PadToCommonSize makes two images the same size by extending each with opaque
+// magenta on the right and bottom, so a screen that grew can be compared and
+// its diff shows where. Same-sized images come back untouched.
+func PadToCommonSize(aData, bData []byte) ([]byte, []byte, error) {
+	a, _, err := image.Decode(bytes.NewReader(aData))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode expected image: %w", err)
+	}
+	b, _, err := image.Decode(bytes.NewReader(bData))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode actual image: %w", err)
+	}
+	if a.Bounds().Size() == b.Bounds().Size() {
+		return aData, bData, nil
+	}
+	width := max(a.Bounds().Dx(), b.Bounds().Dx())
+	height := max(a.Bounds().Dy(), b.Bounds().Dy())
+	pad := func(img image.Image) ([]byte, error) {
+		canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+		draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.RGBA{R: 255, B: 255, A: 255}), image.Point{}, draw.Src)
+		draw.Draw(canvas, image.Rect(0, 0, img.Bounds().Dx(), img.Bounds().Dy()), img, img.Bounds().Min, draw.Src)
+		var out bytes.Buffer
+		if err := png.Encode(&out, canvas); err != nil {
+			return nil, err
+		}
+		return out.Bytes(), nil
+	}
+	paddedA, err := pad(a)
+	if err != nil {
+		return nil, nil, err
+	}
+	paddedB, err := pad(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	return paddedA, paddedB, nil
+}
+
+// ScreenshotOutcome is assertScreenshot's result data when a caller opted into
+// requireBaseline or captureOut, so it need not parse a message.
+type ScreenshotOutcome struct {
+	Code            string  `json:"code,omitempty"`
+	MatchPercentage float64 `json:"matchPercentage"`
+	DifferingPixels int     `json:"differingPixels"`
+	TotalPixels     int     `json:"totalPixels"`
+	DiffPath        string  `json:"diffPath,omitempty"`
+	CapturePath     string  `json:"capturePath,omitempty"`
+}
+
+// BaselineMissingCode names a comparison that had no reference to compare with.
+const BaselineMissingCode = "BASELINE_MISSING"

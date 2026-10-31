@@ -2191,3 +2191,10 @@ func (d *Driver) applyDarkMode(enabled bool) *core.CommandResult {
 	}
 	return successResult(fmt.Sprintf("Set %s mode", core.DarkModeStateName(enabled)), nil)
 }
+
+// LocateElement finds an element with its real bounds. Visibility checks take a
+// faster path that leaves bounds empty, which a screenshot mask cannot use.
+func (d *Driver) LocateElement(sel flow.Selector) (*core.ElementInfo, error) {
+	_, info, err := d.findElement(sel, false, 0)
+	return info, err
+}

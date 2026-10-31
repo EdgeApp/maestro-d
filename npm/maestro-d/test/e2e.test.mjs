@@ -375,6 +375,25 @@ describe('device state', () => {
     assert.equal(r.ok, true)
   })
 
+  test('assertScreenshot reports a missing baseline as data and creates nothing', async () => {
+    const reference = path.join(tmp, 'never-created.png')
+    const capture = path.join(tmp, 'capture.png')
+    await dev.detach()
+    const scoped = await daemon.attach({ ...MOCK, flowDir: tmp })
+    const failure = await scoped
+      .assertScreenshot({ path: reference, requireBaseline: true, captureOut: capture })
+      .then(() => undefined, e => e)
+    await scoped.detach()
+    dev = await daemon.attach(MOCK)
+    assert.ok(failure, 'a missing baseline must fail')
+    assert.equal(failure.code, 'COMMAND_FAILED')
+    assert.match(failure.message, /BASELINE_MISSING/)
+    assert.equal(fs.existsSync(reference), false)
+    assert.equal(failure.result.data.code, 'BASELINE_MISSING')
+    assert.equal(failure.result.data.capturePath, capture)
+    assert.equal(fs.existsSync(capture), true)
+  })
+
   test('hierarchy(), state() and platformInfo()', async () => {
     const h = await dev.hierarchy()
     assert.equal(h.type, 'View')

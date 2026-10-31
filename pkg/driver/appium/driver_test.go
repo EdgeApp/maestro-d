@@ -2893,3 +2893,51 @@ func TestAccessibilityLabelOf(t *testing.T) {
 		}
 	})
 }
+
+func TestAppiumGetStateForegroundApp(t *testing.T) {
+	cases := []struct {
+		platform string
+		value    interface{}
+		want     string
+	}{
+		{"android", "app.teamstation.app", "app.teamstation.app"},
+		{"ios", map[string]interface{}{"bundleId": "app.teamstation.app"}, "app.teamstation.app"},
+		{"ios", map[string]interface{}{}, ""},
+	}
+	for _, tc := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/execute") {
+				writeJSON(w, map[string]interface{}{"value": tc.value})
+				return
+			}
+			writeJSON(w, map[string]interface{}{"value": "PORTRAIT"})
+		}))
+		driver := createTestAppiumDriver(server)
+		driver.platform = tc.platform
+		if state := driver.GetState(); state.ForegroundApp != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.platform, state.ForegroundApp, tc.want)
+		}
+		server.Close()
+	}
+}
+
+func TestAppiumGetStateForegroundAppErrors(t *testing.T) {
+	for _, platform := range []string{"android", "ios"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(r.URL.Path, "/execute") {
+				w.WriteHeader(http.StatusInternalServerError)
+				writeJSON(w, map[string]interface{}{"value": map[string]interface{}{"error": "no", "message": "no"}})
+				return
+			}
+			writeJSON(w, map[string]interface{}{"value": "PORTRAIT"})
+		}))
+		driver := createTestAppiumDriver(server)
+		driver.platform = platform
+		if state := driver.GetState(); state.ForegroundApp != "" {
+			t.Errorf("%s: a failed call should leave the field absent: %+v", platform, state)
+		}
+		server.Close()
+	}
+}

@@ -3324,3 +3324,19 @@ func TestTapOn_BlockedByOverlay_ReportsCause(t *testing.T) {
 		t.Error("expected the hit test to be requested by default")
 	}
 }
+
+func TestDriver_GetStateForegroundApp(t *testing.T) {
+	client := &richClient{trackingClient: newTrackingClient(), orientation: "PORTRAIT"}
+	shell := &mockShell{out: "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"}
+	state := New(client, &core.PlatformInfo{}, shell).GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "foreground" {
+		t.Errorf("got %+v", state)
+	}
+	shell.err = errors.New("adb gone")
+	if state := New(client, &core.PlatformInfo{}, shell).GetState(); state.ForegroundApp != "" {
+		t.Errorf("a failed shell should leave the field absent: %+v", state)
+	}
+	if state := New(client, &core.PlatformInfo{}, nil).GetState(); state.ForegroundApp != "" {
+		t.Errorf("no shell should leave the field absent: %+v", state)
+	}
+}

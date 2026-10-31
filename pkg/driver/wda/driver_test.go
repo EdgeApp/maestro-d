@@ -6139,3 +6139,48 @@ func TestInputTextFailsWhenNothingTakesFocus(t *testing.T) {
 		t.Errorf("error should name the missing focus, got %q", result.Message)
 	}
 }
+
+func TestGetStateForegroundApp(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/wda/activeAppInfo"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"value": map[string]interface{}{"bundleId": "app.teamstation.app"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/orientation"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": "PORTRAIT"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	state := createTestDriver(server).GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "foreground" {
+		t.Errorf("got %+v", state)
+	}
+	if state.Orientation != "portrait" {
+		t.Errorf("existing fields must keep their values: %+v", state)
+	}
+}
+
+func TestGetStateBadActiveAppInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": "unexpected"})
+	}))
+	defer server.Close()
+	if state := createTestDriver(server).GetState(); state.ForegroundApp != "" || state.AppState != "" {
+		t.Errorf("a bad reply should leave the fields absent: %+v", state)
+	}
+}
+
+func TestActiveAppIDFailsCleanly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	if id, err := createTestDriver(server).client.ActiveAppID(); err == nil {
+		t.Errorf("expected an error, got %q", id)
+	}
+}

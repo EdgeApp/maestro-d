@@ -662,7 +662,23 @@ func (d *Driver) GetState() *core.StateSnapshot {
 		state.ClipboardText = clipboard
 	}
 
+	state.SetForeground(d.foregroundApp())
+
 	return state
+}
+
+// foregroundApp reads the resumed package over the shell, or "" without one.
+func (d *Driver) foregroundApp() string {
+	if d.device == nil {
+		return ""
+	}
+	return core.WithinForegroundLimit(func() (string, error) {
+		output, err := d.device.Shell(core.ForegroundDumpsysCommand)
+		if err != nil {
+			return "", err
+		}
+		return core.ForegroundPackageFromDumpsys(output), nil
+	})
 }
 
 // GetPlatformInfo returns device/platform information.

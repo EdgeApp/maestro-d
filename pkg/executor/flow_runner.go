@@ -746,6 +746,21 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 		}
 	}
 
+	if len(step.Mask) > 0 && step.CropOn != nil {
+		err := fmt.Errorf("assertScreenshot cannot combine mask with cropOn")
+		return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
+	}
+
+	wantsOutcome := step.RequireBaseline || step.CaptureOut != ""
+	outcome := core.ScreenshotOutcome{}
+	if step.CaptureOut != "" {
+		capturePath, err := fr.writeCapture(step.CaptureOut, capturedData)
+		if err != nil {
+			return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
+		}
+		outcome.CapturePath = capturePath
+	}
+
 	referencePath := fr.script.ResolvePath(step.Path)
 	if filepath.Ext(referencePath) == "" {
 		referencePath += ".png"
@@ -771,6 +786,11 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 				Error:   err,
 				Message: err.Error(),
 			}
+		}
+		if step.RequireBaseline {
+			outcome.Code = core.BaselineMissingCode
+			err := fmt.Errorf("%s: no reference screenshot at %s", core.BaselineMissingCode, referencePath)
+			return &core.CommandResult{Success: false, Error: err, Message: err.Error(), Data: outcome}
 		}
 		if writeErr := writeScreenshotBaseline(referencePath, capturedData); writeErr != nil {
 			return &core.CommandResult{
@@ -801,7 +821,25 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 		}
 	}
 
-	stats, err := core.CompareImages(referenceData, capturedData)
+	comparedReference, comparedCapture := referenceData, capturedData
+	if len(step.Mask) > 0 {
+		var maskErr error
+		comparedReference, comparedCapture, maskErr = fr.applyScreenshotMasks(step, referenceData, capturedData)
+		if maskErr != nil {
+			return &core.CommandResult{Success: false, Error: maskErr, Message: maskErr.Error()}
+		}
+	}
+
+	if wantsOutcome && step.CropOn == nil {
+		// A caller reading the outcome wants a diff of a screen that grew, not
+		// only the two sizes.
+		padded, paddedCapture, padErr := core.PadToCommonSize(comparedReference, comparedCapture)
+		if padErr == nil {
+			comparedReference, comparedCapture = padded, paddedCapture
+		}
+	}
+
+	stats, err := core.CompareImages(comparedReference, comparedCapture)
 	if err != nil {
 		// A comparison that never ran writes no diff image, so any _diff.png
 		// left by an earlier run stays on disk — and it shows the *previous*
@@ -834,10 +872,11 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 	if matchPercentage < step.ThresholdPercentage {
 		diffPath := core.DiffScreenshotPath(referencePath)
 		diffHint := ""
-		if writeErr := core.WriteScreenshotDiff(referenceData, capturedData, diffPath); writeErr != nil {
+		if writeErr := core.WriteScreenshotDiff(comparedReference, comparedCapture, diffPath); writeErr != nil {
 			logger.Warn("Failed to write screenshot diff: %v", writeErr)
 		} else {
 			diffHint = fmt.Sprintf(". Check the diff image at %s", diffPath)
+			outcome.DiffPath = diffPath
 		}
 		// Print enough decimals that a near-miss can't render as "100.00% is
 		// below threshold 100.00%", and name the differing pixel count so a
@@ -854,7 +893,7 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 			decimals, step.ThresholdPercentage,
 			pixels,
 		)
-		return &core.CommandResult{
+		mismatch := &core.CommandResult{
 			Success: false,
 			Error:   err,
 			Message: fmt.Sprintf(
@@ -865,9 +904,16 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 				diffHint,
 			),
 		}
+		if wantsOutcome {
+			outcome.MatchPercentage = stats.MatchPercentage
+			outcome.DifferingPixels = stats.DifferingPixels
+			outcome.TotalPixels = stats.TotalPixels
+			mismatch.Data = outcome
+		}
+		return mismatch
 	}
 
-	return &core.CommandResult{
+	matched := &core.CommandResult{
 		Success: true,
 		Message: fmt.Sprintf(
 			"Screenshot matches: %.2f%% (threshold: %.2f%%)",
@@ -876,6 +922,87 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 		),
 		Data: capturedData,
 	}
+	if wantsOutcome {
+		outcome.MatchPercentage = stats.MatchPercentage
+		outcome.DifferingPixels = stats.DifferingPixels
+		outcome.TotalPixels = stats.TotalPixels
+		matched.Data = outcome
+	}
+	return matched
+}
+
+// writeCapture stores the settled frame where the caller asked, under the same
+// workspace rule the reference obeys.
+func (fr *FlowRunner) writeCapture(path string, data []byte) (string, error) {
+	capturePath := fr.script.ResolvePath(path)
+	if filepath.Ext(capturePath) == "" {
+		capturePath += ".png"
+	}
+	if err := validateArtifactPath(capturePath, fr.script.FlowDir()); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(capturePath), 0o755); err != nil {
+		return "", fmt.Errorf("create capture directory for %q: %w", capturePath, err)
+	}
+	if err := os.WriteFile(capturePath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write capture %q: %w", capturePath, err)
+	}
+	return capturePath, nil
+}
+
+func (fr *FlowRunner) locateMask(sel flow.Selector) (*core.ElementInfo, error) {
+	if locator, ok := fr.driver.(core.ElementLocator); ok {
+		element, err := locator.LocateElement(sel)
+		if err != nil {
+			return nil, err
+		}
+		if element == nil {
+			return nil, fmt.Errorf("no element")
+		}
+		return element, nil
+	}
+	found := fr.driver.Execute(&flow.AssertVisibleStep{
+		BaseStep: flow.BaseStep{StepType: flow.StepAssertVisible},
+		Selector: sel,
+	})
+	if !found.Success || found.Element == nil {
+		return nil, fmt.Errorf("%s", found.Message)
+	}
+	return found.Element, nil
+}
+
+// applyScreenshotMasks resolves each mask to its element and masks both images
+// alike. A mask that matches nothing fails, rather than comparing unmasked.
+func (fr *FlowRunner) applyScreenshotMasks(
+	step *flow.AssertScreenshotStep,
+	reference, capture []byte,
+) ([]byte, []byte, error) {
+	bounds := make([]core.Bounds, 0, len(step.Mask))
+	for i := range step.Mask {
+		element, err := fr.locateMask(step.Mask[i])
+		if err != nil {
+			return nil, nil, fmt.Errorf("mask %d: element not found: %w", i, err)
+		}
+		// Empty bounds would mask nothing and let the comparison pass or fail
+		// for the wrong reason, so they are an error and never a quiet no-op.
+		if element.Bounds.Width <= 0 || element.Bounds.Height <= 0 {
+			return nil, nil, fmt.Errorf("mask %d: element has empty bounds", i)
+		}
+		bounds = append(bounds, element.Bounds)
+	}
+	info := fr.driver.GetPlatformInfo()
+	if info == nil {
+		return nil, nil, fmt.Errorf("mask requires screen dimensions")
+	}
+	maskedReference, err := core.MaskImage(reference, bounds, info.ScreenWidth, info.ScreenHeight)
+	if err != nil {
+		return nil, nil, err
+	}
+	maskedCapture, err := core.MaskImage(capture, bounds, info.ScreenWidth, info.ScreenHeight)
+	if err != nil {
+		return nil, nil, err
+	}
+	return maskedReference, maskedCapture, nil
 }
 
 // validateArtifactPath rejects a screenshot baseline/diff path that escapes

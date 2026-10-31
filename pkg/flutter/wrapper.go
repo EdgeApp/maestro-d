@@ -677,3 +677,20 @@ func (d *FlutterDriver) DetectWebView() (*core.WebViewInfo, error) {
 
 // Inner returns the underlying driver for optional interface access.
 func (d *FlutterDriver) Inner() core.Driver { return d.inner }
+
+// LocateElement passes through to the wrapped driver, so a real element lookup
+// is not hidden by the wrapper. A driver without one answers through its
+// visibility check, whose result carries bounds there.
+func (d *FlutterDriver) LocateElement(sel flow.Selector) (*core.ElementInfo, error) {
+	if locator, ok := d.inner.(core.ElementLocator); ok {
+		return locator.LocateElement(sel)
+	}
+	found := d.inner.Execute(&flow.AssertVisibleStep{
+		BaseStep: flow.BaseStep{StepType: flow.StepAssertVisible},
+		Selector: sel,
+	})
+	if !found.Success {
+		return nil, fmt.Errorf("%s", found.Message)
+	}
+	return found.Element, nil
+}

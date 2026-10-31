@@ -3363,3 +3363,24 @@ func TestSimpleSelectorWithIDAndIndex(t *testing.T) {
 }
 
 // Note: App lifecycle tests are in commands_test.go
+
+func TestGetStateForegroundApp(t *testing.T) {
+	shell := &MockShellExecutor{}
+	shell.response = "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"
+	driver := New(&MockUIA2Client{orientationData: "PORTRAIT"}, nil, shell)
+	state := driver.GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "foreground" {
+		t.Errorf("got %+v", state)
+	}
+	if state.Orientation != "portrait" {
+		t.Errorf("existing fields must keep their values: %+v", state)
+	}
+	shell.response = "nothing resumed"
+	if state := driver.GetState(); state.ForegroundApp != "" || state.AppState != "" {
+		t.Errorf("no app in front should leave the fields absent: %+v", state)
+	}
+	shell.err = errors.New("adb gone")
+	if state := driver.GetState(); state.ForegroundApp != "" {
+		t.Errorf("a failed shell should leave the field absent: %+v", state)
+	}
+}

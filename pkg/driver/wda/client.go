@@ -360,6 +360,20 @@ func (c *Client) DismissAlert() error {
 	return err
 }
 
+// ActiveAppID returns the bundle id of the app in front.
+func (c *Client) ActiveAppID() (string, error) {
+	resp, err := c.get("/wda/activeAppInfo")
+	if err != nil {
+		return "", err
+	}
+	if value, ok := resp["value"].(map[string]interface{}); ok {
+		if id, ok := value["bundleId"].(string); ok {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("invalid activeAppInfo response")
+}
+
 // GetOrientation returns the current orientation.
 func (c *Client) GetOrientation() (string, error) {
 	resp, err := c.get(c.sessionPath("/orientation"))

@@ -756,6 +756,10 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 	case *flow.AssertScreenshotStep:
 		s.Path = se.ExpandVariables(s.Path)
 		s.CropOn = se.expandSelector(s.CropOn)
+		s.CaptureOut = se.ExpandVariables(s.CaptureOut)
+		for i := range s.Mask {
+			s.Mask[i] = *se.expandSelector(&s.Mask[i])
+		}
 		// A string threshold (e.g. "${VAR}") is resolved here; a numeric
 		// literal was already resolved at parse time (Maestro #3444).
 		if str, ok := s.ThresholdRaw.(string); ok {

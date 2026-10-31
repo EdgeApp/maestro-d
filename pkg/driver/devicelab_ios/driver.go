@@ -111,7 +111,30 @@ func (d *Driver) Hierarchy() ([]byte, error) {
 // keyboard / clipboard separately on every call; the report includes what
 // the runner gave us during the most recent snapshot.
 func (d *Driver) GetState() *core.StateSnapshot {
-	return &core.StateSnapshot{}
+	state := &core.StateSnapshot{}
+	if d.client == nil || d.appID == "" {
+		return state
+	}
+	// The runner reports the target app's own state; it never activates the app
+	// to read it, so a crashed or backgrounded app reads as what it is.
+	runnerState := core.WithinForegroundLimit(func() (string, error) {
+		ctx, cancel := d.callTimeout()
+		defer cancel()
+		data, err := d.client.Call(ctx, Command{Command: CmdSnapshot, AppBundleID: d.appID})
+		if err != nil || data == nil {
+			return "", err
+		}
+		return data.AppState, nil
+	})
+	switch runnerState {
+	case "runningForeground":
+		state.SetForeground(d.appID)
+	case "runningBackground", "runningBackgroundSuspended":
+		state.AppState = "background"
+	case "notRunning":
+		state.AppState = "not_running"
+	}
+	return state
 }
 
 // GetPlatformInfo returns the cached PlatformInfo built during setup.

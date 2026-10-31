@@ -806,3 +806,32 @@ func TestFlutterDriver_PassThroughs(t *testing.T) {
 	}
 	d.SetContext(context.Background())
 }
+
+type locatingInner struct {
+	mockDriver
+	info *core.ElementInfo
+}
+
+func (m *locatingInner) LocateElement(flow.Selector) (*core.ElementInfo, error) {
+	return m.info, nil
+}
+
+func TestFlutterDriver_LocateElement(t *testing.T) {
+	want := &core.ElementInfo{Bounds: core.Bounds{Width: 4, Height: 4}}
+	located := &FlutterDriver{inner: &locatingInner{info: want}}
+	if got, err := located.LocateElement(flow.Selector{ID: "x"}); err != nil || got != want {
+		t.Errorf("should pass through to the inner locator: %v, %v", got, err)
+	}
+	visible := &FlutterDriver{inner: &mockDriver{executeFunc: func(flow.Step) *core.CommandResult {
+		return &core.CommandResult{Success: true, Element: want}
+	}}}
+	if got, err := visible.LocateElement(flow.Selector{ID: "x"}); err != nil || got != want {
+		t.Errorf("should use the visibility check when the inner driver has no locator: %v, %v", got, err)
+	}
+	failed := &FlutterDriver{inner: &mockDriver{executeFunc: func(flow.Step) *core.CommandResult {
+		return &core.CommandResult{Success: false, Message: "gone"}
+	}}}
+	if _, err := failed.LocateElement(flow.Selector{ID: "x"}); err == nil {
+		t.Error("a failed visibility check should be an error")
+	}
+}

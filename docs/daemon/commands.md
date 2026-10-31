@@ -306,6 +306,9 @@ await m.assertScreenshot({ path: '<path>', … })
 | `path` | `string` |  |
 | `cropOn` | `Selector` |  |
 | `thresholdPercentage` | `unknown` |  |
+| `mask` | `Selector[]` | Mask lists elements whose bounds are left out of the comparison on both images. It cannot be combined with cropOn. |
+| `requireBaseline` | `boolean` | RequireBaseline fails with BASELINE_MISSING when the reference does not exist, instead of creating it from this capture. |
+| `captureOut` | `string` | CaptureOut is where the settled frame is always written, whether the comparison passes, fails or has no baseline. |
 
 ## `assertTrue`
 

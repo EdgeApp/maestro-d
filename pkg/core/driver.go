@@ -41,6 +41,12 @@ type Driver interface {
 	SetContext(ctx context.Context)
 }
 
+// ElementLocator is a driver whose visibility check leaves bounds empty, and so
+// has a separate way to find an element with them.
+type ElementLocator interface {
+	LocateElement(sel flow.Selector) (*ElementInfo, error)
+}
+
 // CommandResult represents the outcome of executing a single command
 type CommandResult struct {
 	// Core outcome
@@ -161,6 +167,7 @@ func HasNonASCII(text string) bool {
 // StateSnapshot captures the current device/app state
 type StateSnapshot struct {
 	AppState        string       `json:"appState,omitempty"`        // foreground, background, not_running
+	ForegroundApp   string       `json:"foregroundApp,omitempty"`   // Bundle or package id in front
 	Orientation     string       `json:"orientation,omitempty"`     // portrait, landscape
 	KeyboardVisible bool         `json:"keyboardVisible"`           // Is keyboard shown
 	FocusedElement  *ElementInfo `json:"focusedElement,omitempty"`  // Currently focused element

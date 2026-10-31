@@ -374,6 +374,17 @@ PNG bytes (`Content-Type: image/png`), or with `?format=json` /
 curl -s -H "$H" $D/v1/devices/29271FDH200ABP/screenshot -o now.png
 ```
 
+### Screenshot comparison
+
+`assertScreenshot` takes three options for unattended runs: `mask`, selectors whose
+element bounds are left out of the comparison on both images, and which fail the step if
+an element is missing or has empty bounds; `requireBaseline`, which fails with
+`BASELINE_MISSING` instead of creating a missing reference; and `captureOut`, where the
+settled frame is always written. With either of the last two, the result's `data` holds
+`code`, `matchPercentage`, `differingPixels`, `totalPixels`, `diffPath` and `capturePath`,
+and a screen that changed size is compared on a common canvas, so it has a diff too.
+Paths must sit inside the device's `flowDir`; a call's `cwd` does not apply to them.
+
 ### `GET /v1/devices/{id}/hierarchy`
 
 `{"ok": true, "data": {…}}` where `data` is the normalized tree
@@ -391,8 +402,10 @@ JSON) with its content type.
 
 ### `GET /v1/devices/{id}/state`
 
-`{"ok": true, "data": {…}}` — foreground app, orientation and whatever else
-the platform reports.
+`{"ok": true, "data": {…}}` — `appState`, `foregroundApp` (the bundle or package id
+in front), orientation and whatever else the platform reports. The foreground lookup
+has a two-second limit; on timeout the two fields are absent and the rest still answer.
+`devicelab_ios` reports the state of the attached app rather than whichever app is in front.
 
 ### `GET /v1/devices/{id}/info`
 

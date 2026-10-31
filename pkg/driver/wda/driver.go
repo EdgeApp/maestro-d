@@ -505,6 +505,8 @@ func (d *Driver) GetState() *core.StateSnapshot {
 		state.Orientation = strings.ToLower(orientation)
 	}
 
+	state.SetForeground(core.WithinForegroundLimit(d.client.ActiveAppID))
+
 	return state
 }
 

@@ -230,10 +230,31 @@ func (d *Driver) GetState() *core.StateSnapshot {
 	orientation, _ := d.client.GetOrientation()
 	clipboard, _ := d.client.GetClipboard()
 
-	return &core.StateSnapshot{
+	state := &core.StateSnapshot{
 		Orientation:   orientation,
 		ClipboardText: clipboard,
 	}
+	state.SetForeground(core.WithinForegroundLimit(d.foregroundApp))
+	return state
+}
+
+// foregroundApp asks Appium which app is in front, per platform.
+func (d *Driver) foregroundApp() (string, error) {
+	if d.platform == "ios" {
+		value, err := d.client.ExecuteMobile("activeAppInfo", map[string]interface{}{})
+		if err != nil {
+			return "", err
+		}
+		info, _ := value.(map[string]interface{})
+		id, _ := info["bundleId"].(string)
+		return id, nil
+	}
+	value, err := d.client.ExecuteMobile("getCurrentPackage", map[string]interface{}{})
+	if err != nil {
+		return "", err
+	}
+	id, _ := value.(string)
+	return id, nil
 }
 
 // GetPlatformInfo implements core.Driver.
