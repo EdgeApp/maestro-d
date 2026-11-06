@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	wdaBasePort    = uint16(8100)
-	wdaPortRange   = uint16(1000)
+	wdaBasePort  = uint16(8100)
+	wdaPortRange = uint16(1000)
 	buildTimeout = 10 * time.Minute
 	// startupTimeout covers the full window from invoking
 	// `xcodebuild test-without-building` to WDA's FBWebServer printing
@@ -55,6 +55,11 @@ const (
 
 // Runner handles building and running WDA on iOS devices.
 type Runner struct {
+	runtimeChecked      bool
+	runtimeError        error
+	simulatorPlatform   string
+	simulatorVersion    string
+	listSimulators      func() ([]simulator.SimulatorDevice, error)
 	deviceUDID          string
 	teamID              string
 	wdaBundleID         string
@@ -133,6 +138,9 @@ func PortFromUDID(udid string) uint16 {
 // Build compiles WDA for the target device.
 // Uses a persistent build cache directory specific to iOS version, device type, and team ID.
 func (r *Runner) Build(ctx context.Context) error {
+	if err := r.configureRuntime(); err != nil {
+		return err
+	}
 	wdaPath, err := GetWDAPath()
 	if err != nil {
 		return err
@@ -181,18 +189,7 @@ func (r *Runner) Build(ctx context.Context) error {
 
 	projectPath := filepath.Join(r.wdaPath, "WebDriverAgent.xcodeproj")
 
-	args := []string{
-		"build-for-testing",
-		"-project", projectPath,
-		"-scheme", "WebDriverAgentRunner",
-		"-destination", r.destination(),
-		"-derivedDataPath", r.derivedDataPath(),
-		"-allowProvisioningUpdates",
-		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
-	}
-	if r.wdaBundleID != "" {
-		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
-	}
+	args := r.buildArguments(projectPath)
 	cmd := exec.CommandContext(buildCtx, "xcodebuild", args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -207,6 +204,25 @@ func (r *Runner) Build(ctx context.Context) error {
 
 	fmt.Println("WebDriverAgent build complete")
 	return nil
+}
+
+func (r *Runner) buildArguments(projectPath string) []string {
+	args := []string{
+		"build-for-testing",
+		"-project", projectPath,
+		"-scheme", r.runnerScheme(),
+		"-destination", r.destination(),
+		"-derivedDataPath", r.derivedDataPath(),
+		"-allowProvisioningUpdates",
+		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
+	}
+	if r.wdaBundleID != "" {
+		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
+	}
+	if r.IsTV() {
+		args = append(args, "TVOS_DEPLOYMENT_TARGET=15.1")
+	}
+	return args
 }
 
 // Start runs WDA on the device. Wraps a per-attempt startOnce in a retry
@@ -491,6 +507,9 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 	if isSimulator {
 		// Simulator: sim-ios{version}-iphone
 		configName = fmt.Sprintf("sim-ios%s-iphone", iosVersion)
+		if r.IsTV() {
+			configName = fmt.Sprintf("sim-tvos%s-tv", iosVersion)
+		}
 	} else {
 		// Real device: device-ios{version}-team{teamID}
 		teamID := r.teamID
@@ -574,6 +593,9 @@ func (r *Runner) isSimulator() (bool, error) {
 
 // getIOSVersion returns the iOS version of the device.
 func (r *Runner) getIOSVersion() (string, error) {
+	if r.simulatorVersion != "" {
+		return r.simulatorVersion, nil
+	}
 	// Try simctl first (for simulators)
 	cmd := exec.Command("xcrun", "simctl", "list", "devices", "-j")
 	output, err := cmd.Output()
@@ -619,6 +641,7 @@ func (r *Runner) getIOSVersion() (string, error) {
 }
 
 func (r *Runner) destination() string {
+	_ = r.configureRuntime()
 	// On Xcode 26 + iOS 26 simulators, xcodebuild's destination resolver
 	// returns BOTH arm64 and x86_64 entries for the same UDID and warns
 	// "Using the first of multiple matching destinations". The cached
@@ -629,7 +652,11 @@ func (r *Runner) destination() string {
 	// so the resolver gets a single concrete destination.
 	isSim, _ := r.isSimulator()
 	if isSim {
-		return fmt.Sprintf("platform=iOS Simulator,arch=%s,id=%s", simulator.XcodebuildArch(runtime.GOARCH), r.deviceUDID)
+		platform := "iOS"
+		if r.IsTV() {
+			platform = "tvOS"
+		}
+		return fmt.Sprintf("platform=%s Simulator,arch=%s,id=%s", platform, simulator.XcodebuildArch(runtime.GOARCH), r.deviceUDID)
 	}
 	return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
 }

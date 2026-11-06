@@ -17,6 +17,7 @@ install.sh
 install-download.sh
 
 # Test coverage & profiling
+/coverage/
 coverage.out
 coverage.html
 *.test
@@ -49,7 +50,10 @@ THIRD_PARTY_LICENSES
 # Local-only files
 BUILD_INSTRUCTIONS.md
 testdata/
-scripts/
+/scripts/*
+!/scripts/tvos-coverage.sh
+!/scripts/tvos-changed-coverage.py
+!/scripts/test_tvos_coverage.py
 docs_local/
 research/
 examples/

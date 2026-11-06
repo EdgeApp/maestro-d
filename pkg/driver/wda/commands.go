@@ -857,6 +857,14 @@ func (d *Driver) back(step *flow.BackStep) *core.CommandResult {
 }
 
 func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
+	if d.isTV {
+		if button := tvRemoteButton(step.Key); button != "" {
+			if err := d.client.PressButton(button); err != nil {
+				return errorResult(err, "Press TV remote button failed")
+			}
+			return successResult(fmt.Sprintf("Pressed %s", step.Key), nil)
+		}
+	}
 	switch strings.ToLower(step.Key) {
 	case "home":
 		if err := d.client.Home(); err != nil {

@@ -37,6 +37,20 @@ type iosDeviceInfo struct {
 	IsSimulator bool
 }
 
+type iosWDARunner interface {
+	Build(context.Context) error
+	Start(context.Context) error
+	Cleanup()
+	Port() uint16
+	BaseURL() string
+	Devicectl() *wdadriver.DevicectlLookup
+	IsTV() bool
+}
+
+var newIOSWDARunner = func(udid, team, bundle string) iosWDARunner {
+	return wdadriver.NewRunner(udid, team, bundle)
+}
+
 // CreateIOSDriver creates an iOS driver using WebDriverAgent.
 // Exported for library use.
 func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
@@ -106,7 +120,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	// 3. Create WDA runner
 	printSetupStep("Building WDA...")
 	logger.Info("Building WDA for device %s (team ID: %s)", udid, cfg.TeamID)
-	runner := wdadriver.NewRunner(udid, cfg.TeamID, cfg.WDABundleID)
+	runner := newIOSWDARunner(udid, cfg.TeamID, cfg.WDABundleID)
 	ctx := context.Background()
 
 	if err := runner.Build(ctx); err != nil {
@@ -171,19 +185,19 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		AppBuild:     appBuild,
 	}
 
-	// 9. Create driver
+	driver, cleanup := configuredIOSDriver(client, platformInfo, cfg, runner.IsTV(), runner.Cleanup)
+	return driver, cleanup, nil
+}
+
+// configuredIOSDriver binds runtime capabilities and owns wrapper cleanup.
+// Keep TV remote dispatch on the WDA driver; Flutter's iOS fallback is for phones.
+func configuredIOSDriver(client *wdadriver.Client, platformInfo *core.PlatformInfo, cfg *RunConfig, isTV bool, cleanup func()) (core.Driver, func()) {
+	udid := platformInfo.DeviceID
 	wdaDrv := wdadriver.NewDriver(client, platformInfo, udid)
+	wdaDrv.SetTVMode(isTV)
 	wdaDrv.SetAppFile(cfg.AppFile)
-
-	// Cleanup function
-	cleanup := func() {
-		runner.Cleanup()
-	}
-
 	var driver core.Driver = wdaDrv
-
-	// 10. Wrap driver with Flutter VM Service fallback (simulator only)
-	if !cfg.NoFlutterFallback && isSimulator {
+	if !cfg.NoFlutterFallback && platformInfo.IsSimulator && !isTV {
 		fw := flutter.WrapIOS(wdaDrv, nil, udid, cfg.AppID)
 		driver = fw
 		origCleanup := cleanup
@@ -194,8 +208,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 			origCleanup()
 		}
 	}
-
-	return driver, cleanup, nil
+	return driver, cleanup
 }
 
 // findIOSDevice finds an available iOS device (booted simulator or connected physical device).

@@ -16,6 +16,7 @@ import (
 
 // Driver implements core.Driver using WebDriverAgent for iOS.
 type Driver struct {
+	isTV   bool
 	client *Client
 	info   *core.PlatformInfo
 	udid   string // Device UDID for simctl commands
