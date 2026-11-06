@@ -245,7 +245,7 @@ extension RunnerTests {
   // RN flows where target text is long (e.g. "What is Lorem Ipsum?") or
   // non-hittable (StaticText headings). The Go-side snapshot+filter path
   // is liberal (substring + case-insensitive + prefer-editable-inputs) but
-  // expensive (two HTTP round-trips: snapshot + tap, with 300-node cap).
+  // expensive (two HTTP round-trips: snapshot + tap).
   //
   // treeSignature builds a stable hash of the accessibility tree's
   // geometry — the bits we care about for "is the UI ready for

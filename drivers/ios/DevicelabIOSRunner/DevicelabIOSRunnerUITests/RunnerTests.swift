@@ -40,8 +40,12 @@ final class RunnerTests: XCTestCase {
   var currentApp: XCUIApplication?
   var currentBundleId: String?
   let maxRequestBytes = 2 * 1024 * 1024
-  let maxSnapshotElements = 600
-  let fastSnapshotLimit = 300
+  // A virtualized list keeps screens of rows mounted above and below the
+  // visible one, ten or so accessibility nodes each: a long chat history
+  // passed 300 nodes before reaching the controls on screen, so a capped
+  // snapshot left them out. These bound a runaway tree, not a normal screen.
+  let maxSnapshotElements = 5000
+  let fastSnapshotLimit = 5000
   let mainThreadExecutionTimeout: TimeInterval = 30
   let appExistenceTimeout: TimeInterval = 30
   let retryCooldown: TimeInterval = 0.2
