@@ -348,6 +348,32 @@ func (c *Client) Unlock() error {
 	return err
 }
 
+// addMediaTimeout bounds one /wda/addMedia call: the handler may wait 15 s
+// for the permission alert and 30 s for PhotoKit, after the file's upload.
+const addMediaTimeout = 3 * time.Minute
+
+// AddMedia adds a photo or video to the device's Photos library through
+// /wda/addMedia, which the WebDriverAgent bundled with maestro-d serves
+// (PhotoKit, on the device). mimeType picks a video for a video/ type and an
+// image otherwise; name only lends its extension. It returns the Photos
+// access the runner holds: "add-only", or "full" when the runner app has no
+// add-only usage description (built with Xcode 26 or earlier) and iOS asked
+// for the whole library instead.
+func (c *Client) AddMedia(name, mimeType string, data []byte) (string, error) {
+	hc := &http.Client{Timeout: addMediaTimeout, Transport: c.httpClient.Transport}
+	resp, err := c.postWith(hc, c.sessionPath("/wda/addMedia"), map[string]interface{}{
+		"name":     name,
+		"mimeType": mimeType,
+		"data":     base64.StdEncoding.EncodeToString(data),
+	})
+	if err != nil {
+		return "", err
+	}
+	value, _ := resp["value"].(map[string]interface{})
+	access, _ := value["photosAccess"].(string)
+	return access, nil
+}
+
 // AcceptAlert accepts the current system alert (taps Allow/OK).
 func (c *Client) AcceptAlert() error {
 	_, err := c.post(c.sessionPath("/alert/accept"), nil)
@@ -606,6 +632,11 @@ func (c *Client) get(path string) (map[string]interface{}, error) {
 }
 
 func (c *Client) post(path string, body interface{}) (map[string]interface{}, error) {
+	return c.postWith(c.httpClient, path, body)
+}
+
+// postWith is post through hc, for a call that needs its own timeout.
+func (c *Client) postWith(hc *http.Client, path string, body interface{}) (map[string]interface{}, error) {
 	start := time.Now()
 	var reqBody io.Reader
 	bodyStr := ""
@@ -615,15 +646,17 @@ func (c *Client) post(path string, body interface{}) (map[string]interface{}, er
 			return nil, err
 		}
 		reqBody = bytes.NewReader(data)
-		bodyStr = string(data)
-		if len(bodyStr) > 100 {
-			bodyStr = bodyStr[:100] + "..."
+		// Only the start is logged; a media upload's body is megabytes.
+		if len(data) > 100 {
+			bodyStr = string(data[:100]) + "..."
+		} else {
+			bodyStr = string(data)
 		}
 	}
 
 	logger.Debug("WDA POST %s body=%s", path, bodyStr)
 
-	resp, err := c.httpClient.Post(c.baseURL+path, "application/json", reqBody)
+	resp, err := hc.Post(c.baseURL+path, "application/json", reqBody)
 	duration := time.Since(start).Milliseconds()
 
 	if err != nil {

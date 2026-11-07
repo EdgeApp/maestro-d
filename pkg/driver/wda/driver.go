@@ -29,6 +29,10 @@ type Driver struct {
 	// App file path for clearState (uninstall+reinstall)
 	appFile string
 
+	// wdaBuildDir is the cached WebDriverAgent build this device runs, named
+	// in the error for a build that predates /wda/addMedia.
+	wdaBuildDir string
+
 	// WDA alert action for real device permission handling ("accept", "dismiss", or "")
 	alertAction string
 
@@ -227,6 +231,11 @@ func (d *Driver) SetFindTimeout(ms int) {
 // SetOptionalFindTimeout sets the timeout for finding optional elements.
 func (d *Driver) SetOptionalFindTimeout(ms int) {
 	d.optionalFindTimeout = ms
+}
+
+// SetWDABuildDir records the cached WebDriverAgent build this device runs.
+func (d *Driver) SetWDABuildDir(dir string) {
+	d.wdaBuildDir = dir
 }
 
 // SetAppFile sets the app file path used for clearState (uninstall+reinstall).

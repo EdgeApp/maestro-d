@@ -485,6 +485,12 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 	return cacheDir, nil
 }
 
+// BuildDir is the WebDriverAgent build directory Build resolved for this
+// device ("" before Build).
+func (r *Runner) BuildDir() string {
+	return r.buildDir
+}
+
 // wdaMinDeploymentTarget is the oldest iOS that Xcode 27 builds for. The
 // bundled WebDriverAgent project targets 12.0/13.0, which Xcode 27 refuses.
 const wdaMinDeploymentTarget = "15.0"
