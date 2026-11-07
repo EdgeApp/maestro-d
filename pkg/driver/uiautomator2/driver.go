@@ -86,6 +86,13 @@ type Driver struct {
 	// crashed" instead of a generic "element not found".
 	currentAppID string
 
+	// flowClipboard is the text the flow last put on the device clipboard
+	// (setClipboard, copyTextFrom). On Android 10 and later the clipboard
+	// cannot be read back from UiAutomator2, so this is what inputText's
+	// pastes put back afterwards.
+	flowClipboard    string
+	flowClipboardSet bool
+
 	// Selector validation dedup
 	warnedFields map[string]bool
 }

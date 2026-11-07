@@ -106,6 +106,11 @@ func TestGetClipboard(t *testing.T) {
 		if !strings.Contains(r.URL.Path, "/appium/device/get_clipboard") {
 			t.Errorf("expected /appium/device/get_clipboard, got %s", r.URL.Path)
 		}
+		// The server throws a NullPointerException without a content type.
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["contentType"] != "plaintext" {
+			t.Errorf("get_clipboard body = %v (%v), want contentType plaintext", body, err)
+		}
 		// Base64 encoded "clipboard text"
 		encoded := base64.StdEncoding.EncodeToString([]byte("clipboard text"))
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{

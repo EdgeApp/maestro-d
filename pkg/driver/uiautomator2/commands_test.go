@@ -3589,8 +3589,13 @@ func TestInputTextKeyPressError(t *testing.T) {
 }
 
 func TestInputTextKeyPressWithUnicode(t *testing.T) {
+	// keyPress types "caf" as key events and pastes "é", which the key map
+	// cannot synthesize; a paste is exact, so there is no non-ASCII warning.
+	withFastPaste(t)
 	client := &MockUIA2Client{}
+	var keyed []string
 	client.sendKeyActionsFunc = func(text string) error {
+		keyed = append(keyed, text)
 		return nil
 	}
 	driver := New(client, nil, nil)
@@ -3604,8 +3609,17 @@ func TestInputTextKeyPressWithUnicode(t *testing.T) {
 	if !result.Success {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
-	if !strings.Contains(result.Message, "non-ASCII") {
-		t.Errorf("expected non-ASCII warning in message, got: %s", result.Message)
+	if strings.Contains(result.Message, "non-ASCII") {
+		t.Errorf("expected no non-ASCII warning for pasted text, got: %s", result.Message)
+	}
+	if len(keyed) != 1 || keyed[0] != "caf" {
+		t.Errorf("key actions = %q, want [\"caf\"]", keyed)
+	}
+	if len(client.setClipboardCalls) == 0 || client.setClipboardCalls[0] != "\u00e9" {
+		t.Errorf("clipboard writes = %q, want \"\u00e9\" first", client.setClipboardCalls)
+	}
+	if len(client.pressKeyCalls) != 1 || client.pressKeyCalls[0] != keyCodePaste {
+		t.Errorf("key codes = %v, want [KEYCODE_PASTE]", client.pressKeyCalls)
 	}
 }
 

@@ -63,9 +63,13 @@ func (c *Client) OpenNotifications() error {
 	return err
 }
 
-// GetClipboard returns the clipboard text.
+// GetClipboard returns the clipboard text. The server needs the content type
+// in the body; without one it fails with a NullPointerException. On Android
+// 10 and later it reads an empty clipboard, since only the focused app and
+// the keyboard may read it.
 func (c *Client) GetClipboard() (string, error) {
-	data, err := c.request("POST", c.sessionPath("/appium/device/get_clipboard"), nil)
+	req := ClipboardRequest{ContentType: "plaintext"}
+	data, err := c.request("POST", c.sessionPath("/appium/device/get_clipboard"), req)
 	if err != nil {
 		return "", err
 	}
