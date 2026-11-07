@@ -302,3 +302,27 @@ func TestPortFromUDID_UUIDPortUnchanged(t *testing.T) {
 		t.Errorf("UUID port changed: got %d, want %d", got, want)
 	}
 }
+
+func TestWDABuildCacheName(t *testing.T) {
+	tests := []struct {
+		name        string
+		isSimulator bool
+		iosVersion  string
+		teamID      string
+		bundleID    string
+		want        string
+	}{
+		{"simulator ignores the team", true, "27.1", "TEAMENV001", "", "sim-ios27.1-iphone"},
+		{"device with team", false, "27.0.1", "ABCDE12345", "", "device-ios27.0.1-teamABCDE12345"},
+		{"device without team", false, "27.0.1", "", "", "device-ios27.0.1-teamdefault"},
+		{"custom bundle", false, "26.6.1", "FGHIJ67890", "com.example.wda", "device-ios26.6.1-teamFGHIJ67890-bundlecom.example.wda"},
+		{"simulator custom bundle", true, "26.5", "", "com.example.wda", "sim-ios26.5-iphone-bundlecom.example.wda"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wdaBuildCacheName(tt.isSimulator, tt.iosVersion, tt.teamID, tt.bundleID); got != tt.want {
+				t.Errorf("wdaBuildCacheName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

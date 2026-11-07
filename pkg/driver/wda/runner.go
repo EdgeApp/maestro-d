@@ -486,25 +486,29 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 		return "", err
 	}
 
-	// Generate config-specific directory name
-	var configName string
+	configName := wdaBuildCacheName(isSimulator, iosVersion, r.teamID, r.wdaBundleID)
+	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)
+	return cacheDir, nil
+}
+
+// wdaBuildCacheName names a WebDriverAgent build's cache directory:
+// sim-ios{version}-iphone for a simulator, device-ios{version}-team{teamID}
+// for a real device (teamdefault without a team), plus -bundle{id} for a
+// custom bundle id.
+func wdaBuildCacheName(isSimulator bool, iosVersion, teamID, wdaBundleID string) string {
+	var name string
 	if isSimulator {
-		// Simulator: sim-ios{version}-iphone
-		configName = fmt.Sprintf("sim-ios%s-iphone", iosVersion)
+		name = fmt.Sprintf("sim-ios%s-iphone", iosVersion)
 	} else {
-		// Real device: device-ios{version}-team{teamID}
-		teamID := r.teamID
 		if teamID == "" {
 			teamID = "default"
 		}
-		configName = fmt.Sprintf("device-ios%s-team%s", iosVersion, teamID)
+		name = fmt.Sprintf("device-ios%s-team%s", iosVersion, teamID)
 	}
-	if r.wdaBundleID != "" {
-		configName += "-bundle" + r.wdaBundleID
+	if wdaBundleID != "" {
+		name += "-bundle" + wdaBundleID
 	}
-
-	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)
-	return cacheDir, nil
+	return name
 }
 
 // resetSimulator shuts down then boots the given simulator. Used between

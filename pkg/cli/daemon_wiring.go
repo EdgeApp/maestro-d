@@ -9,6 +9,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -88,6 +89,13 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	if rc.AppiumURL == "" {
 		rc.AppiumURL = "http://127.0.0.1:4723"
 	}
+	// The CLI sends its own MAESTRO_TEAM_ID / DEVELOPMENT_TEAM as teamId; a
+	// REST or JavaScript attach sends none, so the daemon's environment
+	// supplies it. WebDriverAgent is signed with that team and its device
+	// build is cached under it.
+	if rc.TeamID == "" {
+		rc.TeamID = teamIDFromEnv(os.LookupEnv)
+	}
 	if cfg.WaitForIdleTimeout != nil {
 		rc.WaitForIdleTimeout = *cfg.WaitForIdleTimeout
 	}
@@ -114,6 +122,18 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 		rc.NewCommandTimeout = int(v)
 	}
 	return rc
+}
+
+// teamIDFromEnv returns the Apple team the daemon was started with:
+// MAESTRO_TEAM_ID, else DEVELOPMENT_TEAM, the variables the CLI's --team-id
+// reads. Empty values are skipped.
+func teamIDFromEnv(lookup func(string) (string, bool)) string {
+	for _, name := range []string{"MAESTRO_TEAM_ID", "DEVELOPMENT_TEAM"} {
+		if v, ok := lookup(name); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // daemonNewDriver opens a driver for one device through upstream's
