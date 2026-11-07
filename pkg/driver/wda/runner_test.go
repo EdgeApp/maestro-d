@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -324,5 +325,60 @@ func TestWDABuildCacheName(t *testing.T) {
 				t.Errorf("wdaBuildCacheName = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseXcodeMajor(t *testing.T) {
+	tests := []struct {
+		out  string
+		want int
+	}{
+		{"Xcode 27.1\nBuild version 27A9275\n", 27},
+		{"Xcode 26.6\nBuild version 17F113\n", 26},
+		{"Xcode 28\n", 28},
+		{"\n  Xcode 27.0.1\n", 27},
+		{"Xcode beta\n", 0},
+		{"xcode-select: error: tool 'xcodebuild' requires Xcode\n", 0},
+		{"", 0},
+	}
+	for _, tt := range tests {
+		if got := parseXcodeMajor(tt.out); got != tt.want {
+			t.Errorf("parseXcodeMajor(%q) = %d, want %d", tt.out, got, tt.want)
+		}
+	}
+}
+
+func TestWDABuildArgs(t *testing.T) {
+	base := []string{
+		"build-for-testing",
+		"-project", "/wda/WebDriverAgent.xcodeproj",
+		"-scheme", "WebDriverAgentRunner",
+		"-destination", "id=UDID",
+		"-derivedDataPath", "/cache/DerivedData",
+		"-allowProvisioningUpdates",
+		"DEVELOPMENT_TEAM=TEAM000001",
+	}
+	args := func(bundle string, xcode int) []string {
+		return wdaBuildArgs("/wda/WebDriverAgent.xcodeproj", "id=UDID", "/cache/DerivedData", "TEAM000001", bundle, xcode)
+	}
+
+	if got := args("", 26); !reflect.DeepEqual(got, base) {
+		t.Errorf("Xcode 26 args = %q, want %q (project targets kept)", got, base)
+	}
+	if got := args("", 0); !reflect.DeepEqual(got, base) {
+		t.Errorf("unknown Xcode args = %q, want %q", got, base)
+	}
+	for _, xcode := range []int{27, 28} {
+		want := append(append([]string{}, base...), "IPHONEOS_DEPLOYMENT_TARGET=15.0")
+		if got := args("", xcode); !reflect.DeepEqual(got, want) {
+			t.Errorf("Xcode %d args = %q, want %q", xcode, got, want)
+		}
+	}
+	want := append(append([]string{}, base...), "PRODUCT_BUNDLE_IDENTIFIER=com.example.wda", "IPHONEOS_DEPLOYMENT_TARGET=15.0")
+	if got := args("com.example.wda", 27); !reflect.DeepEqual(got, want) {
+		t.Errorf("bundle args = %q, want %q", got, want)
+	}
+	if got := wdaBuildArgs("p", "d", "dd", "", "", 26); got[len(got)-1] != "DEVELOPMENT_TEAM=" {
+		t.Errorf("no team: last arg %q, want DEVELOPMENT_TEAM=", got[len(got)-1])
 	}
 }
