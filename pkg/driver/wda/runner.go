@@ -181,18 +181,12 @@ func (r *Runner) Build(ctx context.Context) error {
 
 	projectPath := filepath.Join(r.wdaPath, "WebDriverAgent.xcodeproj")
 
-	args := []string{
-		"build-for-testing",
-		"-project", projectPath,
-		"-scheme", "WebDriverAgentRunner",
-		"-destination", r.destination(),
-		"-derivedDataPath", r.derivedDataPath(),
-		"-allowProvisioningUpdates",
-		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
+	// xcodebuild -version honours DEVELOPER_DIR, as the build does.
+	xcodeMajor := 0
+	if out, err := exec.CommandContext(buildCtx, "xcodebuild", "-version").Output(); err == nil {
+		xcodeMajor = parseXcodeMajor(string(out))
 	}
-	if r.wdaBundleID != "" {
-		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
-	}
+	args := wdaBuildArgs(projectPath, r.destination(), r.derivedDataPath(), r.teamID, r.wdaBundleID, xcodeMajor)
 	cmd := exec.CommandContext(buildCtx, "xcodebuild", args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -489,6 +483,50 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 	configName := wdaBuildCacheName(isSimulator, iosVersion, r.teamID, r.wdaBundleID)
 	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)
 	return cacheDir, nil
+}
+
+// wdaMinDeploymentTarget is the oldest iOS that Xcode 27 builds for. The
+// bundled WebDriverAgent project targets 12.0/13.0, which Xcode 27 refuses.
+const wdaMinDeploymentTarget = "15.0"
+
+// wdaBuildArgs is the xcodebuild build-for-testing command line for the
+// bundled WebDriverAgent. On Xcode 27 and later it raises the deployment
+// target to wdaMinDeploymentTarget; earlier Xcodes keep the project's own
+// targets, so they can still build for iOS 12–14 devices.
+func wdaBuildArgs(projectPath, destination, derivedData, teamID, wdaBundleID string, xcodeMajor int) []string {
+	args := []string{
+		"build-for-testing",
+		"-project", projectPath,
+		"-scheme", "WebDriverAgentRunner",
+		"-destination", destination,
+		"-derivedDataPath", derivedData,
+		"-allowProvisioningUpdates",
+		fmt.Sprintf("DEVELOPMENT_TEAM=%s", teamID),
+	}
+	if wdaBundleID != "" {
+		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", wdaBundleID))
+	}
+	if xcodeMajor >= 27 {
+		args = append(args, "IPHONEOS_DEPLOYMENT_TARGET="+wdaMinDeploymentTarget)
+	}
+	return args
+}
+
+// parseXcodeMajor reads the major version from `xcodebuild -version`
+// ("Xcode 27.1\nBuild version …"); 0 when it cannot.
+func parseXcodeMajor(out string) int {
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Xcode ")
+		if !ok {
+			continue
+		}
+		major, _, _ := strings.Cut(rest, ".")
+		if n, err := strconv.Atoi(strings.TrimSpace(major)); err == nil {
+			return n
+		}
+		return 0
+	}
+	return 0
 }
 
 // wdaBuildCacheName names a WebDriverAgent build's cache directory:
