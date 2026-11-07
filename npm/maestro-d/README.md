@@ -51,7 +51,9 @@ a `make build` install instead, set `MAESTRO_RUNNER_HOME=$HOME/.maestro-d`
 — or point `MAESTRO_D_BIN` at `~/.maestro-d/bin/maestro-d`.
 
 Device prerequisites are maestro-runner's: `adb` for Android, Xcode for iOS
-(`teamId` for a physical iPhone), a browser for web.
+(`teamId` for a physical iPhone; an attach without one uses the daemon's
+`MAESTRO_TEAM_ID` / `DEVELOPMENT_TEAM`, which a daemon `connect()` spawns
+inherits from your environment), a browser for web.
 
 ## Concepts
 

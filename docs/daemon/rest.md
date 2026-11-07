@@ -203,7 +203,7 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 | `appFile` | `--app-file` | installed on attach unless `noAppInstall` |
 | `appId` | `--app-id` | default for `launchApp`, `stopApp`, `clearState`, … |
 | `url` | `--url` | web |
-| `teamId` | `--team-id` | physical iOS: signs WebDriverAgent |
+| `teamId` | `--team-id` | physical iOS: signs WebDriverAgent; omitted, the daemon's own `MAESTRO_TEAM_ID` / `DEVELOPMENT_TEAM` |
 | `wdaBundleId` | `--wda-bundle-id` | |
 | `appiumUrl` | `--appium-url` | |
 | `env` | `-e` | session variables |
