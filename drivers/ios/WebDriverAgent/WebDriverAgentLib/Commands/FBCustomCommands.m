@@ -10,7 +10,11 @@
 
 #import <XCTest/XCUIDevice.h>
 #import <CoreLocation/CoreLocation.h>
+#if !TARGET_OS_TV
+#import <Photos/Photos.h>
+#endif
 
+#import "FBAlert.h"
 #import "FBConfiguration.h"
 #import "FBKeyboard.h"
 #import "FBNotificationsHelper.h"
@@ -80,6 +84,8 @@
     [[FBRoute POST:@"/wda/simulatedLocation"].withoutSession respondWithTarget:self action:@selector(handleSetSimulatedLocation:)],
     [[FBRoute DELETE:@"/wda/simulatedLocation"] respondWithTarget:self action:@selector(handleClearSimulatedLocation:)],
     [[FBRoute DELETE:@"/wda/simulatedLocation"].withoutSession respondWithTarget:self action:@selector(handleClearSimulatedLocation:)],
+    [[FBRoute POST:@"/wda/addMedia"] respondWithTarget:self action:@selector(handleAddMedia:)],
+    [[FBRoute POST:@"/wda/addMedia"].withoutSession respondWithTarget:self action:@selector(handleAddMedia:)],
 #endif
     [[FBRoute OPTIONS:@"/*"].withoutSession respondWithTarget:self action:@selector(handlePingCommand:)],
   ];
@@ -558,6 +564,192 @@
                                                                traceback:nil]);
   }
   return FBResponseWithOK();
+}
+
+#pragma mark - Photos (maestro-d)
+
+static NSTimeInterval const FBAddMediaAuthorizationTimeout = 15.0;
+static NSTimeInterval const FBAddMediaChangeTimeout = 30.0;
+static NSTimeInterval const FBAddMediaAlertInterval = 0.5;
+static NSString *const FBAddMediaSettingsHint = @"allow WebDriverAgentRunner to add photos in Settings > Privacy & Security > Photos";
+// The add-access alert names the app asking, the runner
+// ("WebDriverAgentRunner-Runner"), in every language.
+static NSString *const FBAddMediaRunnerMarker = @"WebDriverAgentRunner";
+
+/**
+ Adds a photo or video to the device's Photos library through PhotoKit. A
+ real device has no host-side path to its library, so maestro-d's addMedia
+ sends the file here. Body: name (file name, used for its extension only),
+ mimeType (a video/ type adds a video, anything else an image) and data
+ (the file, base64).
+ */
++ (id<FBResponsePayload>)handleAddMedia:(FBRouteRequest *)request
+{
+  id name = request.arguments[@"name"];
+  id encoded = request.arguments[@"data"];
+  id mimeType = request.arguments[@"mimeType"];
+  if (![name isKindOfClass:NSString.class] || 0 == [(NSString *)name length]) {
+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"addMedia needs the file's name"
+                                                                       traceback:nil]);
+  }
+  NSData *data = [encoded isKindOfClass:NSString.class]
+    ? [[NSData alloc] initWithBase64EncodedString:(NSString *)encoded options:0]
+    : nil;
+  if (0 == data.length) {
+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"addMedia needs the file's bytes as base64 in data"
+                                                                       traceback:nil]);
+  }
+  BOOL isVideo = [mimeType isKindOfClass:NSString.class] && [(NSString *)mimeType hasPrefix:@"video/"];
+
+  // The name only lends its extension, which PhotoKit reads the type from;
+  // it never becomes part of the path.
+  NSString *extension = [(NSString *)name pathExtension];
+  NSString *fileName = extension.length > 0
+    ? [NSUUID.UUID.UUIDString stringByAppendingPathExtension:extension]
+    : NSUUID.UUID.UUIDString;
+  NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:fileName]];
+  NSError *error;
+  if (![data writeToURL:fileURL options:NSDataWritingAtomic error:&error]) {
+    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:[NSString stringWithFormat:@"addMedia cannot write the file: %@", error.localizedDescription]
+                                                               traceback:nil]);
+  }
+  // fb_addMediaAtURL removes the file once PhotoKit is done with it.
+  return [self fb_addMediaAtURL:fileURL isVideo:isVideo];
+}
+
++ (id<FBResponsePayload>)fb_addMediaAtURL:(NSURL *)fileURL isVideo:(BOOL)isVideo
+{
+  NSString *message = [self fb_ensurePhotoLibraryAddAccess];
+  if (nil != message) {
+    [NSFileManager.defaultManager removeItemAtURL:fileURL error:nil];
+    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:message traceback:nil]);
+  }
+
+  // Routes run on the main queue, which does not drain while this handler
+  // spins the run loop, so the completion (on a PhotoKit queue) signals a
+  // semaphore that the spinner polls. The completion removes the file, so a
+  // change still running after the timeout keeps it.
+  __block BOOL added = NO;
+  __block NSError *changeError = nil;
+  dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+  [PHPhotoLibrary.sharedPhotoLibrary performChanges:^{
+    if (isVideo) {
+      [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:fileURL];
+    } else {
+      [PHAssetCreationRequest creationRequestForAssetFromImageAtFileURL:fileURL];
+    }
+  } completionHandler:^(BOOL success, NSError *completionError) {
+    [NSFileManager.defaultManager removeItemAtURL:fileURL error:nil];
+    added = success;
+    changeError = completionError;
+    dispatch_semaphore_signal(finished);
+  }];
+  // Below iOS 14 the change itself asks for access, so only there is the
+  // alert watched while it runs.
+  BOOL watchAlert = YES;
+  if (@available(iOS 14, *)) {
+    watchAlert = NO;
+  }
+  __block BOOL done = NO;
+  [[[[FBRunLoopSpinner new] timeout:FBAddMediaChangeTimeout] interval:FBAddMediaAlertInterval] spinUntilTrue:^BOOL{
+    if (0 == dispatch_semaphore_wait(finished, DISPATCH_TIME_NOW)) {
+      done = YES;
+      return YES;
+    }
+    if (watchAlert) {
+      [self fb_acceptPhotosAlert];
+    }
+    return NO;
+  }];
+  if (!done) {
+    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:[NSString stringWithFormat:@"PhotoKit did not finish adding the media within %.0f seconds; the add may still complete", FBAddMediaChangeTimeout]
+                                                               traceback:nil]);
+  }
+  if (!added) {
+    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:[NSString stringWithFormat:@"PhotoKit could not add the media: %@; if access was refused, %@", changeError.localizedDescription ?: @"unknown error", FBAddMediaSettingsHint]
+                                                               traceback:nil]);
+  }
+  return FBResponseWithObject(@{@"photosAccess": [self fb_photosAccess]});
+}
+
+/**
+ The Photos access this runner holds: "add-only", or "full". The runner app's
+ Info.plist comes from Xcode's XCTRunner template; up to Xcode 26 it has no
+ NSPhotoLibraryAddUsageDescription, so iOS answers an add-only request with
+ the whole-library prompt and the runner ends up with full access.
+ */
++ (NSString *)fb_photosAccess
+{
+  if (@available(iOS 14, *)) {
+    return PHAuthorizationStatusAuthorized == [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite]
+      ? @"full"
+      : @"add-only";
+  }
+  return nil != [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSPhotoLibraryAddUsageDescription"]
+    ? @"add-only"
+    : @"full";
+}
+
+/**
+ Makes sure this runner may add to Photos, answering the permission alert
+ when it shows. Returns nil when it may, else why not. Below iOS 14 there is
+ nothing to ask first: the change prompts for add access on its own, with the
+ usage description of the XCTest runner app.
+ */
++ (nullable NSString *)fb_ensurePhotoLibraryAddAccess
+{
+  if (@available(iOS 14, *)) {
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+    if (PHAuthorizationStatusNotDetermined == status) {
+      [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus answer) {}];
+      [[[[FBRunLoopSpinner new] timeout:FBAddMediaAuthorizationTimeout] interval:FBAddMediaAlertInterval] spinUntilTrue:^BOOL{
+        if (PHAuthorizationStatusNotDetermined != [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly]) {
+          return YES;
+        }
+        [self fb_acceptPhotosAlert];
+        return NO;
+      }];
+      status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+    }
+    if (PHAuthorizationStatusNotDetermined == status) {
+      return [NSString stringWithFormat:@"The Photos permission alert was not answered within %.0f seconds; %@", FBAddMediaAuthorizationTimeout, FBAddMediaSettingsHint];
+    }
+    if (PHAuthorizationStatusAuthorized != status && PHAuthorizationStatusLimited != status) {
+      return [NSString stringWithFormat:@"Photos access was refused; %@", FBAddMediaSettingsHint];
+    }
+  }
+  return nil;
+}
+
+/**
+ Answers the springboard alert asking whether this runner may add to Photos,
+ when that is the alert showing: the first of the usual allow buttons, else,
+ for the two-button add-only prompt only, its accept button. "Allow Full Access" is the whole-library
+ prompt iOS shows instead when the runner has no add-only usage description
+ (built with Xcode 26 or earlier); fb_photosAccess then reports "full". Any other alert (the app's own
+ permission prompts, a system alert) is left alone. The Photos alert is
+ recognised by the runner's name, which it shows in every language.
+ */
++ (void)fb_acceptPhotosAlert
+{
+  FBAlert *alert = [FBAlert alertWithApplication:XCUIApplication.fb_systemApplication];
+  if (!alert.isPresent || ![alert.text ?: @"" containsString:FBAddMediaRunnerMarker]) {
+    return;
+  }
+  NSArray *labels = alert.buttonLabels ?: @[];
+  for (NSString *label in @[@"Allow", @"OK", @"Allow Full Access", @"Allow Access to All Photos"]) {
+    if ([labels containsObject:label]) {
+      [alert clickAlertButton:label error:nil];
+      return;
+    }
+  }
+  // In another language only the two-button add-only prompt (Don't Allow,
+  // Allow) is answered, by its last button. The whole-library prompt ends
+  // with "Don't Allow", so it is left for the person at the device, and the
+  // request reports that the alert was not answered.
+  if (2 == labels.count) {
+    [alert acceptWithError:nil];
+  }
 }
 
 #if __clang_major__ >= 15

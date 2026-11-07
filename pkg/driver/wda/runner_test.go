@@ -382,3 +382,14 @@ func TestWDABuildArgs(t *testing.T) {
 		t.Errorf("no team: last arg %q, want DEVELOPMENT_TEAM=", got[len(got)-1])
 	}
 }
+
+func TestRunnerBuildDir(t *testing.T) {
+	r := NewRunner("UDID", "TEAM000001", "")
+	if r.BuildDir() != "" {
+		t.Errorf("BuildDir before Build = %q, want empty", r.BuildDir())
+	}
+	r.buildDir = "/cache/wda-builds/sim-ios27.1-iphone"
+	if r.BuildDir() != "/cache/wda-builds/sim-ios27.1-iphone" {
+		t.Errorf("BuildDir = %q", r.BuildDir())
+	}
+}
