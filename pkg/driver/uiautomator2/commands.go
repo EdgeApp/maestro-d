@@ -389,7 +389,9 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("no text specified"), "No text to input")
 	}
 
-	// Check for non-ASCII characters (may cause input issues on some devices)
+	// Element send-keys may not carry non-ASCII characters on every device.
+	// The key-event paths (typeKeys) paste them, which is exact, so the
+	// warning is only for element send-keys.
 	unicodeWarning := ""
 	if core.HasNonASCII(text) {
 		unicodeWarning = " (warning: non-ASCII characters may not input correctly)"
@@ -397,17 +399,18 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 
 	// keyPress mode: simulate real key presses via W3C Actions API.
 	// This triggers TextWatcher/onTextChanged per character (unlike setText injection).
+	// Characters the key map cannot synthesize are pasted (typeKeys).
 	if step.KeyPress {
 		// Resolve and read the focused field first: after typing, "unchanged"
 		// is the only thing that separates a hint from a lost keystroke.
 		target, before := d.focusedFieldBefore()
-		if err := d.client.SendKeyActions(text); err != nil {
+		if err := d.typeKeys(text); err != nil {
 			return errorResult(err, "Failed to input text via key press")
 		}
 		// Per-character key events are the path that loses characters when the
 		// app janks — the whole reason this verification exists.
 		note := core.ConfirmTypedText(target, text, before, logger.Warn)
-		return successResult(fmt.Sprintf("Entered text (keyPress): %s%s%s", text, unicodeWarning, note), nil)
+		return successResult(fmt.Sprintf("Entered text (keyPress): %s%s%s", text, pastedNote(text), note), nil)
 	}
 
 	// If selector provided, find element and type into it
@@ -446,9 +449,10 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			}
 		}
 		if !typed {
-			if err := d.client.SendKeyActions(text); err != nil {
+			if err := d.typeKeys(text); err != nil {
 				return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
 			}
+			unicodeWarning = pastedNote(text)
 		}
 	}
 
@@ -1559,6 +1563,7 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 	if err := d.client.SetClipboard(text); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to copy to clipboard: %v", err))
 	}
+	d.flowClipboard, d.flowClipboardSet = text, true
 
 	return &core.CommandResult{
 		Success: true,
@@ -1569,20 +1574,33 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 }
 
 func (d *Driver) pasteText(_ *flow.PasteTextStep) *core.CommandResult {
-	text, err := d.client.GetClipboard()
-	if err != nil {
-		return errorResult(err, fmt.Sprintf("Failed to get clipboard: %v", err))
-	}
-
 	active, err := d.client.ActiveElement()
-	if err != nil {
+	if err != nil || active == nil {
+		if err == nil {
+			err = fmt.Errorf("no active element")
+		}
 		return errorResult(err, "No focused element to paste into")
 	}
 
-	if err := active.SendKeys(text); err != nil {
-		return errorResult(err, fmt.Sprintf("Failed to paste text: %v", err))
+	// On Android 10 and later only the focused app and the keyboard may read
+	// the clipboard, so UiAutomator2's read comes back empty. The paste key
+	// pastes whatever the device clipboard holds, including what the app
+	// copied itself.
+	text, err := d.client.GetClipboard()
+	if err != nil || text == "" {
+		if err := d.client.PressKeyCode(keyCodePaste); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to paste the clipboard: %v", err))
+		}
+		return successResult("Pasted the device clipboard with the paste key (its text cannot be read here)", nil)
 	}
 
+	// Element send-keys, else key events with what keys cannot type pasted,
+	// as inputText falls back to when the focused element refuses the text.
+	if err := active.SendKeys(text); err != nil {
+		if err := d.typeKeys(text); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to paste text: %v", err))
+		}
+	}
 	return successResult(fmt.Sprintf("Pasted text: %s", text), nil)
 }
 
@@ -1594,6 +1612,7 @@ func (d *Driver) setClipboard(step *flow.SetClipboardStep) *core.CommandResult {
 	if err := d.client.SetClipboard(step.Text); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to set clipboard: %v", err))
 	}
+	d.flowClipboard, d.flowClipboardSet = step.Text, true
 
 	return successResult(fmt.Sprintf("Set clipboard to: %s", step.Text), nil)
 }

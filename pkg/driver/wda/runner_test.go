@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -300,5 +301,95 @@ func TestPortFromUDID_UUIDPortUnchanged(t *testing.T) {
 	want := wdaBasePort + uint16(val%uint64(wdaPortRange))
 	if got := PortFromUDID(udid); got != want {
 		t.Errorf("UUID port changed: got %d, want %d", got, want)
+	}
+}
+
+func TestWDABuildCacheName(t *testing.T) {
+	tests := []struct {
+		name        string
+		isSimulator bool
+		iosVersion  string
+		teamID      string
+		bundleID    string
+		want        string
+	}{
+		{"simulator ignores the team", true, "27.1", "TEAMENV001", "", "sim-ios27.1-iphone"},
+		{"device with team", false, "27.0.1", "ABCDE12345", "", "device-ios27.0.1-teamABCDE12345"},
+		{"device without team", false, "27.0.1", "", "", "device-ios27.0.1-teamdefault"},
+		{"custom bundle", false, "26.6.1", "FGHIJ67890", "com.example.wda", "device-ios26.6.1-teamFGHIJ67890-bundlecom.example.wda"},
+		{"simulator custom bundle", true, "26.5", "", "com.example.wda", "sim-ios26.5-iphone-bundlecom.example.wda"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wdaBuildCacheName(tt.isSimulator, tt.iosVersion, tt.teamID, tt.bundleID); got != tt.want {
+				t.Errorf("wdaBuildCacheName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseXcodeMajor(t *testing.T) {
+	tests := []struct {
+		out  string
+		want int
+	}{
+		{"Xcode 27.1\nBuild version 27A9275\n", 27},
+		{"Xcode 26.6\nBuild version 17F113\n", 26},
+		{"Xcode 28\n", 28},
+		{"\n  Xcode 27.0.1\n", 27},
+		{"Xcode beta\n", 0},
+		{"xcode-select: error: tool 'xcodebuild' requires Xcode\n", 0},
+		{"", 0},
+	}
+	for _, tt := range tests {
+		if got := parseXcodeMajor(tt.out); got != tt.want {
+			t.Errorf("parseXcodeMajor(%q) = %d, want %d", tt.out, got, tt.want)
+		}
+	}
+}
+
+func TestWDABuildArgs(t *testing.T) {
+	base := []string{
+		"build-for-testing",
+		"-project", "/wda/WebDriverAgent.xcodeproj",
+		"-scheme", "WebDriverAgentRunner",
+		"-destination", "id=UDID",
+		"-derivedDataPath", "/cache/DerivedData",
+		"-allowProvisioningUpdates",
+		"DEVELOPMENT_TEAM=TEAM000001",
+	}
+	args := func(bundle string, xcode int) []string {
+		return wdaBuildArgs("/wda/WebDriverAgent.xcodeproj", "id=UDID", "/cache/DerivedData", "TEAM000001", bundle, xcode)
+	}
+
+	if got := args("", 26); !reflect.DeepEqual(got, base) {
+		t.Errorf("Xcode 26 args = %q, want %q (project targets kept)", got, base)
+	}
+	if got := args("", 0); !reflect.DeepEqual(got, base) {
+		t.Errorf("unknown Xcode args = %q, want %q", got, base)
+	}
+	for _, xcode := range []int{27, 28} {
+		want := append(append([]string{}, base...), "IPHONEOS_DEPLOYMENT_TARGET=15.0")
+		if got := args("", xcode); !reflect.DeepEqual(got, want) {
+			t.Errorf("Xcode %d args = %q, want %q", xcode, got, want)
+		}
+	}
+	want := append(append([]string{}, base...), "PRODUCT_BUNDLE_IDENTIFIER=com.example.wda", "IPHONEOS_DEPLOYMENT_TARGET=15.0")
+	if got := args("com.example.wda", 27); !reflect.DeepEqual(got, want) {
+		t.Errorf("bundle args = %q, want %q", got, want)
+	}
+	if got := wdaBuildArgs("p", "d", "dd", "", "", 26); got[len(got)-1] != "DEVELOPMENT_TEAM=" {
+		t.Errorf("no team: last arg %q, want DEVELOPMENT_TEAM=", got[len(got)-1])
+	}
+}
+
+func TestRunnerBuildDir(t *testing.T) {
+	r := NewRunner("UDID", "TEAM000001", "")
+	if r.BuildDir() != "" {
+		t.Errorf("BuildDir before Build = %q, want empty", r.BuildDir())
+	}
+	r.buildDir = "/cache/wda-builds/sim-ios27.1-iphone"
+	if r.BuildDir() != "/cache/wda-builds/sim-ios27.1-iphone" {
+		t.Errorf("BuildDir = %q", r.BuildDir())
 	}
 }

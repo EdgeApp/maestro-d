@@ -62,6 +62,9 @@ type MockUIA2Client struct {
 	setOrientationErr error
 	clipboardData     string
 	clipboardErr      error
+	// statefulClipboard makes SetClipboard write the value GetClipboard
+	// returns, as a device clipboard does.
+	statefulClipboard bool
 	clickErr          error
 	doubleClickErr    error
 	longClickErr      error
@@ -178,6 +181,9 @@ func (m *MockUIA2Client) GetClipboard() (string, error) {
 
 func (m *MockUIA2Client) SetClipboard(text string) error {
 	m.setClipboardCalls = append(m.setClipboardCalls, text)
+	if m.setClipboardErr == nil && m.statefulClipboard {
+		m.clipboardData = text
+	}
 	return m.setClipboardErr
 }
 
@@ -2145,7 +2151,12 @@ func TestPasteTextWithActiveElement(t *testing.T) {
 }
 
 func TestPasteTextNoActiveElement(t *testing.T) {
+	actions := 0
 	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
+		"POST /actions": func(w http.ResponseWriter, r *http.Request) {
+			actions++
+			writeJSON(w, map[string]interface{}{"value": nil})
+		},
 		"POST /appium/device/get_clipboard": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"value": "SGVsbG8="})
 		},
@@ -2163,13 +2174,18 @@ func TestPasteTextNoActiveElement(t *testing.T) {
 	step := &flow.PasteTextStep{}
 	result := driver.Execute(step)
 
-	if result.Success {
-		t.Error("expected failure when no active element")
+	if result.Success || actions != 0 {
+		t.Errorf("no active element: want a failure and no key events, got success %v, key actions %d", result.Success, actions)
 	}
 }
 
 func TestPasteTextSendKeysError(t *testing.T) {
+	actions := 0
 	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
+		"POST /actions": func(w http.ResponseWriter, r *http.Request) {
+			actions++
+			writeJSON(w, map[string]interface{}{"value": nil})
+		},
 		"POST /appium/device/get_clipboard": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"value": "SGVsbG8="})
 		},
@@ -2191,8 +2207,8 @@ func TestPasteTextSendKeysError(t *testing.T) {
 	step := &flow.PasteTextStep{}
 	result := driver.Execute(step)
 
-	if result.Success {
-		t.Error("expected failure on SendKeys error")
+	if !result.Success || actions != 1 {
+		t.Errorf("%s: success %v, key actions %d", "send-keys refused: pasteText should fall back to key events", result.Success, actions)
 	}
 }
 
