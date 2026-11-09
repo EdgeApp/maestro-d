@@ -49,6 +49,9 @@ type Config struct {
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
 	LeaseMaxDevices []LeaseMax
+	// Advertise, on a hub, is the address peers are told to dial; device
+	// listings carry it in addresses.
+	Advertise string
 	// AllowRemoteShell lets remote callers run runShell.
 	AllowRemoteShell bool
 	// PassEnv names the variables of the daemon's own environment that
@@ -65,8 +68,12 @@ type Config struct {
 	// StartArgs are recorded in daemon.json for `ps`.
 	StartArgs []string
 	// Ready, when set, is written a line to once the listeners are up (the
-	// spawner watches startup.log for it).
+	// spawner watches startup.log for it); a hub whose mesh refused it
+	// writes a FAILED line instead.
 	Ready io.Writer
+	// Mesh, on a hub, links it with its peers (pkg/hub): its router fronts
+	// both listeners, and READY waits for its start.
+	Mesh Mesh
 }
 
 // Server is the daemon: registry + attached devices + HTTP handlers.
@@ -152,11 +159,20 @@ func New(cfg Config, deps Deps) *Server {
 func (s *Server) Registry() *Registry { return s.registry }
 
 // Handler returns the HTTP handler (for tests and the unix socket).
-func (s *Server) Handler() http.Handler { return s.routes(false) }
+func (s *Server) Handler() http.Handler { return s.listenerHandler(false) }
 
 // TCPHandler returns the handler the TCP listener serves: bearer-token
 // checked, and with remote callers told apart from local ones.
-func (s *Server) TCPHandler() http.Handler { return s.routes(true) }
+func (s *Server) TCPHandler() http.Handler { return s.listenerHandler(true) }
+
+// listenerHandler is what a listener serves: the daemon's routes, behind
+// the mesh's router on a hub that has one.
+func (s *Server) listenerHandler(tcp bool) http.Handler {
+	if s.cfg.Mesh != nil {
+		return s.cfg.Mesh.Handler(s.routes(tcp), tcp)
+	}
+	return s.routes(tcp)
+}
 
 // checkListen refuses a TCP listener that would let anyone in: a hub, or a
 // --http address beyond loopback, needs a token; TLS needs both files.
@@ -194,11 +210,23 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
-	if live, _ := LiveInfo(s.cfg.Name); live != nil {
-		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
-	}
 	if err := os.MkdirAll(RunDir(s.cfg.Name), 0o700); err != nil {
 		return err
+	}
+	// The run-dir lock, held until Run returns, is what makes this the one
+	// daemon of its name: daemon.json alone is not, since a hub writes it
+	// only once its mesh has started, seconds after it binds the socket.
+	// A second start in that window must not remove the socket.
+	lock, err := lockRunDir(LockPath(s.cfg.Name))
+	if errors.Is(err, errRunLocked) {
+		return Errorf(CodeDaemonUnavailable, "daemon %q is already running or starting (another process holds %s)", s.cfg.Name, LockPath(s.cfg.Name))
+	}
+	if err != nil {
+		return err
+	}
+	defer unlockRunDir(lock)
+	if live, _ := LiveInfo(s.cfg.Name); live != nil {
+		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
 	}
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
@@ -214,7 +242,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	_ = os.Chmod(sockPath, 0o600)
 	s.listeners = append(s.listeners, unixLn)
-	s.servers = append(s.servers, &http.Server{Handler: s.routes(false)})
+	s.servers = append(s.servers, &http.Server{Handler: s.listenerHandler(false)})
 
 	httpAddr := ""
 	if s.cfg.HTTPAddr != "" {
@@ -234,7 +262,7 @@ func (s *Server) Run(ctx context.Context) error {
 			tcpLn = tls.NewListener(tcpLn, tlsConfig)
 		}
 		s.listeners = append(s.listeners, tcpLn)
-		s.servers = append(s.servers, &http.Server{Handler: s.routes(true)})
+		s.servers = append(s.servers, &http.Server{Handler: s.listenerHandler(true)})
 	}
 
 	s.startedAt = time.Now()
@@ -255,8 +283,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.cfg.Hub {
 		s.info.Hub = s.hubName()
 	}
-	if err := WriteInfo(&s.info); err != nil {
-		return err
+	// A hub with a mesh writes daemon.json once its mesh has started:
+	// spawners (hub start, the launchd service's wait) treat daemon.json
+	// plus a ping as ready, so they return only after the launch browse
+	// and the first --peer answers, as READY does.
+	if s.cfg.Mesh == nil {
+		if err := WriteInfo(&s.info); err != nil {
+			return err
+		}
 	}
 	// Fresh registry file for this run.
 	s.registry.mu.Lock()
@@ -291,6 +325,23 @@ func (s *Server) Run(ctx context.Context) error {
 		defer stopSweep()
 		go s.runLeaseSweeper(sweepCtx)
 	}
+	if s.cfg.Mesh != nil {
+		if err := s.cfg.Mesh.Start(ctx, s.info); err != nil {
+			e := asError(err)
+			logger.Error("hub %q: %s", s.info.Hub, e.Message)
+			if s.cfg.Ready != nil {
+				fmt.Fprintf(s.cfg.Ready, "FAILED code=%s %s\n", e.Code, e.Message)
+			}
+			s.Shutdown("mesh refused: " + e.Message)
+			<-s.done
+			return e
+		}
+		if err := WriteInfo(&s.info); err != nil {
+			s.Shutdown("write daemon.json: " + err.Error())
+			<-s.done
+			return err
+		}
+	}
 	if s.cfg.Ready != nil {
 		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
 	}
@@ -320,12 +371,18 @@ func (s *Server) Shutdown(reason string) {
 	s.shutdownOnce.Do(func() {
 		s.shuttingDown.Store(true)
 		s.idle.Stop()
-		s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 		go func() {
 			defer close(s.done)
-			// A hub's leases end first: requests under them are
-			// cancelled, and their lease events go out.
+			// A hub's leases end first, while the mesh still carries their
+			// events to peers' clients and before daemon.shutdown: requests
+			// under them are cancelled, and every teardown (one that waits
+			// for work that ignores its cancellation too, for a while) is
+			// done before the devices are detached and shut down below.
 			s.endAllLeases()
+			if s.cfg.Mesh != nil {
+				s.cfg.Mesh.Close()
+			}
+			s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 			s.detachAll()
 			s.registry.ShutdownOwned()
 			RemoveRunFiles(s.cfg.Name)

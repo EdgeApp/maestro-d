@@ -357,6 +357,12 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		sel := o.lease.sel
 		req.Select = &sel
 	}
+	// Without an app to upload first, the hub attaches in the lease request
+	// itself, under the lease: no gap in which a short TTL can run out.
+	if !o.lease.noAttach && o.Attach.AppFile == "" {
+		cfg := o.Attach
+		req.Attach = &cfg
+	}
 	res, err := c.AcquireLease(ctx, req)
 	if err != nil {
 		return err
@@ -365,7 +371,7 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 	recordLease(key, l)
 	c.SetLease(l.Device, l.ID)
 	info := res.Device
-	if !o.lease.noAttach {
+	if !o.lease.noAttach && (info == nil || !info.Attached) {
 		if info, err = ensureAttached(ctx, c, o, l.Device); err != nil {
 			if _, rerr := c.ReleaseLease(ctx, l.ID); rerr == nil {
 				dropLease(key, l.ID)

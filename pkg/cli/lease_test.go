@@ -58,9 +58,11 @@ func TestLeaseFile_RecordFindDropPrune(t *testing.T) {
 
 func TestHubStart_Helpers(t *testing.T) {
 	o := &daemonOpts{Name: "hub", HTTPAddr: ":7433", TLSCert: "c.pem", TLSKey: "k.pem", PassEnv: []string{"A"},
-		hub: hubOpts{share: []string{"x", "y"}, remoteShell: true}}
+		hub: hubOpts{name: "lab-a", share: []string{"x", "y"}, remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
+			advertise: "10.0.0.1:7433", peerCA: "ca.pem", peerToken: "p3er"}}
 	args := strings.Join(hubChildArgs(o), " ")
-	for _, want := range []string{"hub start --foreground --daemon hub --listen :7433", "--share-device x --share-device y", "--allow-remote-shell", "--pass-env A", "--tls-cert /"} {
+	for _, want := range []string{"hub start --foreground --daemon hub --name lab-a --listen :7433", "--share-device x --share-device y",
+		"--allow-remote-shell", "--pass-env A", "--tls-cert /", "--peer hub-b:7433", "--no-mdns", "--advertise 10.0.0.1:7433", "--peer-ca /"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("child args %q lack %q", args, want)
 		}
@@ -68,7 +70,7 @@ func TestHubStart_Helpers(t *testing.T) {
 	if strings.Contains(args, "token") {
 		t.Fatalf("child args carry a token: %s", args)
 	}
-	got := redactArgs([]string{"hub", "start", "--token", "s3cret", "--token=s3cret", "--listen", ":1"})
+	got := redactArgs([]string{"hub", "start", "--token", "s3cret", "--token=s3cret", "--peer-token", "s3cret", "--peer-token=s3cret", "--listen", ":1"})
 	if strings.Contains(strings.Join(got, " "), "s3cret") {
 		t.Fatalf("redact: %v", got)
 	}
@@ -344,7 +346,7 @@ func TestLeaseDurations(t *testing.T) {
 	if !strings.Contains(args, "--lease-max 1h --lease-max a=5m") {
 		t.Fatalf("child args: %s", args)
 	}
-	if err := runHubStart(context.Background(), &daemonOpts{Token: "t", hub: hubOpts{leaseMax: []string{"x=y"}}, explicit: map[string]bool{}}, nil); err == nil {
+	if _, _, err := checkHubFlags(&daemonOpts{Token: "t", hub: hubOpts{peerToken: "p", leaseMax: []string{"x=y"}}, explicit: map[string]bool{}}); err == nil {
 		t.Fatal("a bad --lease-max starts a hub")
 	}
 }

@@ -184,16 +184,26 @@ attaches are retried the same way.
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
 | `INTERRUPTED` | 499 | 130 | the request was cancelled mid-step |
-| `FORBIDDEN` | 403 | 2 | a [remote caller](#remote-callers) asked for the host: `runShell`, a host path, `cwd`, a web attach |
-| `PEER_UNAVAILABLE` | 503 | 3 | hub mesh: the hub that owns the device cannot be reached (`details.hub`); clients retry it |
-| `HUB_NAME_TAKEN` | 409 | 5 | hub mesh: a joining hub's name is already in use |
+| `FORBIDDEN` | 403 | 2 | a [remote caller](#remote-callers) asked for the host: `runShell`, a host path, `cwd`, a web attach, or to stop a hub |
+| `PEER_UNAVAILABLE` | 503 | 3 | hub mesh: the hub that owns the device is not linked, or its link dropped mid-request (`details.hub`); clients retry it |
+| `HUB_NAME_TAKEN` | 409 | 5 | hub mesh: a joining hub's name is the receiver's own, or one already linked from another address |
 | `HUB_VERSION` | 409 | 5 | hub mesh: a joining hub speaks another API version |
 | `LEASE_REQUIRED` | 409 | 5 | hub: a request that drives a device without its `X-Maestro-Lease` (or with another device's lease); the message names `maestro-d lease --device <id>` and `md.lease()`, `details.hint` the command |
 | `LEASE_EXPIRED` | 409 | 5 | hub: the request's lease has expired or was released |
 
-`PEER_UNAVAILABLE`, `HUB_NAME_TAKEN` and `HUB_VERSION` belong to the hub
-mesh and are part of the protocol now so every client maps them; the two
-lease codes come from a hub. A `serve` daemon answers with none of them.
+`PEER_UNAVAILABLE`, `HUB_NAME_TAKEN` and `HUB_VERSION` come from the hub
+mesh ([below](#the-hub-mesh)); the two lease codes come from a hub. A
+`serve` daemon answers with none of them.
+
+Every error answer also carries its code in the header
+`X-Maestro-Error-Code: <code>`, and a hub relaying a peer's answer passes
+it on. An answer without a body, a `HEAD`'s, has only the header to tell
+its code: `LEASE_REQUIRED`, `LEASE_EXPIRED`, `DEVICE_IN_USE` and `BUSY`
+are all `409`, and `PEER_UNAVAILABLE` and `DAEMON_UNAVAILABLE` both `503`.
+The CLI and the JavaScript library read the header when there is no body,
+so a `HEAD` refused `LEASE_EXPIRED` drops the lease from `leases.json` as
+any other request does. A client falls back on the status alone only when
+the header is missing (a proxy's own error page).
 
 A failed step with `optional: true` is *not* an error: `200`, `ok: true`,
 and `error` filled in for inspection.
@@ -259,7 +269,7 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"29271FDH200ABP"}
 | query / header | |
 | --- | --- |
 | `?device=ID` | only that device's events (daemon-wide events such as `daemon.shutdown` have no device and are filtered out too) |
-| `?after=SEQ` or `Last-Event-ID: SEQ` | replay buffered events with `seq > SEQ` first — reconnecting clients miss nothing that is still in the ring buffer |
+| `?after=SEQ` or `Last-Event-ID: SEQ` | replay buffered events with `seq > SEQ` first — reconnecting clients miss nothing that is still in the ring buffer. Not on a hub's merged stream (no `device`, no `scope=local`): that is `USAGE`, see [The hub mesh](#the-hub-mesh) |
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
@@ -305,6 +315,11 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
+| `machine`, `addresses` | hub only: the machine the device is attached to — its host name (`os.Hostname()`), and the owning hub's `--advertise` address (when set) followed by that machine's non-loopback IPs. Set by the owner and carried through the mesh, so a client compares them with its own host name and IPs to find the devices on its own machine, whichever hub it asked |
+
+On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
+and the list covers every hub of the mesh, with `unreachable` naming a hub
+that did not answer; see [The hub mesh](#the-hub-mesh).
 
 On a hub started with `--share-device`, a remote caller sees only the
 shared devices, here and in `GET /v1/status`; every other device is
@@ -453,6 +468,55 @@ Closes the driver; the device keeps running. `{"ok": true}`, or
 One device, same shape as the list entries. `DEVICE_NOT_FOUND` if the host
 cannot see it and the daemon does not hold it.
 
+## The hub mesh
+
+Hubs link into a mesh ([hub.md](hub.md)); any hub serves the full API for
+every hub's devices and forwards each request to the device's owner, which
+runs it through its own handler, so every route, rule and error code is the
+same.
+
+- **Qualified ids.** On a hub every device id is `<localId>@<hub>` and every
+  lease id `<uuid>@<hub>`, in responses and events; device entries carry
+  `hub` and `localId`. A request may send either form: an unqualified id
+  resolves to this hub's device, else to the one hub that lists it (several:
+  `USAGE` with `details.candidates`; a linked hub that does not answer in
+  time, or a known hub whose link is down, when no hub lists the id:
+  `PEER_UNAVAILABLE` with `details.hubs`).
+- **Routing.** `/v1/devices/{id}/…` and `/v1/leases/{lid}/…` go to the hub
+  the suffix names; `POST /v1/leases` by its body's `device` (a `select` is
+  tried here first, then on the peers by RTT, ready devices before booted
+  ones); `GET /v1/events?device=` by the id; `POST /v1/devices` and
+  `GET /v1/catalog` by `hub` in the body or query (or a qualified `name`).
+- **Mesh-wide lists.** `GET /v1/devices`, `GET /v1/leases` and
+  `GET /v1/events` without `device` include every linked hub (each asked
+  within 3 s, answers cached 2 s); `unreachable: [{hub, error}]` names a hub
+  that did not answer or whose link is down. `?scope=local` limits a list
+  to this hub. The merged event stream adds a hub as it links and
+  resubscribes one that restarts; it carries no `id:` lines, and `after` or
+  `Last-Event-ID` on it is `USAGE` (each hub numbers its own events).
+- **Failures.** A request for a hub that is not linked, or whose link drops
+  while it runs, fails `PEER_UNAVAILABLE` (503) with `details.hub`.
+
+### `GET /v1/hub`
+
+```json
+{ "ok": true, "exitCode": 0,
+  "hub": { "name": "hub-b", "version": "1.1.0", "apiVersion": "1", "listen": "[::]:7433", "mdns": true,
+    "peers": [ { "name": "hub-a", "addr": "10.0.0.2:7433", "state": "linked", "direction": "outbound",
+                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z" } ] } }
+```
+
+`state` is `linked`, `down`, `stopped` (it shut down cleanly), `connecting`
+or `refused`. A daemon that is not a hub answers `USAGE`.
+
+### `GET /v1/hub/link`
+
+The peer link: a WebSocket upgrade with `Authorization: Bearer <peer
+token>` and `X-Maestro-Hub: <name>` (`?bulk=1` for a short-lived link that
+carries one large or streamed exchange). It is for hubs, not clients:
+refused `401` for a wrong peer token, `HUB_NAME_TAKEN` or `HUB_VERSION`
+(409) for a hub that may not join.
+
 ## Leases (hubs)
 
 A hub (`maestro-d hub start`) lends each device to one client at a time.
@@ -532,7 +596,9 @@ has attached, is `DEVICE_IN_USE` (`details.holder`/`expiresAt`, or
 shutting it down (a selector passes over it). Those teardowns hold up no
 lease call for another device. A selector that matches nothing is `DEVICE_NOT_FOUND`
 naming the selector; one whose matches are all taken is `DEVICE_IN_USE`
-listing them in `details.candidates`. The request takes an
+listing them in `details.candidates`. Through a mesh, when no hub grants
+and the only other answers came from hubs that are unreachable or stopping,
+it is `PEER_UNAVAILABLE` naming them in `details.hubs` (retry). The request takes an
 `X-Maestro-Request-Id`, so a retried request is granted once. With
 `attach`, the attach runs under the lease: if the window ends first, the
 answer is `LEASE_EXPIRED` at once, the attach is cancelled (or its driver
@@ -761,7 +827,10 @@ is `FORBIDDEN` before any file is opened.
 
 `200` when the daemon has the blob, `404` when it does not. Either way
 `Upload-Offset` says how many bytes it holds (of a partial upload, for a
-404).
+404). A refusal (on a hub, `LEASE_REQUIRED` or `LEASE_EXPIRED`; a
+`DEVICE_NOT_FOUND` `404`) has no body either: it names its code in
+`X-Maestro-Error-Code`, which a missing blob's `404` does not carry (see
+[Errors](#errors)).
 
 ### `PUT /v1/devices/{id}/blobs/{sha256}`
 

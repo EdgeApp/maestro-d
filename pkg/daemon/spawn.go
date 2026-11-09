@@ -144,6 +144,9 @@ func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 	for {
 		select {
 		case werr := <-exited:
+			if e := failedLine(logPath); e != nil {
+				return nil, e
+			}
 			return nil, Errorf(CodeDaemonUnavailable, "daemon %q (pid %d) exited during startup: %v\n%s",
 				name, pid, werr, tailFile(logPath, 20))
 		case <-ctx.Done():
@@ -180,6 +183,28 @@ func WaitForExit(info *Info, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return true
+}
+
+// failedLine reads a child's "FAILED code=CODE message" startup line (a
+// hub whose peers refused it), so the parent exits with the same code.
+func failedLine(path string) *Error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "FAILED code=")
+		if !ok {
+			continue
+		}
+		code, msg, _ := strings.Cut(rest, " ")
+		for _, c := range Codes {
+			if string(c) == code {
+				return Errorf(c, "%s", msg)
+			}
+		}
+	}
+	return nil
 }
 
 // tailFile returns the last n lines of a file for error messages.

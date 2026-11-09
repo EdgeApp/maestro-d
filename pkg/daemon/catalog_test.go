@@ -234,18 +234,18 @@ var bg = context.Background()
 
 func TestCatalog_BothPlatformsAndQuery(t *testing.T) {
 	e := newMgmtEnv(t, newFakeHost())
-	res, err := e.c.Catalog(bg, "", false)
+	res, err := e.c.Catalog(bg, "", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.IOS == nil || res.Android == nil || len(res.Errors) != 0 || !res.OK {
 		t.Errorf("catalog = %+v", res)
 	}
-	res, err = e.c.Catalog(bg, "Android", true)
+	res, err = e.c.Catalog(bg, "Android", true, "")
 	if err != nil || res.IOS != nil || res.Android == nil {
 		t.Errorf("android only: %+v %v", res, err)
 	}
-	_, err = e.c.Catalog(bg, "windows", false)
+	_, err = e.c.Catalog(bg, "windows", false, "")
 	wantCode(t, err, CodeUsage, "ios or android")
 }
 
@@ -253,11 +253,11 @@ func TestCatalog_MissingTool(t *testing.T) {
 	h := newFakeHost()
 	h.fail["android catalog"] = errors.New("sdkmanager not found; install the Android SDK command-line tools")
 	e := newMgmtEnv(t, h)
-	res, err := e.c.Catalog(bg, "", false)
+	res, err := e.c.Catalog(bg, "", false, "")
 	if err != nil || res.IOS == nil || !strings.Contains(res.Errors["android"], "sdkmanager not found") {
 		t.Errorf("one platform missing is reported in errors: %+v %v", res, err)
 	}
-	_, err = e.c.Catalog(bg, "android", false)
+	_, err = e.c.Catalog(bg, "android", false, "")
 	wantCode(t, err, CodeDeviceError, "sdkmanager not found")
 }
 

@@ -24,6 +24,7 @@ import type {
   DaemonInfo,
   DeviceInfo,
   Envelope,
+  HubStatus,
   Lease,
   LeaseSelector,
   StatusResult,
@@ -349,6 +350,16 @@ export class MaestroD {
       signal: this.sig(opts.signal),
     })
     return res.device
+  }
+
+  /**
+   * The hub's name and version, and each peer's address, link state, RTT
+   * and device count (`GET /v1/hub`). Fails `USAGE` on a daemon that is not
+   * a hub.
+   */
+  async hubStatus(opts: { signal?: AbortSignal } = {}): Promise<HubStatus> {
+    const res = await this.transport.json<Envelope & { hub: HubStatus }>('/v1/hub', { signal: this.sig(opts.signal) })
+    return res.hub
   }
 
   /**

@@ -215,11 +215,23 @@ maestro-d release --device "$UDID" --target-hub=192.168.64.1
 
 | command | |
 | --- | --- |
-| `hub start [--daemon NAME] [--listen ADDR] --token T \| --token-file F [--tls-cert F --tls-key F] [--share-device ID\|NAME …] [--lease-max [DEVICE=]DURATION …] [--allow-remote-shell] [--pass-env NAME …] [--foreground]` | start a hub (the daemon `hub` unless `--daemon` names another) in the background, with no idle timeout. `--listen` defaults to `:7433` and, unlike `--http`, binds every interface. The token is required; `--token-file` reads it from a file only its owner can read, and the detached hub gets it through its environment, never its command line. `--share-device` (repeatable) puts only those devices, by id or name (a running emulator's AVD name), in the pool; the rest stay private to this machine. `--lease-max` sets the longest lease window: `DURATION` (`8h`, `90m`, or seconds) for the whole hub (default 8h), `DEVICE=DURATION` (repeatable) for one device by id or name, matched like `--share-device`. `--foreground` runs it in this process, for a supervisor |
-| `hub stop [--daemon NAME]` | stop the hub: its leases end and its devices are detached |
+| `hub start [--name NAME] [--daemon NAME] [--listen ADDR] [--advertise HOST:PORT] [--peer HOST[:PORT] …] [--no-mdns] --token T \| --token-file F --peer-token P \| --peer-token-file F [--tls-cert F --tls-key F] [--peer-ca F] [--share-device ID\|NAME …] [--lease-max [DEVICE=]DURATION …] [--allow-remote-shell] [--pass-env NAME …] [--foreground]` | start a hub (the daemon `hub` unless `--daemon` names another) in the background, with no idle timeout. `--name` is its name in the mesh (default: the short host name). `--listen` defaults to `:7433` and, unlike `--http`, binds every interface. Both tokens are required; the `-file` forms read a file only its owner can read, and the detached hub gets them through its environment, never its command line. At launch it advertises itself with mDNS, browses 3 s and dials every hub found plus every `--peer` (`--no-mdns` skips the LAN); it reports ready once every `--peer` answered, or after 10 s, and exits 5 when every `--peer` refused it (`HUB_NAME_TAKEN` for the peer's own name, `HUB_VERSION`). `--share-device` (repeatable) puts only those devices, by id or name (a running emulator's AVD name), in the pool; the rest stay private to this machine. `--lease-max` sets the longest lease window: `DURATION` (`8h`, `90m`, or seconds) for the whole hub (default 8h), `DEVICE=DURATION` (repeatable) for one device by id or name, matched like `--share-device`. `--foreground` runs it in this process, for a supervisor. See [hub.md](hub.md) |
+| `hub stop [--daemon NAME]` | stop the hub: its leases end, its devices are detached and its peer links close (through launchd when the service is installed) |
+| `hub status [--daemon NAME] [--target-hub…] [--json]` | the hub's name, version and listener, and for each peer its address, link state, direction, RTT and device count (`GET /v1/hub`) |
+| `hub service install [hub start flags]` / `uninstall [--purge]` / `status` | macOS: run the hub as the LaunchAgent `app.edge.maestro-d.hub` (starts at login, restarts after a crash, not after `hub stop`; tokens in `<home>/hub/secrets`, never in the plist). While installed, `hub start` kickstarts it. `--purge` also deletes the tokens |
 | `lease [--device ID \| --platform P --kind K --name N --os V --hub H [--boot]] [--ttl DURATION] [--holder H] [--no-attach] [attach flags] [--json]` | lease a device, by id or by selector, and attach it (`--no-attach` only reserves it). `--ttl` is the window, a duration (`2h`, `90m`) or seconds; default 8h, or the device's maximum when that is shorter, and over the maximum is `USAGE` (exit 2) naming it. A selector takes the first free match: ready, neither leased nor attached; with `--boot`, else a shut-down simulator or AVD, which the hub boots and shuts down again when the lease ends. With `--device` while this client already holds a live lease on it, it prints that lease instead. `--json` prints `{lease: {id, device, holder, expiresAt, ttlSec, maxSec}, device}` |
 | `renew [--device ID] [--ttl DURATION] [--json]` | renew this client's lease on a device explicitly (without `--device`, every lease it holds on that hub): its window starts again now and lasts `--ttl` (default the lease's own window). Over the device's maximum is `USAGE`; with no lease on file, `LEASE_REQUIRED` (exit 5) |
 | `release --device ID \| --all` | end this client's lease on a device (or all of them on that hub); the hub detaches the device. Against a daemon without leases it does nothing and exits 0 |
+
+**A mesh of hubs.** Hubs link with each other ([hub.md](hub.md)), and any hub
+serves every hub's devices. On a hub every device id is `<localId>@<hub>` and
+every lease id `<uuid>@<hub>`; `device list` through any hub lists every hub's
+devices (a hub that did not answer is named on stderr as `unreachable`), and a
+command for `<udid>@hub-a` sent to hub-b runs on hub-a. An unqualified
+`--device` resolves to the one hub that has it. `device catalog`, `device
+create` and `device start` take `--hub NAME` to act on another hub's machine.
+A hub whose link is down fails its devices' requests `PEER_UNAVAILABLE`
+(exit 3).
 
 How leases work:
 
@@ -284,11 +296,11 @@ maestro-d stop --all
 
 | command | |
 | --- | --- |
-| `device list` (`ls`) | connected devices, simulators (booted or not), running emulators under their AVD names, and shut-down AVDs as `avd:<name>`, with attach state; on a hub also a `LEASE` column: the holder and the time left, or `available`; with `--json` each entry also carries `maxSec` |
-| `device catalog [--platform ios\|android] [--available]` | what `device create` can use: iOS runtimes and device types (simctl), Android system images (sdkmanager; `--available` adds downloadable ones) and hardware profiles (avdmanager) |
-| `device create --platform ios --name N [--type T] [--runtime R] [--no-boot]` | create a simulator; defaults are the newest installed runtime and the newest iPhone it supports |
+| `device list` (`ls`) | connected devices, simulators (booted or not), running emulators under their AVD names, and shut-down AVDs as `avd:<name>`, with attach state; on a hub also a `LEASE` column: the holder and the time left, or `available`; with `--json` each entry also carries `maxSec`, `machine` and `addresses` |
+| `device catalog [--platform ios\|android] [--available] [--hub NAME]` | what `device create` can use: iOS runtimes and device types (simctl), Android system images (sdkmanager; `--available` adds downloadable ones) and hardware profiles (avdmanager) |
+| `device create --platform ios --name N [--type T] [--runtime R] [--no-boot] [--hub NAME]` | create a simulator; defaults are the newest installed runtime and the newest iPhone it supports |
 | `device create --platform android --name N [--image I] [--profile P] [--data-size S] [--install-image --accept-licenses] [--no-boot]` | create an AVD; defaults are the newest installed `google_apis` image for the host's ABI, `pixel_8` and a 6G data partition (at most 10G) |
-| `device start NAME [--platform ios\|android] [--boot-timeout N]` | boot a simulator (name or UDID) or emulator (AVD name or `avd:<name>`); recorded as daemon-owned. Without `--platform`, `avd:` means android and a listed name or UDID picks its platform |
+| `device start NAME [--platform ios\|android] [--boot-timeout N] [--hub NAME]` | boot a simulator (name or UDID) or emulator (AVD name or `avd:<name>`); recorded as daemon-owned. Without `--platform`, `avd:` means android and a listed name or UDID picks its platform |
 | `device stop [ID] [--force] [--orphans]` | shut a device down (detaching first); only daemon-booted ones without `--force`; `--orphans` cleans up after dead daemons |
 | `device delete ID\|NAME [--force]` | delete a simulator or AVD (by UDID, name, `avd:<name>` or a running emulator's serial), detaching and stopping it first; only ones `device create` made without `--force` (`DEVICE_EXTERNAL`) |
 | `attach --device ID [flags]` | open a driver on a device now rather than on the first command |

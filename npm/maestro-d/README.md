@@ -371,8 +371,9 @@ await md.close()                               // releases it
   cannot take the CLI's `flock`), so a script and a CLI updating it at the
   same instant can lose one update; when several processes share a home and
   lease at once, lease from the shell.
-- Device entries on a hub carry `maxSec`, the device's longest lease
-  window.
+- Device entries on a hub carry `maxSec`, `machine` and `addresses` (the
+  owning machine's host name, and its hub's advertised address plus its
+  non-loopback IPs).
 - Another client's device rejects with `DEVICE_IN_USE`; a selector with no
   match with `DEVICE_NOT_FOUND`. On a daemon that is not a hub, `lease()`
   rejects with `USAGE` and `attach()` works as before.

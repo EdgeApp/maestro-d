@@ -793,7 +793,7 @@ var daemonPsCommand = &cli.Command{
 
 var (
 	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags)
-	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
+	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		intFlag("boot-timeout", "Seconds to wait for boot (default 180)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
 	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
@@ -818,15 +818,19 @@ var daemonDeviceCommand = &cli.Command{
 				if err != nil {
 					return err
 				}
-				devs, err := client.Devices(ctx, o.Attach.Platform)
+				res, err := client.DeviceList(ctx, o.Attach.Platform)
 				if err != nil {
 					return err
 				}
 				if o.JSON {
-					printJSON(os.Stdout, daemon.DevicesResult{Envelope: daemon.Envelope{OK: true}, Devices: devs})
+					res.Envelope = daemon.Envelope{OK: true}
+					printJSON(os.Stdout, res)
 					return nil
 				}
-				printDevices(os.Stdout, devs)
+				printDevices(os.Stdout, res.Devices)
+				for _, u := range res.Unreachable {
+					fmt.Fprintf(os.Stderr, "unreachable: hub %s (%s)\n", u.Hub, u.Error)
+				}
 				return nil
 			}),
 		},
@@ -855,7 +859,7 @@ UDID that 'device list' shows picks that device's platform.
 				if !o.JSON {
 					progress("Booting %s …", args[0])
 				}
-				dev, err := client.StartDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: args[0], BootTimeout: o.StartTimeout})
+				dev, err := client.StartDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: args[0], BootTimeout: o.StartTimeout, Hub: o.manage.hub})
 				if err != nil {
 					return err
 				}

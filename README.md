@@ -4,7 +4,7 @@
 
 **Drive a real phone one command at a time — from a shell, over HTTP, or from JavaScript.**
 
-[CLI](docs/daemon/cli.md) · [REST API](docs/daemon/rest.md) · [JavaScript](docs/daemon/js.md) · [Commands](docs/daemon/commands.md) · [How it works](docs/daemon/README.md)
+[CLI](docs/daemon/cli.md) · [REST API](docs/daemon/rest.md) · [JavaScript](docs/daemon/js.md) · [Hubs](docs/daemon/hub.md) · [Commands](docs/daemon/commands.md) · [How it works](docs/daemon/README.md)
 
 </div>
 
@@ -140,6 +140,13 @@ can share one device session.
   `device list` shows who holds what; `release` frees a device.
   JavaScript: `md.lease({select})` and `device.renew()`; `attach()` on a hub
   uses a lease from `md.lease()` or `maestro-d lease`.
+- **A mesh of hubs.** Hubs on a LAN find each other with mDNS at launch, and
+  hubs across networks join with `--peer HOST`; each passes its peers on, so
+  the mesh fills from one seed. Connect to any hub: `device list` shows every
+  hub's devices as `<id>@<hub>`, and a command for another hub's device is
+  forwarded to it. `hub status` shows each peer's link and RTT; `hub service
+  install` runs the hub as a macOS LaunchAgent. See
+  [docs/daemon/hub.md](docs/daemon/hub.md).
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
   `DAEMON_UNAVAILABLE` 3/503, `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409,
@@ -205,6 +212,7 @@ Android testing needs `adb`; iOS needs Xcode's command-line tools (and
 | [docs/daemon/cli.md](docs/daemon/cli.md) | Every CLI command and flag |
 | [docs/daemon/rest.md](docs/daemon/rest.md) | REST reference with curl examples |
 | [docs/daemon/js.md](docs/daemon/js.md) | The npm package |
+| [docs/daemon/hub.md](docs/daemon/hub.md) | Hubs: the device mesh, its flags, security, the launchd service, troubleshooting |
 | [docs/daemon/commands.md](docs/daemon/commands.md) | All YAML commands and their fields |
 | [docs/daemon/UPSTREAM.md](docs/daemon/UPSTREAM.md) | Which upstream files the fork touches, and how to rebase |
 | [docs/maestro-runner.md](docs/maestro-runner.md) | Upstream's README — the flow runner, drivers, cloud providers |

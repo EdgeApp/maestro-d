@@ -409,7 +409,12 @@ func StepsResultFrom(device string, results []StepResult) StepsResult {
 
 // DeviceInfo describes one device the daemon knows about.
 type DeviceInfo struct {
-	ID        string `json:"id"`
+	// ID is the device's id; on a hub it is qualified, <localId>@<hub>.
+	ID string `json:"id"`
+	// Hub and LocalID, on a hub, split ID: the hub that owns the device
+	// and the device's id on that hub's machine.
+	Hub       string `json:"hub,omitempty"`
+	LocalID   string `json:"localId,omitempty"`
 	Platform  string `json:"platform"`       // android | ios | web | mock
 	Kind      string `json:"kind,omitempty"` // device | emulator | simulator
 	Name      string `json:"name,omitempty"`
@@ -443,6 +448,12 @@ type DeviceInfo struct {
 	Available bool `json:"available,omitempty"`
 	// MaxSec, on a hub, is the longest lease window the device takes.
 	MaxSec int `json:"maxSec,omitempty"`
+	// Machine and Addresses, on a hub, name the machine the device is
+	// attached to: its host name, and the owning hub's advertised address
+	// plus the host's non-loopback IPs. A client compares them with its
+	// own to find the devices on its own machine, whichever hub it asked.
+	Machine   string   `json:"machine,omitempty"`
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -494,6 +505,9 @@ type BootRequest struct {
 	Create *CreateSpec `json:"create,omitempty"`
 	// Boot boots what Create made (default true). Ignored without Create.
 	Boot *bool `json:"boot,omitempty"`
+	// Hub, on a hub, names the hub whose machine boots or creates the
+	// device (default: the one asked, or the suffix of a qualified Name).
+	Hub string `json:"hub,omitempty"`
 }
 
 // CreateSpec describes a simulator (type, runtime) or an AVD (image,
@@ -571,6 +585,8 @@ type DeviceResult struct {
 type DevicesResult struct {
 	Envelope
 	Devices []DeviceInfo `json:"devices"`
+	// Unreachable, on a hub, names the peers whose devices are missing.
+	Unreachable []UnreachablePeer `json:"unreachable,omitempty"`
 }
 
 // DataResult wraps an arbitrary JSON payload (state, info, hierarchy).

@@ -134,6 +134,8 @@ type LeaseResult struct {
 type LeasesResult struct {
 	Envelope
 	Leases []Lease `json:"leases"`
+	// Unreachable, on a hub, names the peers whose leases are missing.
+	Unreachable []UnreachablePeer `json:"unreachable,omitempty"`
 }
 
 type leaseEntry struct {
@@ -757,10 +759,11 @@ func (s *Server) visible(r *http.Request, devs []DeviceInfo) []DeviceInfo {
 	return out
 }
 
-// annotate sets lease, maxSec, available and owner on a hub's device
-// entries.
+// annotate sets lease, maxSec, available, owner, machine and addresses
+// on a hub's device entries.
 func (s *Server) annotate(devs []DeviceInfo) {
 	owners := otherOwners(s.cfg.Name)
+	machine, addrs := s.hostIdentity()
 	for i := range devs {
 		d := &devs[i]
 		if o := owners[d.ID]; o != "" && !d.Attached {
@@ -771,6 +774,7 @@ func (s *Server) annotate(devs []DeviceInfo) {
 			d.Lease = &DeviceLease{Holder: l.Holder, ExpiresAt: l.ExpiresAt}
 		}
 		d.MaxSec = int(s.leaseMaxInfo(*d) / time.Second)
+		d.Machine, d.Addresses = machine, addrs
 		d.Available = d.Ready && d.Lease == nil && !d.Attached && d.Owner == "" && !strings.HasPrefix(d.ID, AVDPrefix)
 		if d.Available && s.leases.reserved(*d) {
 			// Booting for a selector lease, or still being released.

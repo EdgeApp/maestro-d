@@ -561,7 +561,7 @@ describe('leases', () => {
   const hubName = 'jsleases'
 
   before(() => {
-    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--listen', '127.0.0.1:0', '--token', token, '--json'], {
+    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--json'], {
       env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
     })
     addr = JSON.parse(out.toString()).daemon.httpAddr
@@ -578,19 +578,21 @@ describe('leases', () => {
     assert.equal(a.leasing, true)
     const d = await a.lease({ device: 'mock-h1', holder: 'alice' })
     assert.equal(d.info.attached, true)
-    assert.equal(d.lease.device, 'mock-h1')
+    assert.equal(d.lease.device, 'mock-h1@jsleases')
     // The default window is 8 hours, the hub's maximum.
     assert.equal(d.lease.ttlSec, 28800)
     assert.equal(d.lease.maxSec, 28800)
     assert.equal((await d.tapOn('Leased')).ok, true)
     // md.lease() records the lease in leases.json, as `maestro-d lease` does.
     const onFile = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
-    assert.ok(onFile.some((r) => r.hub === `http://${addr}` && r.device === 'mock-h1' && r.id === d.lease.id), JSON.stringify(onFile))
-    const listed = (await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.ok(onFile.some((r) => r.hub === `http://${addr}` && r.device === 'mock-h1@jsleases' && r.id === d.lease.id), JSON.stringify(onFile))
+    const listed = (await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1@jsleases')
     assert.equal(listed.lease.holder, 'alice')
     assert.equal(listed.available, undefined)
     assert.equal(listed.maxSec, 28800)
-    assert.equal((await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2').available, true)
+    assert.ok(listed.machine, 'the entry names its machine')
+    assert.ok(Array.isArray(listed.addresses))
+    assert.equal((await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2@jsleases').available, true)
 
     const b = await connectHub()
     await rejects(
@@ -606,8 +608,8 @@ describe('leases', () => {
     )
     await a.close()
     const gone = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
-    assert.ok(!gone.some((r) => r.device === 'mock-h1'), 'close() dropped the entry')
-    const free = (await b.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.ok(!gone.some((r) => r.device === 'mock-h1@jsleases'), 'close() dropped the entry')
+    const free = (await b.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1@jsleases')
     assert.equal(free.lease, undefined)
     assert.equal(free.attached, false)
     await b.close()
@@ -616,14 +618,14 @@ describe('leases', () => {
   test('attach: false only reserves; a selector picks the first free device', async () => {
     const md = await connectHub()
     const first = await md.lease({ select: { platform: 'mock' }, attach: false })
-    assert.equal(first.id, 'mock-h1')
+    assert.equal(first.id, 'mock-h1@jsleases')
     assert.equal(first.info.attached, false)
     await rejects(
       () => first.tapOn('x'),
       (err) => assert.ok(isMaestroError(err, 'DEVICE_NOT_ATTACHED'), String(err)),
     )
     const second = await md.lease({ select: { platform: 'mock' } })
-    assert.equal(second.id, 'mock-h2')
+    assert.equal(second.id, 'mock-h2@jsleases')
     await rejects(
       () => md.lease({ select: { platform: 'mock' } }),
       (err) => assert.ok(isMaestroError(err, 'DEVICE_IN_USE'), String(err)),
@@ -695,7 +697,7 @@ describe('leases', () => {
           String(err),
         ),
     )
-    const free = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    const free = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1@jsleases')
     assert.equal(free.lease, undefined, 'no lease was taken')
     // A lease taken in the shell, in the same home, is found and used.
     const out = execFileSync(bin, ['lease', '--device', 'mock-h1', '--no-attach', '--target-hub=' + addr, '--token', token, '--json'])
@@ -708,7 +710,7 @@ describe('leases', () => {
     await d.detach()
     await md.close()
     const md2 = await connectHub()
-    const held = (await md2.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    const held = (await md2.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1@jsleases')
     assert.ok(held.lease, 'the shell lease outlived close()')
     // A lease the hub reports expired leaves leases.json.
     await md2.transport.json(`/v1/leases/${encodeURIComponent(shell.id)}`, { method: 'DELETE' })
@@ -768,9 +770,25 @@ describe('leases', () => {
       () => md.lease({ device: 'mock-h2', attach: { platform: 'mock', appFile: path.join(tmp, 'missing.apk') } }),
       (err) => assert.ok(err instanceof Error),
     )
-    const listed = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2')
+    const listed = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2@jsleases')
     assert.equal(listed.lease, undefined, 'the failed attach released its lease')
     await md.close()
+  })
+
+  test('hubStatus() names the hub and its peers; ids are qualified', async () => {
+    const md = await connectHub()
+    const hub = await md.hubStatus()
+    assert.equal(hub.name, hubName)
+    assert.equal(hub.mdns, false)
+    assert.deepEqual(hub.peers, [])
+    const listed = (await md.devices({ platform: 'mock' })).find((x) => x.localId === 'mock-h2')
+    assert.equal(listed.id, 'mock-h2@jsleases')
+    assert.equal(listed.hub, hubName)
+    await md.close()
+    await rejects(
+      () => daemon.hubStatus(),
+      (err) => assert.ok(isMaestroError(err, 'USAGE'), String(err)),
+    )
   })
 
   test('lease() needs a device or a selector, and a hub', async () => {

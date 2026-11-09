@@ -2345,6 +2345,14 @@ func TestLeases_HubShutdownEndsItsLeases(t *testing.T) {
 	if strings.Join(got, " ") != "lease.granted:mock-1 lease.granted:mock-2 lease.released:mock-1 lease.released:mock-2" {
 		t.Fatalf("lease events %v", got)
 	}
+	// The leases' ends go out before daemon.shutdown (and before the
+	// mesh closes), so a client watching through a peer hub sees them.
+	down := env.eventIndex("daemon.shutdown", "")
+	for _, d := range []string{"mock-1", "mock-2"} {
+		if rel := env.eventIndex("lease.released", d); rel < 0 || down < rel {
+			t.Fatalf("%s: lease.released at %d, daemon.shutdown at %d", d, rel, down)
+		}
+	}
 }
 
 // eventIndex is the position of the first event of type typ on device
@@ -2417,8 +2425,9 @@ func TestLeases_ShutdownWaitsForTeardownsOfStubbornWork(t *testing.T) {
 	if n := stops.Load(); n != 1 {
 		t.Fatalf("the device was shut down %d times, want once", n)
 	}
-	if env.eventIndex("lease.released", "SIM-DOWN") < 0 {
-		t.Fatal("the hub stopped before its lease's end was published")
+	rel, down := env.eventIndex("lease.released", "SIM-DOWN"), env.eventIndex("daemon.shutdown", "")
+	if rel < 0 || down < rel {
+		t.Fatalf("lease.released at %d, daemon.shutdown at %d", rel, down)
 	}
 }
 

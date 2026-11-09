@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 )
 
 // oneShotParse parses a one-shot command line the way runOneShot does.
@@ -102,6 +103,14 @@ func TestParseTarget_Errors(t *testing.T) {
 	for _, v := range []string{"ftp://h", "", "h/path", "h:0", "h:99999", "h:x", "user@h"} {
 		if _, _, err := parseTarget(v); err == nil {
 			t.Errorf("%q: expected an error", v)
+		}
+	}
+	// --target-hub and --peer read an address one way.
+	for _, v := range []string{"h", "h:9", "https://h", "HTTP://h:1/", "::1", "[::1]:9", "user@h", "h h", "h:0", "ftp://h", ":9"} {
+		_, _, terr := parseTarget(v)
+		_, perr := hub.ParseAddr(v, hub.DefaultPort)
+		if (terr == nil) != (perr == nil) {
+			t.Errorf("%q: --target-hub %v, --peer %v", v, terr, perr)
 		}
 	}
 }

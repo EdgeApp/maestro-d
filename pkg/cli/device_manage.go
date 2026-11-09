@@ -19,18 +19,24 @@ type deviceManageOpts struct {
 	spec      daemon.CreateSpec
 	noBoot    bool
 	available bool
+	// hub names the hub whose machine catalogs, creates or boots (--hub).
+	hub string
 }
+
+// manageHubFlag is --hub on device catalog, create and start.
+var manageHubFlag = strFlag("hub", "On a hub: the hub whose machine does it (default: the hub you talk to)", nil,
+	func(o *daemonOpts, v string) { o.manage.hub = v })
 
 func manageStr(name, usage string, set func(s *daemon.CreateSpec, v string)) dflag {
 	return strFlag(name, usage, nil, func(o *daemonOpts, v string) { set(&o.manage.spec, v) })
 }
 
 var (
-	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
+	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		boolFlag("available", "Also list Android system images that sdkmanager can download", nil,
 			func(o *daemonOpts, v bool) { o.manage.available = v }),
 	})
-	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
+	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		manageStr("name", "Name of the new simulator or AVD (required)", func(s *daemon.CreateSpec, v string) { s.Name = v }),
 		manageStr("type", "iOS: device type name or id (default: the newest iPhone the runtime supports)", func(s *daemon.CreateSpec, v string) { s.Type = v }),
 		manageStr("runtime", "iOS: runtime, e.g. iOS-26-5 or 26.5 (default: the newest installed)", func(s *daemon.CreateSpec, v string) { s.Runtime = v }),
@@ -107,7 +113,7 @@ func runDeviceCatalog(ctx context.Context, c *daemon.Client, o *daemonOpts, args
 	if len(args) != 0 {
 		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device catalog [--platform ios|android] [--available]")
 	}
-	res, err := c.Catalog(ctx, o.Attach.Platform, o.manage.available)
+	res, err := c.Catalog(ctx, o.Attach.Platform, o.manage.available, o.manage.hub)
 	if err != nil {
 		return err
 	}
@@ -172,7 +178,7 @@ func runDeviceCreate(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 			progress("Creating %s …", spec.Name)
 		}
 	}
-	dev, err := c.CreateDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: spec.Name, Create: &spec,
+	dev, err := c.CreateDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: spec.Name, Create: &spec, Hub: o.manage.hub,
 		Boot: &boot, BootTimeout: o.StartTimeout})
 	if err != nil {
 		return err
