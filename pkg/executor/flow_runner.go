@@ -754,7 +754,7 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 	// Reject a reference path that escapes both the flow directory and the
 	// project root — a baseline/diff must not be written outside the workspace
 	// via `..` traversal (Maestro #3459).
-	if err := validateArtifactPath(referencePath, fr.script.FlowDir()); err != nil {
+	if err := validateArtifactPath(referencePath, fr.script.FlowDir()); err != nil && !fr.script.PolicyAllows(referencePath) { // maestro-d: caller policy roots
 		return &core.CommandResult{
 			Success: false,
 			Error:   err,
@@ -809,7 +809,7 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 		// hint then see a picture that looks identical to the capture and
 		// conclude the runner is lying (#138). Clear it so the artifact can't
 		// contradict the error beside it.
-		diffPath := core.DiffScreenshotPath(referencePath)
+		diffPath := fr.script.DiffPath(referencePath) // maestro-d: caller policy outputs
 		if rmErr := os.Remove(diffPath); rmErr != nil && !os.IsNotExist(rmErr) {
 			logger.Warn("Failed to remove stale screenshot diff %s: %v", diffPath, rmErr)
 		}
@@ -832,7 +832,7 @@ func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *
 	matchPercentage := stats.MatchPercentage
 
 	if matchPercentage < step.ThresholdPercentage {
-		diffPath := core.DiffScreenshotPath(referencePath)
+		diffPath := fr.script.DiffPath(referencePath) // maestro-d: caller policy outputs
 		diffHint := ""
 		if writeErr := core.WriteScreenshotDiff(referenceData, capturedData, diffPath); writeErr != nil {
 			logger.Warn("Failed to write screenshot diff: %v", writeErr)

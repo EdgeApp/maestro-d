@@ -547,7 +547,7 @@ func TestCodes_Table(t *testing.T) {
 			t.Errorf("CodeFromHTTPStatus(%d) = %s, want %s", status, got, want)
 		}
 	}
-	if e := errorFromResponse(403, []byte("<html>forbidden</html>")); e.Code != CodeForbidden || e.ExitCode() != 2 {
+	if e := errorFromResponse(403, nil, []byte("<html>forbidden</html>")); e.Code != CodeForbidden || e.ExitCode() != 2 {
 		t.Errorf("a bare 403: %+v", e)
 	}
 }

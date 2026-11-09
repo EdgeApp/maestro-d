@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -67,6 +70,30 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	}
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return nil, WrapErr(CodeInternal, err)
+	}
+	// The blobs an attach materializes (a packed .app is a full unzipped
+	// copy) are the session's, in a directory of this attach's own under
+	// blobs/: an attach that fails removes that directory again, and
+	// never another attach's blobs in a shared outputDir. blobs/ itself
+	// goes too when this attach made it and it is left empty.
+	blobsRoot := filepath.Join(reportDir, "blobs")
+	_, statErr := os.Stat(blobsRoot)
+	madeRoot := statErr != nil
+	blobDir := filepath.Join(blobsRoot, uuid.New().String())
+	keep := false
+	defer func() {
+		if keep {
+			return
+		}
+		if err := os.RemoveAll(blobDir); err != nil {
+			logger.Warn("attach %s: remove %s: %v", id, blobDir, err)
+		}
+		if madeRoot {
+			_ = os.Remove(blobsRoot) // only when empty
+		}
+	}()
+	if e := s.mapAttachBlobs(&cfg, blobDir); e != nil {
+		return nil, e
 	}
 
 	base, cancel := context.WithCancel(context.Background())
@@ -145,6 +172,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	s.registry.MarkAttached(info)
 	s.events.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
 	logger.Info("Attached device %s (report %s)", id, reportDir)
+	keep = true
 	return a, nil
 }
 
@@ -229,4 +257,36 @@ func keys(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// mapAttachBlobs replaces a blob: appFile or extra.capsFile with the
+// session's copy of that blob.
+func (s *Server) mapAttachBlobs(cfg *AttachConfig, dir string) *Error {
+	mapRef := func(field, ref string) (string, *Error) {
+		if _, _, err := executor.ParseBlobRef(ref); err != nil {
+			return "", forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
+		}
+		local, err := s.blobs.Materialize(ref, dir)
+		if err != nil {
+			return "", Errorf(CodeUsage, "%s %s: %v", field, ref, err).WithDetails("field", field)
+		}
+		return local, nil
+	}
+	if strings.HasPrefix(cfg.AppFile, "blob:") {
+		local, e := mapRef("appFile", cfg.AppFile)
+		if e != nil {
+			return e
+		}
+		cfg.AppFile = local
+	}
+	if v, ok := cfg.Extra["capsFile"].(string); ok && strings.HasPrefix(v, "blob:") {
+		local, e := mapRef("extra.capsFile", v)
+		if e != nil {
+			return e
+		}
+		extra := maps.Clone(cfg.Extra)
+		extra["capsFile"] = local
+		cfg.Extra = extra
+	}
+	return nil
 }

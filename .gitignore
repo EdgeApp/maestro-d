@@ -57,6 +57,8 @@ testdata/
 !/scripts/tvos-coverage.sh
 !/scripts/tvos-changed-coverage.py
 !/scripts/test_tvos_coverage.py
+# maestro-d: the end-to-end tests' data is tracked
+!e2e/testdata/
 docs_local/
 research/
 examples/

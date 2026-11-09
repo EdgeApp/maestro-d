@@ -43,6 +43,20 @@ export const HTTP_STATUS: Record<ErrorCode, number> = {
 }
 
 /**
+ * The response header that repeats an error envelope's code, so a failure
+ * without a body (a HEAD's: LEASE_REQUIRED, LEASE_EXPIRED and BUSY are all
+ * 409) can be told apart.
+ */
+export const ERROR_CODE_HEADER = 'X-Maestro-Error-Code'
+
+/** The code a response's ERROR_CODE_HEADER names, when it is one this library knows. */
+export function codeFromHeaders(headers: Record<string, string | string[] | undefined>): ErrorCode | undefined {
+  const v = headers[ERROR_CODE_HEADER.toLowerCase()]
+  const code = Array.isArray(v) ? v[0] : v
+  return code !== undefined && Object.prototype.hasOwnProperty.call(EXIT_CODES, code) ? (code as ErrorCode) : undefined
+}
+
+/**
  * The failure class for an HTTP status whose body carries none (mirrors
  * CodeFromHTTPStatus): a proxy's error page, a 401 from the token check.
  */
@@ -106,8 +120,11 @@ export class MaestroError extends Error {
     return new MaestroError(body, { cause: options.cause })
   }
 
-  /** Decode a failure response body, falling back on the HTTP status. */
-  static fromResponse(status: number, body: string, result?: StepResult | StepsResult): MaestroError {
+  /**
+   * Decode a failure response body, falling back on the code in the
+   * response's ERROR_CODE_HEADER (`headerCode`), then on the HTTP status.
+   */
+  static fromResponse(status: number, body: string, result?: StepResult | StepsResult, headerCode?: ErrorCode): MaestroError {
     try {
       const parsed = JSON.parse(body) as { error?: ErrorBody }
       if (parsed && parsed.error && parsed.error.code) {
@@ -119,7 +136,7 @@ export class MaestroError extends Error {
     let msg = body.trim()
     if (msg === '') msg = `HTTP ${status}`
     if (msg.length > 200) msg = msg.slice(0, 200) + '…'
-    return MaestroError.of(codeFromStatus(status), `HTTP ${status}: ${msg}`)
+    return MaestroError.of(headerCode ?? codeFromStatus(status), `HTTP ${status}: ${msg}`)
   }
 
   /** The same shape the CLI prints and the REST API returns. */

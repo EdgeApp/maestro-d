@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +36,10 @@ type Client struct {
 	retry bool
 	// sleep waits between retries (tests replace it).
 	sleep func(context.Context, time.Duration) error
+	// ClientOutputs sends HeaderClientOutputs on step-running requests: the
+	// caller names its output files and fetches them back (a client
+	// targeting a daemon on another machine).
+	ClientOutputs bool
 	// Name is the daemon name this client was dialled for (informational).
 	Name string
 	// Info is daemon.json when the client was created from it.
@@ -100,7 +105,7 @@ func carriesRequestID(method, path string) bool {
 		return false
 	}
 	p, _, _ := strings.Cut(path, "?")
-	return strings.Contains(p, "/commands/") || strings.HasSuffix(p, "/steps") || strings.HasSuffix(p, "/flows")
+	return strings.Contains(p, "/commands/") || strings.HasSuffix(p, "/steps") || strings.HasSuffix(p, "/flows") || strings.HasSuffix(p, "/apps")
 }
 
 // retryable reports whether a request may be sent again: one with a
@@ -200,6 +205,9 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	if c.retry && carriesRequestID(method, path) {
 		req.Header.Set(HeaderRequestID, uuid.New().String())
 	}
+	if c.ClientOutputs && carriesRequestID(method, path) {
+		req.Header.Set(HeaderClientOutputs, "1")
+	}
 	return req, nil
 }
 
@@ -297,13 +305,13 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) *
 		}
 	}
 	if resp.StatusCode >= 300 {
-		return errorFromResponse(resp.StatusCode, data)
+		return errorFromResponse(resp.StatusCode, resp.Header, data)
 	}
 	return nil
 }
 
 // errorFromResponse decodes a failure envelope, falling back to the status.
-func errorFromResponse(status int, data []byte) *Error {
+func errorFromResponse(status int, h http.Header, data []byte) *Error {
 	var env Envelope
 	if err := json.Unmarshal(data, &env); err == nil && env.Error != nil && env.Error.Code != "" {
 		return &Error{ErrorBody: *env.Error}
@@ -315,7 +323,11 @@ func errorFromResponse(status int, data []byte) *Error {
 	if len(msg) > 200 {
 		msg = msg[:200] + "…"
 	}
-	return Errorf(CodeFromHTTPStatus(status), "HTTP %d: %s", status, msg)
+	code := CodeFromHeader(h)
+	if code == "" {
+		code = CodeFromHTTPStatus(status)
+	}
+	return Errorf(code, "HTTP %d: %s", status, msg)
 }
 
 func devPath(device, suffix string) string {
@@ -559,7 +571,7 @@ func (c *Client) Screenshot(ctx context.Context, device string) ([]byte, error) 
 		return nil, WrapErr(CodeDaemonUnavailable, rerr)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, errorFromResponse(resp.StatusCode, data)
+		return nil, errorFromResponse(resp.StatusCode, resp.Header, data)
 	}
 	return data, nil
 }
@@ -591,7 +603,7 @@ func (c *Client) HierarchyRaw(ctx context.Context, device string) ([]byte, error
 		return nil, WrapErr(CodeDaemonUnavailable, rerr)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, errorFromResponse(resp.StatusCode, data)
+		return nil, errorFromResponse(resp.StatusCode, resp.Header, data)
 	}
 	return data, nil
 }
@@ -674,7 +686,7 @@ func (c *Client) Events(ctx context.Context, device string, afterSeq int64, fn f
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
-		return errorFromResponse(resp.StatusCode, data)
+		return errorFromResponse(resp.StatusCode, resp.Header, data)
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 4<<20)
@@ -700,6 +712,181 @@ func (c *Client) Events(ctx context.Context, device string, afterSeq int64, fn f
 		return nil
 	}
 	if err := sc.Err(); err != nil {
+		return WrapErr(CodeDaemonUnavailable, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Blobs, apps and artifacts
+
+// HasBlob asks the daemon whether it holds blob hex. When it does not, the
+// returned offset is how much of a partial upload it holds.
+func (c *Client) HasBlob(ctx context.Context, device, hex string) (bool, int64, error) {
+	req, err := c.newRequest(ctx, http.MethodHead, devPath(device, "/blobs/"+hex), nil)
+	if err != nil {
+		return false, 0, err
+	}
+	resp, e := c.do(req)
+	if e != nil {
+		return false, 0, e
+	}
+	resp.Body.Close()
+	off, _ := strconv.ParseInt(resp.Header.Get(HeaderUploadOffset), 10, 64)
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return true, off, nil
+	case resp.StatusCode == http.StatusNotFound && CodeFromHeader(resp.Header) == "":
+		// A blob the daemon lacks; an error's 404 (DEVICE_NOT_FOUND)
+		// names its code.
+		return false, off, nil
+	}
+	return false, 0, blobError(resp.StatusCode, resp.Header, nil)
+}
+
+// errGateway marks a blob request's failure that a gateway in between
+// answered (502/504 without a maestro-d envelope): UploadBlob retries it.
+var errGateway = errors.New("gateway answered without a maestro-d envelope")
+
+// blobError decodes a failed blob request's response, marking the ones
+// retryableResponse would retry.
+func blobError(status int, h http.Header, data []byte) *Error {
+	e := errorFromResponse(status, h, data)
+	if retryableResponse(status, data) && e.Cause == nil {
+		e.Cause = errGateway
+	}
+	return e
+}
+
+// uploadRetryable reports whether a blob HEAD or PUT failure is worth
+// asking for the offset again and resuming: the daemon or the owning hub
+// was unreachable (DAEMON_UNAVAILABLE, PEER_UNAVAILABLE; a HEAD's 503 has
+// no body to tell them apart), or a gateway answered 502/504.
+func uploadRetryable(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && (e.Code == CodeDaemonUnavailable || e.Code == CodePeerUnavailable || e.Cause == errGateway)
+}
+
+// UploadBlob makes sure the daemon holds the file at path as blob hex
+// (size bytes). It asks first and skips the upload when the daemon has it
+// (uploaded is false then); otherwise it uploads from the daemon's offset.
+// After a dropped connection, DAEMON_UNAVAILABLE, PEER_UNAVAILABLE (a hub
+// lost its link to the device's hub) or a gateway's 502/504, on the ask or
+// the upload, it waits (retryDelays), asks again and resumes from the new
+// offset.
+func (c *Client) UploadBlob(ctx context.Context, device, hex, path string, size int64) (uploaded bool, err error) {
+	for attempt := 0; ; attempt++ {
+		have, off, err := c.HasBlob(ctx, device, hex)
+		if err == nil {
+			if have {
+				return uploaded, nil
+			}
+			if off > size {
+				off = 0
+			}
+			if err = c.putBlob(ctx, device, hex, path, off, size); err == nil {
+				return true, nil
+			}
+			uploaded = true
+		}
+		if !c.retry || attempt >= len(retryDelays) || ctx.Err() != nil || !uploadRetryable(err) {
+			return uploaded, err
+		}
+		if RetryLog != nil {
+			RetryLog("retry %d/%d of blob %s upload after: %v", attempt+1, len(retryDelays), hex, err)
+		}
+		if serr := c.sleep(ctx, retryDelays[attempt]); serr != nil {
+			return uploaded, WrapErr(CodeInterrupted, serr)
+		}
+	}
+}
+
+func (c *Client) putBlob(ctx context.Context, device, hex, path string, off, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return WrapErr(CodeUsage, err)
+	}
+	defer f.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+devPath(device, "/blobs/"+hex), io.NewSectionReader(f, off, size-off))
+	if err != nil {
+		return WrapErr(CodeUsage, err)
+	}
+	req.ContentLength = size - off
+	req.Header.Set("X-Maestro-Api-Version", APIVersion)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if size > 0 {
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, size-1, size))
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, e := c.do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return blobError(resp.StatusCode, resp.Header, data)
+	}
+	var out BlobResult
+	if err := json.Unmarshal(data, &out); err == nil && !out.Complete {
+		return Errorf(CodeDaemonUnavailable, "blob %s: upload stopped at byte %d of %d", hex, out.Offset, size)
+	}
+	return nil
+}
+
+// InstallApp installs an app (a blob ref, or a host path for a local
+// daemon) and returns the daemon's answer, with the app id when known.
+func (c *Client) InstallApp(ctx context.Context, device string, req InstallRequest) (*InstallResult, error) {
+	var out InstallResult
+	if e := c.call(ctx, http.MethodPost, devPath(device, "/apps"), req, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// UninstallApp removes an app by bundle id or package name.
+func (c *Client) UninstallApp(ctx context.Context, device, appID string) error {
+	var out InstallResult
+	if e := c.call(ctx, http.MethodDelete, devPath(device, "/apps/"+url.PathEscape(appID)), nil, &out); e != nil {
+		return e
+	}
+	return nil
+}
+
+// Artifacts lists the files of the device session's report directory.
+func (c *Client) Artifacts(ctx context.Context, device string) (*ArtifactsResult, error) {
+	var out ArtifactsResult
+	if e := c.call(ctx, http.MethodGet, devPath(device, "/artifacts"), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// Artifact streams one artifact (path relative to the report directory)
+// into w.
+func (c *Client) Artifact(ctx context.Context, device, path string, w io.Writer) error {
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, devPath(device, "/artifacts/"+strings.Join(segs, "/")), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "*/*")
+	resp, e := c.do(req)
+	if e != nil {
+		return e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return errorFromResponse(resp.StatusCode, resp.Header, data)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
 		return WrapErr(CodeDaemonUnavailable, err)
 	}
 	return nil

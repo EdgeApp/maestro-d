@@ -86,6 +86,9 @@ func connectTarget(o *daemonOpts) (*daemon.Client, error) {
 		progress("note: --ca is ignored for a plain http:// target")
 	}
 	c := daemon.NewHTTPClient(base, o.Token, tlsConfig)
+	// The target is another machine: this client names its output files
+	// itself and fetches them back (remote_files.go).
+	c.ClientOutputs = true
 	if o.Verbose {
 		progress("Targeting %s", base)
 		daemon.RetryLog = func(format string, args ...any) { progress(format, args...) }

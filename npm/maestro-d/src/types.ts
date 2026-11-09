@@ -154,6 +154,12 @@ export interface StepResult extends Envelope {
   artifacts: CommandArtifacts
   subSteps?: SubStep[]
   reportDir?: string
+  /**
+   * Files a hub call's output fields wrote, as `outputs/<path>` under the
+   * report directory (`device.artifact(path)`). Absent for local calls; on
+   * a hub the library fetches them back to the paths you gave.
+   */
+  outputs?: string[]
 }
 
 export interface StepsResult extends Envelope {
@@ -162,6 +168,16 @@ export interface StepsResult extends Envelope {
   passed: number
   failed: number
   skipped: number
+  /** Every result's `outputs`. */
+  outputs?: string[]
+}
+
+/** One file of a session's report directory. */
+export interface ArtifactInfo {
+  /** Relative to the report directory, with / separators. */
+  path: string
+  size: number
+  modTime: string
 }
 
 // ---------------------------------------------------------------------------

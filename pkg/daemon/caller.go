@@ -24,7 +24,16 @@ type Caller struct {
 	Remote bool
 	// Addr is the TCP peer address ("" on the unix socket).
 	Addr string
+	// ClientOutputs is set when the client names its own output files
+	// (HeaderClientOutputs): they are written under the session's
+	// outputs/ and listed in the result, for a local caller too.
+	ClientOutputs bool
 }
+
+// HeaderClientOutputs is sent by a client that targets a daemon on another
+// machine (--target-hub, the JavaScript library on a hub): it names its
+// output files itself and fetches them back from outputs/.
+const HeaderClientOutputs = "X-Maestro-Client-Outputs"
 
 type callerKey struct{}
 
@@ -79,9 +88,13 @@ func (s *Server) importsEnv() bool {
 // callerPolicy is the executor policy for a step-running call on a.
 func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.CallerPolicy {
 	c := CallerFrom(ctx)
-	p := &executor.CallerPolicy{Remote: c.Remote}
+	// Every caller's blob refs are mapped; only a remote one is confined.
+	p := &executor.CallerPolicy{Remote: c.Remote, ClientOutputs: c.ClientOutputs,
+		Blobs: sessionBlobs{store: s.blobs, dir: filepath.Join(a.reportDir, "blobs")}}
 	if c.Remote {
 		p.AllowShell = s.cfg.AllowRemoteShell
+	}
+	if c.Remote || c.ClientOutputs {
 		p.OutputsDir = filepath.Join(a.reportDir, "outputs")
 	}
 	return p
@@ -94,7 +107,8 @@ func forbidden(format string, args ...any) *Error {
 
 // checkRemoteAttach refuses the attach settings that would give a remote
 // caller the hub's host: a web session, a report or flow directory, a
-// browser profile, or an app or capabilities file that is not a blob ref.
+// browser profile, an app file that is not a blob ref, or Appium (its
+// driver, server URL or capabilities file).
 func checkRemoteAttach(cfg *AttachConfig) *Error {
 	if strings.EqualFold(cfg.Platform, "web") || isWebDriver(cfg.Driver) {
 		return forbidden("a remote caller cannot attach a web session: hubs share simulators, emulators and phones, not the host's browser").
@@ -118,11 +132,28 @@ func checkRemoteAttach(cfg *AttachConfig) *Error {
 		return forbidden("a remote caller cannot set extra.userDataDir (a browser profile on the daemon's host)").
 			WithDetails("field", "extra.userDataDir")
 	}
-	if v, ok := cfg.Extra["capsFile"].(string); ok && v != "" && !strings.HasPrefix(v, "blob:") {
-		return forbidden("extra.capsFile %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", v).
+	// Appium capabilities name host files and programs (appium:app,
+	// appium:chromedriverExecutable, …) and appiumUrl points the hub at
+	// any address it can reach, so a remote caller gets no Appium at all.
+	if isAppiumDriver(cfg.Driver) {
+		return forbidden("a remote caller cannot attach with the Appium driver (its capabilities reach the daemon's host)").
+			WithDetails("field", "driver")
+	}
+	if cfg.AppiumURL != "" {
+		return forbidden("a remote caller cannot set appiumUrl (an Appium server the daemon would connect to)").
+			WithDetails("field", "appiumUrl")
+	}
+	if v, ok := cfg.Extra["capsFile"]; ok && v != "" && v != nil {
+		return forbidden("a remote caller cannot set extra.capsFile (Appium capabilities reach the daemon's host)").
 			WithDetails("field", "extra.capsFile")
 	}
 	return nil
+}
+
+// isAppiumDriver matches the driver names upstream's CreateDriver routes to
+// Appium: it lower-cases the name, so any case of "appium" counts.
+func isAppiumDriver(driver string) bool {
+	return strings.EqualFold(strings.TrimSpace(driver), "appium")
 }
 
 func isWebDriver(driver string) bool {

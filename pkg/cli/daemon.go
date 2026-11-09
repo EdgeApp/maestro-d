@@ -174,7 +174,11 @@ func ensureAttached(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 		progress("Attaching %s …", id)
 	}
 	start := time.Now()
-	info, err = c.Attach(ctx, id, o.Attach)
+	cfg := o.Attach
+	if err := uploadAttachFiles(ctx, c, o, id, &cfg); err != nil {
+		return nil, err
+	}
+	info, err = c.Attach(ctx, id, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -390,6 +394,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
+		installCommand, uninstallCommand, packCommand,
 	}, oneShotCommands()...)
 }
 
@@ -1020,7 +1025,7 @@ func isStepList(data []byte) bool {
 }
 
 var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags, []dflag{
-	strFlag("out", "Write the screenshot to this file (default screenshot-<time>.png; '-' for stdout)", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
+	strFlag("out", "Write the screenshot to this file (default screenshot-<time>.png; '-' for stdout); for artifacts, download them into this directory", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
 	boolFlag("raw", "Hierarchy as the driver's raw XML/JSON instead of the normalized tree", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	boolFlag("compact", "Hierarchy as a flat, greppable listing (as `hierarchy --compact`)", nil, func(o *daemonOpts, v bool) { o.compact = v }),
 	strFlag("find", "Hierarchy elements matching a substring (as `hierarchy --find`)", nil, func(o *daemonOpts, v string) { o.find = v }),
@@ -1028,20 +1033,21 @@ var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), att
 
 var daemonGetCommand = &cli.Command{
 	Name:      "get",
-	Usage:     "Read device state: screenshot, hierarchy, state, info, vars",
-	ArgsUsage: "screenshot | hierarchy | state | info | vars",
+	Usage:     "Read device state: screenshot, hierarchy, state, info, vars, artifacts",
+	ArgsUsage: "screenshot | hierarchy | state | info | vars | artifacts",
 	Description: flagsDoc(`  maestro-d get screenshot -o now.png
   maestro-d get hierarchy | jq '.. | .text? // empty'
   maestro-d get hierarchy --find "Sign in"
   maestro-d get state      # foreground app, orientation, …
   maestro-d get info       # platform, OS version, device name, app version
-  maestro-d get vars       # session variables (from -e and copyTextFrom/outputs)`, getFlags),
+  maestro-d get vars       # session variables (from -e and copyTextFrom/outputs)
+  maestro-d get artifacts  # the session's report files; --out DIR downloads them`, getFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(getFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-		what := args[0]
-		if len(args) != 1 || !map[string]bool{"screenshot": true, "hierarchy": true, "state": true, "info": true, "vars": true}[what] {
-			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d get screenshot|hierarchy|state|info|vars")
+		if len(args) != 1 || !map[string]bool{"screenshot": true, "hierarchy": true, "state": true, "info": true, "vars": true, "artifacts": true}[args[0]] {
+			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d get screenshot|hierarchy|state|info|vars|artifacts")
 		}
+		what := args[0]
 		client, id, err := session(ctx, o)
 		if err != nil {
 			return err
@@ -1107,6 +1113,8 @@ var daemonGetCommand = &cli.Command{
 				return err
 			}
 			printJSON(os.Stdout, v)
+		case "artifacts":
+			return getArtifacts(ctx, client, o, id)
 		case "vars":
 			vars, err := client.Vars(ctx, id)
 			if err != nil {
@@ -1246,4 +1254,40 @@ var daemonCommandsCommand = &cli.Command{
 		}
 		return nil
 	}),
+}
+
+// getArtifacts lists the session's report files, or downloads them all
+// into --out DIR, keeping their relative paths.
+func getArtifacts(ctx context.Context, client *daemon.Client, o *daemonOpts, id string) error {
+	res, err := client.Artifacts(ctx, id)
+	if err != nil {
+		return err
+	}
+	if o.outPath == "" {
+		if o.JSON {
+			printJSON(os.Stdout, res)
+			return nil
+		}
+		for _, a := range res.Artifacts {
+			fmt.Printf("%10d  %s\n", a.Size, a.Path)
+		}
+		return nil
+	}
+	dir, _ := filepath.Abs(o.outPath)
+	for _, a := range res.Artifacts {
+		if target := filepath.Join(dir, filepath.FromSlash(a.Path)); filepath.IsAbs(filepath.FromSlash(a.Path)) || !strings.HasPrefix(target, dir+string(filepath.Separator)) {
+			return daemon.Errorf(daemon.CodeInternal, "artifact path %q leaves %s", a.Path, dir)
+		}
+		if err := fetchArtifact(ctx, client, id, a.Path, filepath.Join(dir, filepath.FromSlash(a.Path))); err != nil {
+			return err
+		}
+	}
+	if o.JSON {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "dir": dir, "artifacts": res.Artifacts})
+		return nil
+	}
+	for _, a := range res.Artifacts {
+		fmt.Println(filepath.Join(dir, filepath.FromSlash(a.Path)))
+	}
+	return nil
 }

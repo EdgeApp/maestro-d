@@ -66,6 +66,59 @@ func nestedField(key, doc string) Field {
 	return Field{Key: key, GoType: "[]Step", TSType: "Step[]", Doc: doc}
 }
 
+// fileMark marks a field that names a file on the caller's machine.
+type fileMark struct {
+	// Path: an input file the client uploads to a hub and names by a
+	// blob: ref. Suffix, when set, limits that to values ending in it
+	// (runScript's script and file are paths only when they end in .js).
+	Path   bool
+	Suffix string
+	// Output: a file the command writes on the device's host, which the
+	// client names itself and fetches back from a hub.
+	Output bool
+}
+
+// fileFields are the fields that name files, by command and yaml key. The
+// executor's caller policy walks the same set (executor.PolicyFields); a
+// test in pkg/daemon keeps the two in step.
+var fileFields = map[string]map[string]fileMark{
+	"addMedia":         {"files": {Path: true}},
+	"runScript":        {"script": {Path: true, Suffix: ".js"}, "file": {Path: true, Suffix: ".js"}},
+	"assertScreenshot": {"path": {Path: true}},
+	"runBrowserScript": {"file": {Path: true}},
+	"runWebViewScript": {"file": {Path: true}},
+	"uploadFile":       {"path": {Path: true}, "paths": {Path: true}},
+	"loadAuthState":    {"path": {Path: true}},
+	"takeScreenshot":   {"path": {Output: true}},
+	"saveAuthState":    {"path": {Output: true}},
+}
+
+// bareFieldOverrides name the field a bare value fills for commands with
+// no Scalar: addMedia's bare scalar or sequence is its files.
+var bareFieldOverrides = map[string]string{"addMedia": "files"}
+
+// markFiles applies fileFields and the bare field to a command; a marked
+// field the command does not have is an error, so an upstream rename is
+// caught here.
+func markFiles(c *Command) error {
+	c.BareField = c.Scalar
+	if v, ok := bareFieldOverrides[c.Name]; ok {
+		c.BareField = v
+	}
+	marks := fileFields[c.Name]
+	found := 0
+	for i := range c.Fields {
+		if m, ok := marks[c.Fields[i].Key]; ok {
+			c.Fields[i].Path, c.Fields[i].Output, c.Fields[i].PathSuffix = m.Path, m.Output, m.Suffix
+			found++
+		}
+	}
+	if found != len(marks) {
+		return fmt.Errorf("%s: fileFields names %d fields, the command has %d of them", c.Name, len(marks), found)
+	}
+	return nil
+}
+
 // compoundHelpers maps parse helpers used by compound steps to their struct.
 var compoundHelpers = map[string]string{
 	"parseRepeatStep":  "RepeatStep",
@@ -82,6 +135,10 @@ type Field struct {
 	Doc    string
 	// Inline is the embedded struct this field came from ("" for own).
 	Inline string
+	// Path, Output and PathSuffix come from fileFields.
+	Path       bool
+	Output     bool
+	PathSuffix string
 }
 
 // Command is one YAML command.
@@ -93,6 +150,9 @@ type Command struct {
 	ScalarGo  string // Go type of that field
 	ValueLess bool   // command ignores its value (`- back`)
 	Compound  bool   // repeat / retry / runFlow (nested steps)
+	// BareField is the field a bare value fills: Scalar, or files for
+	// addMedia.
+	BareField string
 	Fields    []Field
 }
 
@@ -216,6 +276,7 @@ func main() {
 				if ov := commandOverrides[name]; ov != nil {
 					ov(&cmd)
 				}
+				must(markFiles(&cmd))
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -577,13 +638,27 @@ func renderGoSource(cmds []Command) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// %s\n\npackage daemon\n\n", header)
 	b.WriteString("// CommandSpec describes one YAML command's shape for the CLI and docs.\n")
-	b.WriteString("type CommandSpec struct {\n\tName string\n\t// Scalar is the yaml key a bare scalar value maps to (\"\" = none).\n\tScalar string\n\t// ValueLess commands ignore their value (`- back`).\n\tValueLess bool\n\t// Compound commands carry nested steps (repeat, retry, runFlow).\n\tCompound bool\n\t// FreeForm commands take arbitrary keys rather than the fields below\n\t// (defineVariables: NAME -> value), so their keys are not validated.\n\tFreeForm bool\n\t// Doc is the one-line description from the Go struct comment.\n\tDoc string\n\t// Fields are the yaml keys of the map form.\n\tFields []FieldSpec\n}\n\n")
-	b.WriteString("// FieldSpec is one yaml key of a command's map form.\ntype FieldSpec struct {\n\tKey  string\n\tType string // Go type\n\tDoc  string\n}\n\n")
+	b.WriteString("type CommandSpec struct {\n\tName string\n\t// Scalar is the yaml key a bare scalar value maps to (\"\" = none).\n\tScalar string\n\t// BareField is the field a bare value fills: Scalar when set, and\n\t// files for addMedia (\"\" = none). Clients apply that field's Path or\n\t// Output mark to a bare value, element by element for a sequence.\n\tBareField string\n\t// ValueLess commands ignore their value (`- back`).\n\tValueLess bool\n\t// Compound commands carry nested steps (repeat, retry, runFlow).\n\tCompound bool\n\t// FreeForm commands take arbitrary keys rather than the fields below\n\t// (defineVariables: NAME -> value), so their keys are not validated.\n\tFreeForm bool\n\t// Doc is the one-line description from the Go struct comment.\n\tDoc string\n\t// Fields are the yaml keys of the map form.\n\tFields []FieldSpec\n}\n\n")
+	b.WriteString("// FieldSpec is one yaml key of a command's map form.\ntype FieldSpec struct {\n\tKey  string\n\tType string // Go type\n\tDoc  string\n\t// Path marks an input file on the caller's machine: a client that\n\t// targets a hub uploads it and sends a blob: ref instead. PathSuffix,\n\t// when set, limits that to values ending in it.\n\tPath       bool\n\tPathSuffix string\n\t// Output marks a file the command writes on the device's host: a\n\t// client that targets a hub sends a name of its own and fetches the\n\t// file back.\n\tOutput bool\n}\n\n")
 	b.WriteString("// CommandSpecs indexes every command by name.\nvar CommandSpecs = map[string]CommandSpec{\n")
 	for _, c := range cmds {
-		fmt.Fprintf(&b, "\t%q: {Name: %q, Scalar: %q, ValueLess: %v, Compound: %v, FreeForm: %v, Doc: %q, Fields: []FieldSpec{\n", c.Name, c.Name, c.Scalar, c.ValueLess, c.Compound, freeForm(c), c.Doc)
+		bare := ""
+		if c.BareField != "" {
+			bare = fmt.Sprintf(" BareField: %q,", c.BareField)
+		}
+		fmt.Fprintf(&b, "\t%q: {Name: %q, Scalar: %q,%s ValueLess: %v, Compound: %v, FreeForm: %v, Doc: %q, Fields: []FieldSpec{\n", c.Name, c.Name, c.Scalar, bare, c.ValueLess, c.Compound, freeForm(c), c.Doc)
 		for _, f := range c.Fields {
-			fmt.Fprintf(&b, "\t\t{Key: %q, Type: %q, Doc: %q},\n", f.Key, f.GoType, f.Doc)
+			marks := ""
+			if f.Path {
+				marks += ", Path: true"
+			}
+			if f.PathSuffix != "" {
+				marks += fmt.Sprintf(", PathSuffix: %q", f.PathSuffix)
+			}
+			if f.Output {
+				marks += ", Output: true"
+			}
+			fmt.Fprintf(&b, "\t\t{Key: %q, Type: %q, Doc: %q%s},\n", f.Key, f.GoType, f.Doc, marks)
 		}
 		b.WriteString("\t}},\n")
 	}
@@ -615,15 +690,42 @@ func renderTS(cmds []Command) []byte {
 		b.WriteString("}\n\n")
 	}
 	b.WriteString("/** Shape of every command: scalar shorthand key, value-less, compound. */\n")
-	b.WriteString("export interface CommandSpec {\n  name: string\n  scalar: string | null\n  valueLess: boolean\n  compound: boolean\n  doc: string\n}\n\n")
+	b.WriteString("/** How a field names a file: an input the client uploads to a hub, or an output it fetches back. */\n")
+	b.WriteString("export interface FileMark {\n  kind: 'path' | 'output'\n  /** The field is a path only when its value ends in this. */\n  suffix?: string\n}\n\n")
+	b.WriteString("export interface CommandSpec {\n  name: string\n  scalar: string | null\n  /** The field a bare value fills: scalar, or files for addMedia. */\n  bareField: string | null\n  valueLess: boolean\n  compound: boolean\n  doc: string\n  /** The fields that name files, by key. */\n  files?: Record<string, FileMark>\n}\n\n")
 	b.WriteString("export const COMMANDS = {\n")
 	for _, c := range cmds {
 		scalar := "null"
 		if c.Scalar != "" {
 			scalar = fmt.Sprintf("'%s'", c.Scalar)
 		}
-		fmt.Fprintf(&b, "  %s: { name: '%s', scalar: %s, valueLess: %v, compound: %v, doc: %s },\n",
-			tsKey(c.Name), c.Name, scalar, c.ValueLess, c.Compound, tsString(c.Doc))
+		bare := "null"
+		if c.BareField != "" {
+			bare = fmt.Sprintf("'%s'", c.BareField)
+		}
+		files := ""
+		for _, f := range c.Fields {
+			if !f.Path && !f.Output {
+				continue
+			}
+			kind := "path"
+			if f.Output {
+				kind = "output"
+			}
+			suffix := ""
+			if f.PathSuffix != "" {
+				suffix = fmt.Sprintf(", suffix: '%s'", f.PathSuffix)
+			}
+			if files != "" {
+				files += ", "
+			}
+			files += fmt.Sprintf("%s: { kind: '%s'%s }", tsKey(f.Key), kind, suffix)
+		}
+		if files != "" {
+			files = ", files: { " + files + " }"
+		}
+		fmt.Fprintf(&b, "  %s: { name: '%s', scalar: %s, bareField: %s, valueLess: %v, compound: %v, doc: %s%s },\n",
+			tsKey(c.Name), c.Name, scalar, bare, c.ValueLess, c.Compound, tsString(c.Doc), files)
 	}
 	b.WriteString("} as const satisfies Record<string, CommandSpec>\n\n")
 	b.WriteString("export type CommandName = keyof typeof COMMANDS\n\n")
@@ -693,7 +795,16 @@ func renderMD(cmds []Command) []byte {
 		if len(c.Fields) > 0 {
 			b.WriteString("| Key | Type | Description |\n| --- | --- | --- |\n")
 			for _, f := range c.Fields {
-				fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", f.Key, f.TSType, strings.ReplaceAll(f.Doc, "|", "\\|"))
+				doc := strings.ReplaceAll(f.Doc, "|", "\\|")
+				switch {
+				case f.Path && f.PathSuffix != "":
+					doc = strings.TrimSpace(doc + fmt.Sprintf(" A file when the value ends in `%s`: uploaded to a hub.", f.PathSuffix))
+				case f.Path:
+					doc = strings.TrimSpace(doc + " A file on the caller's machine: uploaded to a hub.")
+				case f.Output:
+					doc = strings.TrimSpace(doc + " Written on the device's host: fetched back from a hub.")
+				}
+				fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", f.Key, f.TSType, doc)
 			}
 			b.WriteString("\n")
 		}

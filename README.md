@@ -116,6 +116,13 @@ can share one device session.
   loopback drive devices but not the host: `runShell` and host paths are
   refused with `FORBIDDEN`, and the daemon's environment stays on the host.
   Request ids make a retried command over a lossy link run once.
+- **Files across machines.** Against another machine, a command's input
+  files (`addMedia photo.png`, `runScript x.js`, `assertScreenshot ref.png`,
+  `attach --app-file`) are uploaded — once, resumably, by content hash — and
+  its outputs (`takeScreenshot --path shot.png`) come back to the path you
+  gave. `install FILE` and `uninstall APP_ID` manage apps without attaching,
+  `get artifacts` fetches the session's report files, and `pack` shows the
+  upload units.
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
   `DAEMON_UNAVAILABLE` 3/503, `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409,

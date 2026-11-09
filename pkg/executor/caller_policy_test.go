@@ -254,6 +254,68 @@ func TestPolicy_PathsUnderARootPass(t *testing.T) {
 	wantForbidden(t, s.Execute(ctx, mustStep(t, `{"runScript": "../outside.js"}`)), "")
 }
 
+// A root's own symlinks cannot lead a path out of it: within checks the
+// path as the file system resolves it, not just as written.
+func TestPolicy_SymlinkOutOfARootDenied(t *testing.T) {
+	outside := secretScript(t)
+	bundle := t.TempDir()
+	for link, target := range map[string]string{
+		"a/l":    "..",                  // the bundle itself, lexically inside
+		"direct": filepath.Dir(outside), // straight out
+		"inside": "a",                   // stays in
+	} {
+		full := filepath.Join(bundle, filepath.FromSlash(link))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, full); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "a", "x.js"), []byte("output.fromBundle = 'yes'"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(bundle, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromParent, err := filepath.Rel(filepath.Dir(bundle), outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewSession(context.Background(), mock.New(mock.Config{}), RunnerConfig{OutputDir: t.TempDir()}, SessionConfig{FlowDir: bundle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := remoteCtx(CallerPolicy{Remote: true, BundleDir: bundle})
+	for _, path := range []string{
+		"direct/" + filepath.Base(outside),
+		"a/l/a/l/" + filepath.ToSlash(rel),       // "a/l/.." would be the bundle's parent
+		"a/l/../" + filepath.ToSlash(fromParent), // lexically a/…, really <bundle>/../…
+	} {
+		wantForbidden(t, s.Execute(ctx, mustStep(t, `{"runScript": "`+path+`"}`)), "")
+		if s.Vars()["leaked"] != "" {
+			t.Fatalf("%s: the host script ran", path)
+		}
+	}
+	if out := s.Execute(ctx, mustStep(t, `{"runScript": "inside/x.js"}`)); !out.Success || s.Vars()["fromBundle"] != "yes" {
+		t.Fatalf("a link that stays inside: %+v", out.Error)
+	}
+	if _, err := RealPath(filepath.Join(bundle, "loop")); err != nil {
+		t.Fatalf("a missing tail is taken as written: %v", err)
+	}
+	if err := os.Symlink("loop", filepath.Join(bundle, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RealPath(filepath.Join(bundle, "loop")); err == nil {
+		t.Fatal("a symlink loop is an error")
+	}
+	if got, err := RealPath("."); err != nil || !filepath.IsAbs(got) {
+		t.Fatalf("relative: %q %v", got, err)
+	}
+}
+
 type fakeBlobs struct {
 	dir string
 	err error

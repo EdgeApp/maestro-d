@@ -32,4 +32,11 @@ type Deps struct {
 	InstallSystemImage func(image string) error
 	DeleteSimulator    func(udid string) error
 	DeleteAVD          func(name string) error
+
+	// Apps: install a file (.apk, .app, .ipa) on a device, uninstall by id,
+	// and read a file's app id (CFBundleIdentifier or package name).
+	// platform may be "" when neither the file nor the registry tells.
+	InstallApp   func(ctx context.Context, deviceID, platform, path string) error
+	UninstallApp func(ctx context.Context, deviceID, platform, appID string) error
+	AppID        func(path string) (string, error)
 }

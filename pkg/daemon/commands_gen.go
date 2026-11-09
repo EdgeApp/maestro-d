@@ -7,6 +7,10 @@ type CommandSpec struct {
 	Name string
 	// Scalar is the yaml key a bare scalar value maps to ("" = none).
 	Scalar string
+	// BareField is the field a bare value fills: Scalar when set, and
+	// files for addMedia ("" = none). Clients apply that field's Path or
+	// Output mark to a bare value, element by element for a sequence.
+	BareField string
 	// ValueLess commands ignore their value (`- back`).
 	ValueLess bool
 	// Compound commands carry nested steps (repeat, retry, runFlow).
@@ -25,6 +29,15 @@ type FieldSpec struct {
 	Key  string
 	Type string // Go type
 	Doc  string
+	// Path marks an input file on the caller's machine: a client that
+	// targets a hub uploads it and sends a blob: ref instead. PathSuffix,
+	// when set, limits that to values ending in it.
+	Path       bool
+	PathSuffix string
+	// Output marks a file the command writes on the device's host: a
+	// client that targets a hub sends a name of its own and fetches the
+	// file back.
+	Output bool
 }
 
 // CommandSpecs indexes every command by name.
@@ -35,12 +48,12 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"addMedia": {Name: "addMedia", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Adds media files.", Fields: []FieldSpec{
+	"addMedia": {Name: "addMedia", Scalar: "", BareField: "files", ValueLess: false, Compound: false, FreeForm: false, Doc: "Adds media files.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "files", Type: "[]string", Doc: ""},
+		{Key: "files", Type: "[]string", Doc: "", Path: true},
 	}},
 	"assertCondition": {Name: "assertCondition", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts a condition. Uses a custom UnmarshalYAML because both BaseStep and Condition have a \"timeout\" yaml tag — Condition.Timeout is the semantically correct one here (controls how long to wait for visible/notVisible condition checks).", Fields: []FieldSpec{
 		{Key: "visible", Type: "*Selector", Doc: ""},
@@ -73,7 +86,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"assertNotVisible": {Name: "assertNotVisible", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts element is not visible.", Fields: []FieldSpec{
+	"assertNotVisible": {Name: "assertNotVisible", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts element is not visible.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -117,23 +130,23 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "delay", Type: "int", Doc: "Delay between repeats (ms)"},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 	}},
-	"assertScreenshot": {Name: "assertScreenshot", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Compares a screenshot with a reference image.", Fields: []FieldSpec{
+	"assertScreenshot": {Name: "assertScreenshot", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Compares a screenshot with a reference image.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "path", Type: "string", Doc: ""},
+		{Key: "path", Type: "string", Doc: "", Path: true},
 		{Key: "cropOn", Type: "*Selector", Doc: ""},
 		{Key: "thresholdPercentage", Type: "any", Doc: ""},
 	}},
-	"assertTrue": {Name: "assertTrue", Scalar: "condition", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts a script condition is true (alias for assertCondition).", Fields: []FieldSpec{
+	"assertTrue": {Name: "assertTrue", Scalar: "condition", BareField: "condition", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts a script condition is true (alias for assertCondition).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "condition", Type: "string", Doc: ""},
 	}},
-	"assertVisible": {Name: "assertVisible", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts element is visible.", Fields: []FieldSpec{
+	"assertVisible": {Name: "assertVisible", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Asserts element is visible.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -178,7 +191,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 		{Key: "count", Type: "string", Doc: "Count asserts that the selector matches exactly N visible elements (Maestro #1363). A string so flows can write `count: ${N}`; empty means the ordinary at-least-one assertion."},
 	}},
-	"assertWithAI": {Name: "assertWithAI", Scalar: "assertion", ValueLess: false, Compound: false, FreeForm: false, Doc: "Uses AI to verify an assertion.", Fields: []FieldSpec{
+	"assertWithAI": {Name: "assertWithAI", Scalar: "assertion", BareField: "assertion", ValueLess: false, Compound: false, FreeForm: false, Doc: "Uses AI to verify an assertion.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -216,7 +229,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"clearState": {Name: "clearState", Scalar: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Clears app state.", Fields: []FieldSpec{
+	"clearState": {Name: "clearState", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Clears app state.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -229,7 +242,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"copyTextFrom": {Name: "copyTextFrom", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Copies text from element.", Fields: []FieldSpec{
+	"copyTextFrom": {Name: "copyTextFrom", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Copies text from element.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -280,7 +293,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"doubleTapOn": {Name: "doubleTapOn", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Double taps on an element (alias for tapOn with repeat=2).", Fields: []FieldSpec{
+	"doubleTapOn": {Name: "doubleTapOn", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Double taps on an element (alias for tapOn with repeat=2).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -334,14 +347,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "holdDuration", Type: "int", Doc: "HoldDuration is how long to press before moving (ms). Reorder UIs lift the item only after a long press, so the default is a full second."},
 		{Key: "duration", Type: "int", Doc: "Duration is how long the movement itself takes (ms). Drag targets track the finger, so moving too fast skips drop zones; default one second."},
 	}},
-	"eraseText": {Name: "eraseText", Scalar: "characters", ValueLess: false, Compound: false, FreeForm: false, Doc: "Erases text.", Fields: []FieldSpec{
+	"eraseText": {Name: "eraseText", Scalar: "characters", BareField: "characters", ValueLess: false, Compound: false, FreeForm: false, Doc: "Erases text.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "characters", Type: "int", Doc: ""},
 	}},
-	"evalBrowserScript": {Name: "evalBrowserScript", Scalar: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Executes JavaScript in the browser page context (web only). Unlike EvalScriptStep which runs in Maestro's internal JS engine, this runs directly in the browser via CDP, with access to window, document, DOM, etc.", Fields: []FieldSpec{
+	"evalBrowserScript": {Name: "evalBrowserScript", Scalar: "script", BareField: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Executes JavaScript in the browser page context (web only). Unlike EvalScriptStep which runs in Maestro's internal JS engine, this runs directly in the browser via CDP, with access to window, document, DOM, etc.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -349,14 +362,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "script", Type: "string", Doc: "JS code to execute in the browser"},
 		{Key: "output", Type: "string", Doc: "Variable name to store the return value"},
 	}},
-	"evalScript": {Name: "evalScript", Scalar: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Evaluates JavaScript.", Fields: []FieldSpec{
+	"evalScript": {Name: "evalScript", Scalar: "script", BareField: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Evaluates JavaScript.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "script", Type: "string", Doc: ""},
 	}},
-	"evalWebViewScript": {Name: "evalWebViewScript", Scalar: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Executes JavaScript in a mobile WebView via CDP. Unlike EvalBrowserScriptStep (desktop browser), this runs in the WebView context of a native Android app.", Fields: []FieldSpec{
+	"evalWebViewScript": {Name: "evalWebViewScript", Scalar: "script", BareField: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Executes JavaScript in a mobile WebView via CDP. Unlike EvalBrowserScriptStep (desktop browser), this runs in the WebView context of a native Android app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -380,14 +393,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "query", Type: "string", Doc: ""},
 		{Key: "variable", Type: "string", Doc: "Variable to store result"},
 	}},
-	"getConsoleLogs": {Name: "getConsoleLogs", Scalar: "output", ValueLess: false, Compound: false, FreeForm: false, Doc: "Retrieves captured browser console logs as JSON.", Fields: []FieldSpec{
+	"getConsoleLogs": {Name: "getConsoleLogs", Scalar: "output", BareField: "output", ValueLess: false, Compound: false, FreeForm: false, Doc: "Retrieves captured browser console logs as JSON.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "output", Type: "string", Doc: "Variable name to store JSON result"},
 	}},
-	"getCookies": {Name: "getCookies", Scalar: "output", ValueLess: false, Compound: false, FreeForm: false, Doc: "Retrieves browser cookies and stores them as JSON.", Fields: []FieldSpec{
+	"getCookies": {Name: "getCookies", Scalar: "output", BareField: "output", ValueLess: false, Compound: false, FreeForm: false, Doc: "Retrieves browser cookies and stores them as JSON.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -408,7 +421,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"inputRandom": {Name: "inputRandom", Scalar: "type", ValueLess: false, Compound: false, FreeForm: false, Doc: "Generates random input.", Fields: []FieldSpec{
+	"inputRandom": {Name: "inputRandom", Scalar: "type", BareField: "type", ValueLess: false, Compound: false, FreeForm: false, Doc: "Generates random input.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -448,7 +461,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "type", Type: "string", Doc: "TEXT, NUMBER, EMAIL, PERSON_NAME, etc."},
 		{Key: "length", Type: "int", Doc: ""},
 	}},
-	"inputText": {Name: "inputText", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Inputs text.", Fields: []FieldSpec{
+	"inputText": {Name: "inputText", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Inputs text.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -493,14 +506,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "delay", Type: "int", Doc: "Delay between repeats (ms)"},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 	}},
-	"killApp": {Name: "killApp", Scalar: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Kills an app.", Fields: []FieldSpec{
+	"killApp": {Name: "killApp", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Kills an app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "appId", Type: "string", Doc: ""},
 	}},
-	"launchApp": {Name: "launchApp", Scalar: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Launches an app.", Fields: []FieldSpec{
+	"launchApp": {Name: "launchApp", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Launches an app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -514,14 +527,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "arguments", Type: "map[string]any", Doc: "Launch arguments (-key value pairs)"},
 		{Key: "environment", Type: "map[string]string", Doc: "Launch environment variables"},
 	}},
-	"loadAuthState": {Name: "loadAuthState", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads cookies + localStorage + sessionStorage from a JSON file.", Fields: []FieldSpec{
+	"loadAuthState": {Name: "loadAuthState", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads cookies + localStorage + sessionStorage from a JSON file.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "path", Type: "string", Doc: "Input file path"},
+		{Key: "path", Type: "string", Doc: "Input file path", Path: true},
 	}},
-	"longPressOn": {Name: "longPressOn", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Long presses on an element (alias for tapOn with longPress=true).", Fields: []FieldSpec{
+	"longPressOn": {Name: "longPressOn", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Long presses on an element (alias for tapOn with longPress=true).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -575,14 +588,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "method", Type: "string", Doc: "GET, POST, etc. (empty = match all)"},
 		{Key: "response", Type: "MockResponseSpec", Doc: ""},
 	}},
-	"openBrowser": {Name: "openBrowser", Scalar: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a URL in the browser.", Fields: []FieldSpec{
+	"openBrowser": {Name: "openBrowser", Scalar: "url", BareField: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a URL in the browser.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "url", Type: "string", Doc: ""},
 	}},
-	"openLink": {Name: "openLink", Scalar: "link", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a URL.", Fields: []FieldSpec{
+	"openLink": {Name: "openLink", Scalar: "link", BareField: "link", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a URL.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -597,7 +610,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"openTab": {Name: "openTab", Scalar: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a new browser tab.", Fields: []FieldSpec{
+	"openTab": {Name: "openTab", Scalar: "url", BareField: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a new browser tab.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -611,7 +624,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"pressKey": {Name: "pressKey", Scalar: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.", Fields: []FieldSpec{
+	"pressKey": {Name: "pressKey", Scalar: "key", BareField: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -649,16 +662,16 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "env", Type: "map[string]string", Doc: ""},
 		{Key: "commands", Type: "[]Step", Doc: "Steps to retry (alternative to file)"},
 	}},
-	"runBrowserScript": {Name: "runBrowserScript", Scalar: "file", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads and executes a JS file in the browser page context.", Fields: []FieldSpec{
+	"runBrowserScript": {Name: "runBrowserScript", Scalar: "file", BareField: "file", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads and executes a JS file in the browser page context.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "file", Type: "string", Doc: "Path to JS file"},
+		{Key: "file", Type: "string", Doc: "Path to JS file", Path: true},
 		{Key: "env", Type: "map[string]string", Doc: "Environment variables injected as window.__env"},
 		{Key: "output", Type: "string", Doc: "Variable name to store the return value"},
 	}},
-	"runFlow": {Name: "runFlow", Scalar: "file", ValueLess: false, Compound: true, FreeForm: false, Doc: "Runs another flow.", Fields: []FieldSpec{
+	"runFlow": {Name: "runFlow", Scalar: "file", BareField: "file", ValueLess: false, Compound: true, FreeForm: false, Doc: "Runs another flow.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -670,16 +683,16 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "else", Type: "string|[]Step", Doc: "Fallback flow file or inline steps when `when` is false"},
 		{Key: "elseCommands", Type: "[]Step", Doc: "Inline fallback steps when `when` is false"},
 	}},
-	"runScript": {Name: "runScript", Scalar: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Runs a script.", Fields: []FieldSpec{
+	"runScript": {Name: "runScript", Scalar: "script", BareField: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Runs a script.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "script", Type: "string", Doc: "Script content or filename (string form)"},
-		{Key: "file", Type: "string", Doc: "Script filename (map form)"},
+		{Key: "script", Type: "string", Doc: "Script content or filename (string form)", Path: true, PathSuffix: ".js"},
+		{Key: "file", Type: "string", Doc: "Script filename (map form)", Path: true, PathSuffix: ".js"},
 		{Key: "env", Type: "map[string]string", Doc: ""},
 	}},
-	"runShell": {Name: "runShell", Scalar: "command", ValueLess: false, Compound: false, FreeForm: false, Doc: "Runs a command on the machine driving the test — the host, not the device. That is what makes it useful: it is the escape hatch for adb, simctl, xcrun and the rest of the platform tooling a flow occasionally needs and the runner deliberately does not wrap.", Fields: []FieldSpec{
+	"runShell": {Name: "runShell", Scalar: "command", BareField: "command", ValueLess: false, Compound: false, FreeForm: false, Doc: "Runs a command on the machine driving the test — the host, not the device. That is what makes it useful: it is the escape hatch for adb, simctl, xcrun and the rest of the platform tooling a flow occasionally needs and the runner deliberately does not wrap.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -688,23 +701,23 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "output", Type: "string", Doc: "Output names a flow variable to receive the command's trimmed stdout, making it available to later steps as ${NAME}."},
 		{Key: "env", Type: "map[string]string", Doc: "Env adds variables to the command's environment, on top of the runner's own and the MAESTRO_* values describing the device under test. `timeout` comes from BaseStep and bounds the command; it defaults to 30s here, because a hung shell call must not hang the run."},
 	}},
-	"runWebViewScript": {Name: "runWebViewScript", Scalar: "file", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads and executes a JS file in a mobile WebView via CDP.", Fields: []FieldSpec{
+	"runWebViewScript": {Name: "runWebViewScript", Scalar: "file", BareField: "file", ValueLess: false, Compound: false, FreeForm: false, Doc: "Loads and executes a JS file in a mobile WebView via CDP.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "file", Type: "string", Doc: "Path to JS file"},
+		{Key: "file", Type: "string", Doc: "Path to JS file", Path: true},
 		{Key: "env", Type: "map[string]string", Doc: "Environment variables injected as window.__env"},
 		{Key: "output", Type: "string", Doc: "Variable name to store the return value"},
 	}},
-	"saveAuthState": {Name: "saveAuthState", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Saves cookies + localStorage + sessionStorage to a JSON file.", Fields: []FieldSpec{
+	"saveAuthState": {Name: "saveAuthState", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Saves cookies + localStorage + sessionStorage to a JSON file.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "path", Type: "string", Doc: "Output file path"},
+		{Key: "path", Type: "string", Doc: "Output file path", Output: true},
 	}},
-	"scroll": {Name: "scroll", Scalar: "direction", ValueLess: false, Compound: false, FreeForm: false, Doc: "Scrolls the screen.", Fields: []FieldSpec{
+	"scroll": {Name: "scroll", Scalar: "direction", BareField: "direction", ValueLess: false, Compound: false, FreeForm: false, Doc: "Scrolls the screen.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -712,7 +725,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "direction", Type: "string", Doc: ""},
 		{Key: "engine", Type: "string", Doc: "Engine selects the scroll backend on Android. \"\" (default) and \"adb\" → adb input swipe (matches upstream Maestro). \"agent\" → driver's existing on-device gesture path (UIA2 server /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent injection for the devicelab driver). Ignored on iOS/web."},
 	}},
-	"scrollUntilVisible": {Name: "scrollUntilVisible", Scalar: "element.text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Scrolls until element is visible.", Fields: []FieldSpec{
+	"scrollUntilVisible": {Name: "scrollUntilVisible", Scalar: "element.text", BareField: "element.text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Scrolls until element is visible.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -727,14 +740,14 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: ""},
 		{Key: "engine", Type: "string", Doc: "Engine selects the scroll backend. See ScrollStep.Engine."},
 	}},
-	"setAirplaneMode": {Name: "setAirplaneMode", Scalar: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets airplane mode.", Fields: []FieldSpec{
+	"setAirplaneMode": {Name: "setAirplaneMode", Scalar: "enabled", BareField: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets airplane mode.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "enabled", Type: "any", Doc: ""},
 	}},
-	"setClipboard": {Name: "setClipboard", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the clipboard to a specific text value.", Fields: []FieldSpec{
+	"setClipboard": {Name: "setClipboard", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the clipboard to a specific text value.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -748,7 +761,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "cookies", Type: "[]CookieSpec", Doc: ""},
 	}},
-	"setDarkMode": {Name: "setDarkMode", Scalar: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Switches the system UI between dark and light appearance.", Fields: []FieldSpec{
+	"setDarkMode": {Name: "setDarkMode", Scalar: "enabled", BareField: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Switches the system UI between dark and light appearance.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -773,7 +786,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "downloadSpeed", Type: "float64", Doc: "KB/s (-1 = no throttle)"},
 		{Key: "uploadSpeed", Type: "float64", Doc: "KB/s (-1 = no throttle)"},
 	}},
-	"setOrientation": {Name: "setOrientation", Scalar: "orientation", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets device orientation.", Fields: []FieldSpec{
+	"setOrientation": {Name: "setOrientation", Scalar: "orientation", BareField: "orientation", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets device orientation.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -788,28 +801,28 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "appId", Type: "string", Doc: ""},
 		{Key: "permissions", Type: "map[string]string", Doc: ""},
 	}},
-	"startRecording": {Name: "startRecording", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts recording.", Fields: []FieldSpec{
+	"startRecording": {Name: "startRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts recording.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "path", Type: "string", Doc: ""},
 	}},
-	"stopApp": {Name: "stopApp", Scalar: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops an app.", Fields: []FieldSpec{
+	"stopApp": {Name: "stopApp", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops an app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "appId", Type: "string", Doc: ""},
 	}},
-	"stopRecording": {Name: "stopRecording", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops recording.", Fields: []FieldSpec{
+	"stopRecording": {Name: "stopRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops recording.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "path", Type: "string", Doc: ""},
 	}},
-	"swipe": {Name: "swipe", Scalar: "direction", ValueLess: false, Compound: false, FreeForm: false, Doc: "", Fields: []FieldSpec{
+	"swipe": {Name: "swipe", Scalar: "direction", BareField: "direction", ValueLess: false, Compound: false, FreeForm: false, Doc: "", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -826,7 +839,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "distance", Type: "float64", Doc: "Fraction of screen (0-1) for direction swipes; 0 = default"},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: ""},
 	}},
-	"switchTab": {Name: "switchTab", Scalar: "tabLabel", ValueLess: false, Compound: false, FreeForm: false, Doc: "Switches to another browser tab.", Fields: []FieldSpec{
+	"switchTab": {Name: "switchTab", Scalar: "tabLabel", BareField: "tabLabel", ValueLess: false, Compound: false, FreeForm: false, Doc: "Switches to another browser tab.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -835,15 +848,15 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "index", Type: "int", Doc: "Switch by index (0-based)"},
 		{Key: "url", Type: "string", Doc: "Switch by URL pattern match"},
 	}},
-	"takeScreenshot": {Name: "takeScreenshot", Scalar: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro's takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot).", Fields: []FieldSpec{
+	"takeScreenshot": {Name: "takeScreenshot", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro's takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "path", Type: "string", Doc: ""},
+		{Key: "path", Type: "string", Doc: "", Output: true},
 		{Key: "cropOn", Type: "*Selector", Doc: ""},
 	}},
-	"tapOn": {Name: "tapOn", Scalar: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Taps on an element.", Fields: []FieldSpec{
+	"tapOn": {Name: "tapOn", Scalar: "text", BareField: "text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Taps on an element.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -966,8 +979,8 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "repeat", Type: "int", Doc: "Tap repeat count"},
 		{Key: "delay", Type: "int", Doc: "Delay between repeats (ms)"},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
-		{Key: "path", Type: "string", Doc: "Single file path"},
-		{Key: "paths", Type: "[]string", Doc: "Multiple file paths"},
+		{Key: "path", Type: "string", Doc: "Single file path", Path: true},
+		{Key: "paths", Type: "[]string", Doc: "Multiple file paths", Path: true},
 	}},
 	"waitForAnimationToEnd": {Name: "waitForAnimationToEnd", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Waits for animations.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
@@ -975,7 +988,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"waitForDownload": {Name: "waitForDownload", Scalar: "saveTo", ValueLess: false, Compound: false, FreeForm: false, Doc: "Waits for a browser download to complete.", Fields: []FieldSpec{
+	"waitForDownload": {Name: "waitForDownload", Scalar: "saveTo", BareField: "saveTo", ValueLess: false, Compound: false, FreeForm: false, Doc: "Waits for a browser download to complete.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -983,7 +996,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "saveTo", Type: "string", Doc: "Directory to save downloaded file"},
 		{Key: "assertFilename", Type: "string", Doc: "Expected filename (optional)"},
 	}},
-	"waitForRequest": {Name: "waitForRequest", Scalar: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Waits for a specific network request to be made.", Fields: []FieldSpec{
+	"waitForRequest": {Name: "waitForRequest", Scalar: "url", BareField: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Waits for a specific network request to be made.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},

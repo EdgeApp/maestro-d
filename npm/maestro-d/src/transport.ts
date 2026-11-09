@@ -9,17 +9,21 @@
 // the same id after a reset or refused connection, PEER_UNAVAILABLE, or a
 // gateway's 502/504.
 
+import * as fs from 'node:fs'
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as tls from 'node:tls'
 
-import { MaestroError } from './errors.js'
+import { codeFromHeaders, MaestroError } from './errors.js'
 import type { Envelope } from './types.js'
 
 export const API_VERSION = '1'
 
 /** Header carrying the id of one logical request. */
 export const REQUEST_ID_HEADER = 'X-Maestro-Request-Id'
+
+/** Sent to a hub: the client names its output files and fetches them back from outputs/. */
+export const CLIENT_OUTPUTS_HEADER = 'X-Maestro-Client-Outputs'
 
 /** Waits before each retry: 0.5 s, then doubling, three retries in all. */
 export const RETRY_DELAYS = [500, 1000, 2000]
@@ -38,7 +42,7 @@ export interface TransportOptions {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
   accept?: string
   signal?: AbortSignal
@@ -104,7 +108,8 @@ export class Transport {
   private readonly port: number
   private readonly token?: string
   private readonly secure: boolean
-  private readonly retryDelays: number[]
+  /** Milliseconds before each retry of a request, or of a blob upload; [] over a unix socket. */
+  readonly retryDelays: number[]
   readonly describe: string
   /** True for a TCP connection (request ids and retries). */
   readonly tcp: boolean
@@ -171,7 +176,7 @@ export class Transport {
   /** A request that may be sent again: it has an id, only reads, or attaches. */
   private retryable(path: string, opts: RequestOptions): boolean {
     const method = opts.method ?? 'GET'
-    return opts.requestId !== undefined || method === 'GET' || (method === 'POST' && /\/attach(\?|$)/.test(path))
+    return opts.requestId !== undefined || method === 'GET' || method === 'HEAD' || (method === 'POST' && /\/attach(\?|$)/.test(path))
   }
 
   /** Perform a request and return the raw response, retrying a dropped link. */
@@ -210,6 +215,8 @@ export class Transport {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     if (opts.requestId) headers[REQUEST_ID_HEADER] = opts.requestId
+    // On a hub this client names its output files and fetches them back.
+    if (this.hub && method === 'POST') headers[CLIENT_OUTPUTS_HEADER] = '1'
 
     const reqOpts = { ...this.baseOptions(method, headers, opts.signal), path }
     if (opts.timeout) reqOpts.timeout = opts.timeout
@@ -228,6 +235,39 @@ export class Transport {
       }
       if (payload) req.write(payload)
       req.end()
+    })
+  }
+
+  /**
+   * PUT bytes [offset, size) of a local file, streamed, with a
+   * Content-Range when the file is not empty. Not retried here: the caller
+   * asks the daemon how much it holds and resumes from there.
+   */
+  putFile(path: string, file: string, offset: number, size: number, signal?: AbortSignal): Promise<RawResponse> {
+    const headers: http.OutgoingHttpHeaders = {
+      'X-Maestro-Api-Version': API_VERSION,
+      Accept: 'application/json',
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': size - offset,
+    }
+    if (size > 0) headers['Content-Range'] = `bytes ${offset}-${size - 1}/${size}`
+    if (this.token) headers.Authorization = `Bearer ${this.token}`
+    const reqOpts = { ...this.baseOptions('PUT', headers, signal), path }
+    return new Promise<RawResponse>((resolve, reject) => {
+      const req = this.request(reqOpts, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }))
+        res.on('error', reject)
+      })
+      req.on('error', (err) => reject(this.transportError(err, signal)))
+      if (size - offset === 0) {
+        req.end()
+        return
+      }
+      const stream = fs.createReadStream(file, { start: offset, end: size - 1 })
+      stream.on('error', (err) => req.destroy(err))
+      stream.pipe(req)
     })
   }
 
@@ -251,7 +291,7 @@ export class Transport {
     }
     if (res.status >= 300) {
       const result = parsed && ('step' in parsed || 'results' in parsed) ? parsed : undefined
-      throw MaestroError.fromResponse(res.status, text, result as never)
+      throw MaestroError.fromResponse(res.status, text, result as never, codeFromHeaders(res.headers))
     }
     if (parsed === undefined) {
       throw MaestroError.of('INTERNAL', `empty response from ${opts.method ?? 'GET'} ${path}`)
@@ -263,7 +303,7 @@ export class Transport {
   async bytes(path: string, opts: RequestOptions = {}): Promise<Buffer> {
     const res = await this.raw(path, { accept: '*/*', ...opts })
     if (res.status >= 300) {
-      throw MaestroError.fromResponse(res.status, res.body.toString('utf8'))
+      throw MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers))
     }
     return res.body
   }
@@ -292,7 +332,7 @@ export class Transport {
     if ((res.statusCode ?? 0) >= 300) {
       const chunks: Buffer[] = []
       for await (const c of res) chunks.push(c as Buffer)
-      throw MaestroError.fromResponse(res.statusCode ?? 0, Buffer.concat(chunks).toString('utf8'))
+      throw MaestroError.fromResponse(res.statusCode ?? 0, Buffer.concat(chunks).toString('utf8'), undefined, codeFromHeaders(res.headers))
     }
 
     let buffered = ''

@@ -122,7 +122,7 @@ differs from the one in effect; `detach` and `attach` again to change them).
 ### Another machine's daemon: `--target-hub`
 
 Every client command — the one-shots, `run`, `device …`, `attach`,
-`detach`, `get`, `set`, `eval` and `status` — also takes:
+`detach`, `get`, `set`, `eval`, `status`, `install` and `uninstall` — also takes:
 
 | flag | |
 | --- | --- |
@@ -147,15 +147,30 @@ maestro-d get screenshot --target-hub=192.168.64.1 --device "$UDID" --out shot.p
 A targeted command never starts a daemon; an unreachable one exits 3
 (`DAEMON_UNAVAILABLE`), and a missing or wrong token exits 2 (`USAGE`).
 It sends no working directory, and `run FILE` sends the file's YAML rather
-than its path, because the daemon is on another machine. That daemon treats
+than its path, because the daemon is on another machine.
+
+**Files travel with the command.** A one-shot's input files — `addMedia`
+files, a `runScript` ending in `.js`, an `assertScreenshot` reference,
+`runWebViewScript`/`runBrowserScript`, `uploadFile`, `loadAuthState`, and
+`attach`'s `--app-file` — are packed (`maestro-d pack`),
+uploaded only when the daemon lacks them (stderr says which), and sent as
+`blob:` refs. A bare value counts: `addMedia photo.png` is uploaded like
+`--files`. Its output files — `takeScreenshot --path`, `saveAuthState` —
+are written on the daemon and fetched back to the path you gave
+(`takeScreenshot --path name` writes `name.png`). An `assertScreenshot`
+reference you do not have yet is a baseline the run writes and fetches
+back; a mismatch fetches `<ref>_diff.png` beside your reference. `runFlow`
+and `retry` files are not shipped yet. That daemon treats
 a caller from beyond loopback as **remote**: `runShell` and host paths in
 steps are refused with `FORBIDDEN` (exit 2) — see
 [remote callers](rest.md#remote-callers). For the same reason a targeted
 command refuses `--output-dir` and `--user-data-dir` (`USAGE`), and ignores
 an `--output-dir` that came only from `MAESTRO_OUTPUT`, with a note on
-stderr.
+stderr. It also refuses `--caps` or `APPIUM_CAPS` (`USAGE`) before sending:
+a remote caller gets no Appium driver (`--driver appium` and
+`--appium-url` are refused by the daemon with `FORBIDDEN`).
 
-Over TCP every step-running request carries a request id, and the CLI
+Over TCP every step-running request (and `install`) carries a request id, and the CLI
 retries a dropped connection with the same id up to 3 times (0.5 s, 1 s,
 2 s); the daemon runs each id once. `--verbose` prints each retry.
 
@@ -230,6 +245,7 @@ maestro-d attach --device mock-1 --platform mock      # a fake device for trying
 | `get state` | foreground app, orientation, … |
 | `get info` | platform, OS version, device name, app version |
 | `get vars` | session variables |
+| `get artifacts [-o DIR]` | the session's report files (screenshots, `outputs/`, recordings, report); `-o DIR` downloads them all into `DIR`, keeping their paths |
 | `set KEY=VALUE …` | set session variables |
 | `eval 'SCRIPT'` | run JavaScript in the session engine and print the value; `output.X` assignments persist |
 
@@ -240,6 +256,21 @@ maestro-d get hierarchy | jq '.. | .text? // empty'
 maestro-d get hierarchy --find "Sign in"
 maestro-d set USER=alice PIN=1234
 maestro-d eval 'maestro.copiedText'
+```
+
+## Apps and files
+
+| command | |
+| --- | --- |
+| `install FILE [--reinstall] [--platform P]` | install an `.apk`, `.app` or `.ipa` on `--device` without attaching, and print its app id when it can be read (an `.apk`'s needs `aapt2`); with `--target-hub` the file is uploaded first, unless the daemon has it |
+| `uninstall APP_ID` | remove an app by bundle id or package name |
+| `pack PATH… [--json]` | print each file's upload unit: sha256, size and `blob:` ref. A directory (an iOS `.app`) is zipped with sorted entries and fixed timestamps, so it always hashes the same |
+
+```sh
+maestro-d install drivers/android/settings_apk-debug.apk --device emulator-5554
+maestro-d install build/My.app --device "$UDID" --target-hub=192.168.64.1
+maestro-d uninstall io.appium.settings --device emulator-5554
+maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 ```
 
 ## Environment

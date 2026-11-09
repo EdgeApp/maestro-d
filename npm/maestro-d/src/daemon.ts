@@ -3,9 +3,11 @@
 // handle boots devices and attaches to them.
 
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 
 import { MaestroError } from './errors.js'
 import { MaestroDevice, anySignal } from './device.js'
+import { uploadPath } from './pack.js'
 import { ENV_DEVICE, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
 import { Transport } from './transport.js'
@@ -262,7 +264,20 @@ export class MaestroD {
   async attach(opts: DeviceAttachOptions = {}): Promise<MaestroDevice> {
     const { device, signal, ...cfg } = opts
     const id = await this.resolveDevice(device, signal)
-    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(`/v1/devices/${encodeURIComponent(id)}/attach`, {
+    const base = `/v1/devices/${encodeURIComponent(id)}`
+    if (this.transport.hub) {
+      // The app and capabilities files are on this machine: upload them and
+      // send blob refs (a hub refuses its own host paths).
+      if (cfg.appFile && !cfg.appFile.startsWith('blob:')) {
+        cfg.appFile = (await uploadPath(this.transport, base, path.resolve(cfg.appFile), this.sig(signal))).ref
+      }
+      const caps = cfg.extra?.capsFile
+      if (typeof caps === 'string' && caps !== '' && !caps.startsWith('blob:')) {
+        const ref = (await uploadPath(this.transport, base, path.resolve(caps), this.sig(signal))).ref
+        cfg.extra = { ...cfg.extra, capsFile: ref }
+      }
+    }
+    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(`${base}/attach`, {
       method: 'POST',
       body: cfg,
       signal: this.sig(signal),

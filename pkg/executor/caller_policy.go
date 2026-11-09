@@ -27,8 +27,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -54,6 +56,11 @@ type CallerPolicy struct {
 	// OutputsDir receives the files a remote call's output fields write
 	// (takeScreenshot.path, saveAuthState.path).
 	OutputsDir string
+	// ClientOutputs marks a local caller that names its outputs itself (a
+	// client targeting this daemon over loopback TCP): its relative output
+	// paths are written under OutputsDir and reported, as a remote
+	// caller's are, but nothing is confined.
+	ClientOutputs bool
 	// Blobs maps blob refs; nil when the daemon has no blob store.
 	Blobs BlobResolver
 
@@ -62,6 +69,13 @@ type CallerPolicy struct {
 	deniedDir string
 	cancel    context.CancelFunc
 	denial    *PolicyDenial
+	// outputs are the paths the policy directed a write to (output fields,
+	// baselines, diffs), in order, not yet reported, with what was there
+	// before, so only files the call wrote are reported.
+	outputs []outputRec
+	// callerNames maps a blob copy to the caller's name for it,
+	// <first 8 hex of its sha256>/<basename>, for its diff image.
+	callerNames map[string]string
 }
 
 // PolicyDenial records why a call was stopped.
@@ -142,12 +156,13 @@ func (p *CallerPolicy) beginCall(sessionDir string, cancel context.CancelFunc) *
 		return nil
 	}
 	c := &CallerPolicy{
-		Remote:     p.Remote,
-		AllowShell: p.AllowShell,
-		BundleDir:  p.BundleDir,
-		OutputsDir: p.OutputsDir,
-		Blobs:      p.Blobs,
-		cancel:     cancel,
+		Remote:        p.Remote,
+		AllowShell:    p.AllowShell,
+		BundleDir:     p.BundleDir,
+		OutputsDir:    p.OutputsDir,
+		ClientOutputs: p.ClientOutputs,
+		Blobs:         p.Blobs,
+		cancel:        cancel,
 	}
 	for _, r := range []string{p.BundleDir, p.OutputsDir} {
 		c.AddRoot(r)
@@ -222,18 +237,84 @@ func isRef(s string) bool {
 	return strings.HasPrefix(s, "blob:") || strings.HasPrefix(s, "bundle:")
 }
 
-// within reports whether path (absolute, cleaned) lies under one of the
-// policy's roots.
+// within reports whether path (absolute) lies under one of the policy's
+// roots, both as written and as the file system resolves it: a symlink in
+// a root (an unpacked blob's, say) must not lead out of it.
 func (p *CallerPolicy) within(path string) bool {
+	clean := filepath.Clean(path)
+	real, err := RealPath(path)
+	if err != nil {
+		return false
+	}
 	for _, root := range p.roots {
-		if path == root {
-			return true
+		if !lexicallyUnder(clean, root) {
+			continue
 		}
-		if rel, err := filepath.Rel(root, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if realRoot, err := RealPath(root); err == nil && lexicallyUnder(real, realRoot) {
 			return true
 		}
 	}
 	return false
+}
+
+// lexicallyUnder reports whether the cleaned path lies in (or is) dir.
+func lexicallyUnder(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// RealPath resolves every symlink in path as the file system would on
+// opening it, as filepath.EvalSymlinks does, except that a component that
+// does not exist (and everything after it) is taken as written. path is
+// not cleaned first: "l/.." leaves wherever the symlink l leads. A relative
+// path is taken from the working directory.
+func RealPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		path = wd + string(filepath.Separator) + path
+	}
+	vol := filepath.VolumeName(path)
+	root := vol + string(filepath.Separator)
+	resolved := root
+	todo := strings.Split(filepath.ToSlash(path[len(vol):]), "/")
+	links := 0
+	for len(todo) > 0 {
+		c := todo[0]
+		todo = todo[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, c)
+		fi, err := os.Lstat(next)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			resolved = next
+			continue
+		}
+		if links++; links > 255 {
+			return "", fmt.Errorf("%s: too many levels of symbolic links", path)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", err
+		}
+		if filepath.IsAbs(target) {
+			tvol := filepath.VolumeName(target)
+			resolved = tvol + string(filepath.Separator)
+			target = target[len(tvol):]
+		}
+		todo = append(strings.Split(filepath.ToSlash(target), "/"), todo...)
+	}
+	return resolved, nil
 }
 
 // absolute resolves path as upstream's ResolvePath would.
@@ -245,6 +326,20 @@ func absolute(path, flowDir string) string {
 		path = abs
 	}
 	return filepath.Clean(path)
+}
+
+// rawAbsolute is absolute without the cleaning: the path as the file
+// system will open it, for within's resolved check.
+func rawAbsolute(path, flowDir string) string {
+	if !filepath.IsAbs(path) && flowDir != "" {
+		path = flowDir + string(filepath.Separator) + path
+	}
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			path = wd + string(filepath.Separator) + path
+		}
+	}
+	return path
 }
 
 // mapRef resolves a blob or bundle ref, denying it when the daemon cannot.
@@ -260,6 +355,12 @@ func (p *CallerPolicy) mapRef(d PolicyDenial) string {
 	}
 	if dir := filepath.Dir(local); !p.within(filepath.Clean(dir)) {
 		p.AddRoot(dir)
+	}
+	if hex, base, err := ParseBlobRef(d.Path); err == nil {
+		if p.callerNames == nil {
+			p.callerNames = map[string]string{}
+		}
+		p.callerNames[absolute(local, "")] = hex[:8] + "/" + base
 	}
 	return local
 }
@@ -282,7 +383,7 @@ func (p *CallerPolicy) checkInput(d PolicyDenial, flowDir string) string {
 		p.denial.fill(d)
 		return d.Path
 	}
-	if p.within(absolute(d.Path, flowDir)) {
+	if p.within(rawAbsolute(d.Path, flowDir)) {
 		return d.Path
 	}
 	d.Reason = fmt.Sprintf("%s is a path on the daemon's host; a remote caller may only use files it uploaded", d.Path)
@@ -294,7 +395,7 @@ func (p *CallerPolicy) checkInput(d PolicyDenial, flowDir string) string {
 // under OutputsDir. A path already there (the hook ran before) passes.
 func (p *CallerPolicy) checkOutput(d PolicyDenial) string {
 	if !p.Remote {
-		return d.Path
+		return p.clientOutput(d.Path)
 	}
 	if p.isDenied(d.Path) {
 		p.denial.fill(d)
@@ -302,6 +403,7 @@ func (p *CallerPolicy) checkOutput(d PolicyDenial) string {
 	}
 	if filepath.IsAbs(d.Path) {
 		if p.OutputsDir != "" && underDir(filepath.Clean(d.Path), p.OutputsDir) {
+			p.recordOutput(d.Path)
 			return d.Path
 		}
 		d.Reason = fmt.Sprintf("%s: a remote caller's output path must be relative", d.Path)
@@ -321,7 +423,217 @@ func (p *CallerPolicy) checkOutput(d PolicyDenial) string {
 		d.Reason = fmt.Sprintf("%s: this call has no outputs directory", d.Path)
 		return p.deny(d)
 	}
-	return filepath.Join(p.OutputsDir, filepath.Clean(d.Path))
+	out := filepath.Join(p.OutputsDir, filepath.Clean(d.Path))
+	p.recordOutput(out)
+	return out
+}
+
+// clientOutput rewrites a ClientOutputs caller's relative output path
+// under OutputsDir; any other local path is left as it is.
+func (p *CallerPolicy) clientOutput(path string) string {
+	if !p.ClientOutputs || p.OutputsDir == "" || isRef(path) {
+		return path
+	}
+	if filepath.IsAbs(path) {
+		if underDir(filepath.Clean(path), p.OutputsDir) {
+			p.recordOutput(path)
+		}
+		return path
+	}
+	for _, el := range strings.Split(filepath.ToSlash(path), "/") {
+		if el == ".." {
+			return path
+		}
+	}
+	out := filepath.Join(p.OutputsDir, filepath.Clean(path))
+	p.recordOutput(out)
+	return out
+}
+
+// outputRec is one recorded output path and the state of the files it may
+// name (the path, and with ".png" added when it has no extension) before
+// the call wrote them.
+type outputRec struct {
+	path   string
+	before map[string]fileState
+}
+
+type fileState struct {
+	mod  time.Time
+	size int64
+}
+
+func statFile(path string) (fileState, bool) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return fileState{}, false
+	}
+	return fileState{mod: fi.ModTime(), size: fi.Size()}, true
+}
+
+// outputCandidates are the files an output path may become: executeTake
+// Screenshot and executeAssertScreenshot add ".png" to a path with none.
+func outputCandidates(path string) []string {
+	if filepath.Ext(path) == "" {
+		return []string{path, path + ".png"}
+	}
+	return []string{path}
+}
+
+// recordOutput notes a path the call may write, for the result's outputs.
+func (p *CallerPolicy) recordOutput(path string) {
+	for _, o := range p.outputs {
+		if o.path == path {
+			return
+		}
+	}
+	rec := outputRec{path: path, before: map[string]fileState{}}
+	for _, c := range outputCandidates(path) {
+		if st, ok := statFile(c); ok {
+			rec.before[c] = st
+		}
+	}
+	p.outputs = append(p.outputs, rec)
+}
+
+// takeOutputs returns the recorded output files the call wrote (created or
+// changed), relative to reportDir (outputs/<path>), and forgets them.
+func (p *CallerPolicy) takeOutputs(reportDir string) []string {
+	if p == nil || len(p.outputs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, rec := range p.outputs {
+		for _, c := range outputCandidates(rec.path) {
+			st, ok := statFile(c)
+			if !ok {
+				continue
+			}
+			if prev, had := rec.before[c]; had && prev == st {
+				continue
+			}
+			rel, err := filepath.Rel(reportDir, c)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			out = append(out, filepath.ToSlash(rel))
+		}
+	}
+	p.outputs = nil
+	return out
+}
+
+// blobHashRe is the only form a caller-supplied hash may take, so no hash
+// can be a path into the daemon's disk.
+var blobHashRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidBlobHash reports whether s is 64 lowercase hex digits.
+func ValidBlobHash(s string) bool { return blobHashRe.MatchString(s) }
+
+// ParseBlobRef splits blob:sha256:<hex>/<basename>. The hex must be 64
+// lowercase hex digits and the basename its own filepath.Base, not "." or
+// ".."; it is checked before any file is opened.
+func ParseBlobRef(ref string) (hex, base string, err error) {
+	rest, ok := strings.CutPrefix(ref, "blob:sha256:")
+	if !ok {
+		return "", "", fmt.Errorf("not a blob ref (want blob:sha256:<hex>/<basename>)")
+	}
+	hex, base, ok = strings.Cut(rest, "/")
+	if !ok {
+		return "", "", fmt.Errorf("blob ref has no /<basename>")
+	}
+	if !ValidBlobHash(hex) {
+		return "", "", fmt.Errorf("blob hash %q is not 64 lowercase hex digits", hex)
+	}
+	if base == "" || base == "." || base == ".." || base != filepath.Base(base) || strings.ContainsAny(base, "\\\x00") {
+		return "", "", fmt.Errorf("blob basename %q is not a plain file name", base)
+	}
+	return hex, base, nil
+}
+
+// withPNG appends ".png" to a path with no extension, as upstream's
+// executeAssertScreenshot does to a reference path.
+func withPNG(path string) string {
+	if filepath.Ext(path) == "" {
+		return path + ".png"
+	}
+	return path
+}
+
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
+}
+
+// screenshotRef applies the remote assertScreenshot rule to its reference
+// path: a blob ref, or a relative path naming a file inside the call's
+// bundle, is an input; any other relative path is an output (a baseline
+// written under OutputsDir, as a local first run writes it beside the
+// flow). An absolute path is an input checked against the roots, unless it
+// already lies under OutputsDir.
+func (se *ScriptEngine) screenshotRef(d PolicyDenial, v *string) {
+	p := se.policy
+	switch {
+	case isRef(*v) || (!p.Remote && !p.ClientOutputs):
+		*v = p.checkInput(d, se.flowDir)
+	case !p.Remote:
+		// A ClientOutputs caller sends a blob ref for a reference it has,
+		// and its own output name for a baseline it lacks.
+		*v = p.clientOutput(*v)
+	case filepath.IsAbs(*v):
+		if p.OutputsDir != "" && underDir(filepath.Clean(*v), p.OutputsDir) {
+			*v = p.checkOutput(d)
+			return
+		}
+		*v = p.checkInput(d, se.flowDir)
+	default:
+		abs := absolute(withPNG(*v), se.flowDir)
+		if p.within(rawAbsolute(withPNG(*v), se.flowDir)) && fileExists(abs) && (p.OutputsDir == "" || !underDir(abs, p.OutputsDir)) {
+			*v = p.checkInput(d, se.flowDir)
+			return
+		}
+		*v = p.checkOutput(d)
+	}
+}
+
+// PolicyAllows reports whether the active caller policy allows path: it
+// lies under one of the call's roots (the blob copies, the bundle, the
+// outputs directory). Upstream's validateArtifactPath also accepts these.
+func (se *ScriptEngine) PolicyAllows(path string) bool {
+	p := se.policy
+	return p != nil && p.within(rawAbsolute(path, se.flowDir))
+}
+
+// DiffPath is where executeAssertScreenshot writes (and clears) the diff
+// image for referencePath. With no remote policy it is upstream's
+// core.DiffScreenshotPath, beside the reference. For a remote call it lies
+// under OutputsDir, named from the caller's own reference name — for a blob
+// ref <first 8 hex>/<basename>, for a bundle file its bundle-relative path —
+// so the client can fetch it next to its reference.
+func (se *ScriptEngine) DiffPath(referencePath string) string {
+	upstream := core.DiffScreenshotPath(referencePath)
+	p := se.policy
+	if p == nil || (!p.Remote && !p.ClientOutputs) || p.OutputsDir == "" {
+		return upstream
+	}
+	abs := absolute(referencePath, se.flowDir)
+	var out string
+	switch name, ok := p.callerNames[abs]; {
+	case ok:
+		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(name))
+	case p.callerNames[strings.TrimSuffix(abs, ".png")] != "":
+		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(withPNG(p.callerNames[strings.TrimSuffix(abs, ".png")])))
+	case underDir(abs, p.OutputsDir):
+		out = core.DiffScreenshotPath(abs)
+	case p.BundleDir != "" && underDir(abs, p.BundleDir):
+		rel, _ := filepath.Rel(p.BundleDir, abs)
+		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(rel))
+	default:
+		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(filepath.Base(abs)))
+	}
+	_ = os.MkdirAll(filepath.Dir(out), 0o755)
+	p.recordOutput(out)
+	return out
 }
 
 func underDir(path, dir string) bool {
@@ -378,7 +690,9 @@ func (se *ScriptEngine) policyStep(step flow.Step) {
 			in("runScript", "script", &s.Script)
 		}
 	case *flow.AssertScreenshotStep:
-		in("assertScreenshot", "path", &s.Path)
+		if s.Path != "" {
+			se.screenshotRef(den("assertScreenshot", "path", s.Path), &s.Path)
+		}
 	case *flow.RunBrowserScriptStep:
 		in("runBrowserScript", "file", &s.File)
 	case *flow.RunWebViewScriptStep:
@@ -419,7 +733,7 @@ func (se *ScriptEngine) policyResolve(path string) (string, bool) {
 		return path, false
 	}
 	abs := absolute(path, se.flowDir)
-	if p.within(abs) {
+	if p.within(rawAbsolute(path, se.flowDir)) {
 		return abs, true
 	}
 	return p.checkInput(PolicyDenial{Field: "path", Path: path}, se.flowDir), true

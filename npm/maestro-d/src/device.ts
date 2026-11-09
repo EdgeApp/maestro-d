@@ -8,8 +8,10 @@ import * as path from 'node:path'
 
 import { MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandParams } from './generated/commands.js'
+import { HubFiles, uploadPath } from './pack.js'
 import type { Transport } from './transport.js'
 import type {
+  ArtifactInfo,
   DaemonEvent,
   DeviceInfo,
   Envelope,
@@ -90,13 +92,24 @@ export function buildValue(name: string, value: unknown, fields: Record<string, 
     }
     return null
   }
-  return mergeFields(name, value, fields, spec.scalar)
+  const listField = spec.bareField !== null && spec.bareField !== spec.scalar ? spec.bareField : undefined
+  return mergeFields(name, value, fields, spec.scalar, listField)
 }
 
-/** scalar: the field a bare value maps to, null when the command has none, undefined when unknown. */
-function mergeFields(name: string, value: unknown, fields: Record<string, unknown>, scalar: string | null | undefined): unknown {
+/**
+ * scalar: the field a bare value maps to, null when the command has none,
+ * undefined when unknown. listField: the list field a bare value or list
+ * fills when the command has no scalar (addMedia's files).
+ */
+function mergeFields(
+  name: string,
+  value: unknown,
+  fields: Record<string, unknown>,
+  scalar: string | null | undefined,
+  listField?: string,
+): unknown {
   const bare = value !== undefined && value !== null && !isPlainObject(value) && !Array.isArray(value)
-  if (bare && scalar === null) {
+  if (bare && scalar === null && listField === undefined) {
     throw new TypeError(`${name} does not take a bare value; pass an object of fields`)
   }
   if (Object.keys(fields).length === 0) {
@@ -104,6 +117,9 @@ function mergeFields(name: string, value: unknown, fields: Record<string, unknow
   }
   if (value === undefined) return fields
   if (isPlainObject(value)) return { ...value, ...fields }
+  if (listField !== undefined && (bare || Array.isArray(value))) {
+    return { [listField]: Array.isArray(value) ? value : [value], ...fields }
+  }
   if (Array.isArray(value)) {
     throw new TypeError(`${name}: a list value cannot be combined with options`)
   }
@@ -181,11 +197,25 @@ export class MaestroDevice {
   async command(name: string, value?: unknown, opts?: Record<string, unknown>): Promise<StepResult> {
     if (typeof name !== 'string' || name === '') throw new TypeError('command name must be a non-empty string')
     const { fields, call } = splitOptions(opts)
-    const body = buildValue(name, value, fields)
+    let body = buildValue(name, value, fields)
     const cwd = this.transport.hub ? undefined : (call.cwd ?? process.cwd())
     const url =
       `${this.base}/commands/${encodeURIComponent(name)}` + query({ cwd, wait: call.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(call), requestId: this.requestId() })
+    // On a hub, upload the input files and name the outputs ourselves; the
+    // outputs are fetched back to the caller's paths, also after a failure
+    // (an assertScreenshot mismatch's diff image).
+    const files = this.transport.hub ? new HubFiles(this.transport, this.base, call.cwd ?? process.cwd(), this.sig(call)) : undefined
+    if (files) body = await files.rewrite(name, body)
+    let res: StepResult
+    try {
+      res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(call), requestId: this.requestId() })
+    } catch (err) {
+      if (files && err instanceof MaestroError && err.result && 'outputs' in err.result) {
+        await files.fetchOutputs(err.result.outputs)
+      }
+      throw err
+    }
+    if (files) await files.fetchOutputs(res.outputs)
     return checkResult(res)
   }
 
@@ -244,6 +274,45 @@ export class MaestroDevice {
     const url = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
     const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
+  }
+
+  // -------------------------------------------------------------------------
+  // Apps and artifacts
+
+  /**
+   * Install an app (.apk, .app or .ipa) without attaching. On a hub the
+   * file is uploaded first, unless the hub already has it. Resolves to the
+   * app id when the daemon can read it.
+   */
+  async installApp(file: string, opts: CallOptions & { reinstall?: boolean; platform?: string } = {}): Promise<{ appId?: string }> {
+    if (typeof file !== 'string' || file === '') throw new TypeError('installApp() takes a file path')
+    let app = path.resolve(opts.cwd ?? process.cwd(), file)
+    if (this.transport.hub) app = (await uploadPath(this.transport, this.base, app, this.sig(opts))).ref
+    const res = await this.transport.json<Envelope & { appId?: string }>(`${this.base}/apps`, {
+      method: 'POST',
+      body: { app, reinstall: opts.reinstall === true || undefined, platform: opts.platform },
+      signal: this.sig(opts),
+      requestId: this.requestId(),
+    })
+    return res.appId !== undefined ? { appId: res.appId } : {}
+  }
+
+  /** Uninstall an app by bundle id or package name. */
+  async uninstallApp(appId: string, opts: CallOptions = {}): Promise<void> {
+    if (typeof appId !== 'string' || appId === '') throw new TypeError('uninstallApp() takes an app id')
+    await this.transport.json<Envelope>(`${this.base}/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', signal: this.sig(opts) })
+  }
+
+  /** The files of the session's report directory (screenshots, outputs/, recordings, logs). */
+  async artifacts(opts: CallOptions = {}): Promise<ArtifactInfo[]> {
+    const res = await this.transport.json<Envelope & { artifacts: ArtifactInfo[] }>(`${this.base}/artifacts`, { signal: this.sig(opts) })
+    return res.artifacts
+  }
+
+  /** One artifact's bytes; `file` is relative to the report directory, as `artifacts()` lists it. */
+  async artifact(file: string, opts: CallOptions = {}): Promise<Buffer> {
+    if (typeof file !== 'string' || file === '') throw new TypeError('artifact() takes a path')
+    return this.transport.bytes(`${this.base}/artifacts/${file.split('/').map(encodeURIComponent).join('/')}`, { signal: this.sig(opts) })
   }
 
   // -------------------------------------------------------------------------

@@ -13,6 +13,8 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
@@ -137,6 +139,23 @@ func (c Code) HTTPStatus() int {
 	return http.StatusInternalServerError
 }
 
+// HeaderErrorCode repeats an error envelope's code as a response header, so
+// a client can tell failures apart on an answer without a body: a HEAD
+// (LEASE_REQUIRED, LEASE_EXPIRED and BUSY are all 409).
+const HeaderErrorCode = "X-Maestro-Error-Code"
+
+// CodeFromHeader returns the code an answer's HeaderErrorCode names, or ""
+// when it names none this client knows.
+func CodeFromHeader(h http.Header) Code {
+	c := Code(h.Get(HeaderErrorCode))
+	for _, k := range Codes {
+		if c == k {
+			return c
+		}
+	}
+	return ""
+}
+
 // CodeFromHTTPStatus recovers a code from a status when a body has none.
 func CodeFromHTTPStatus(status int) Code {
 	switch status {
@@ -254,6 +273,10 @@ type StepResult struct {
 	Artifacts  report.CommandArtifacts `json:"artifacts"`
 	SubSteps   []report.Command        `json:"subSteps,omitempty"`
 	ReportDir  string                  `json:"reportDir,omitempty"`
+	// Outputs name the files a remote call's output fields wrote, as
+	// paths under the report directory (outputs/<path>), fetched with
+	// GET …/artifacts/{path}. Absent for local calls.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // ResultFromOutcome converts an executor outcome into the wire result.
@@ -272,6 +295,7 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		Artifacts:  o.Artifacts,
 		SubSteps:   o.SubSteps,
 		ReportDir:  reportDir,
+		Outputs:    o.Outputs,
 	}
 	if o.Forbidden != nil {
 		d := o.Forbidden
@@ -323,6 +347,21 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 	return r
 }
 
+// ForRemote rewrites the daemon's own report-directory paths in the
+// result's messages to report-relative ones (outputs/<path>, as the
+// result's outputs and the artifacts route name them), so a remote caller
+// is told the file it can fetch rather than a path on the daemon's host.
+func (r *StepResult) ForRemote(reportDir string) {
+	if reportDir == "" {
+		return
+	}
+	prefix := filepath.Clean(reportDir) + string(filepath.Separator)
+	r.Message = strings.ReplaceAll(r.Message, prefix, "")
+	if r.Error != nil {
+		r.Error.Message = strings.ReplaceAll(r.Error.Message, prefix, "")
+	}
+}
+
 // Err returns the result's failure as an *Error (nil when ok).
 func (r *StepResult) Err() *Error {
 	if r.OK || r.Error == nil {
@@ -340,6 +379,8 @@ type StepsResult struct {
 	Passed  int `json:"passed"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+	// Outputs collects every result's outputs.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // StepsResultFrom summarises a batch; the envelope reflects the first
@@ -348,6 +389,7 @@ func StepsResultFrom(device string, results []StepResult) StepsResult {
 	out := StepsResult{Envelope: Envelope{OK: true}, Device: device, Results: results}
 	for i := range results {
 		r := &results[i]
+		out.Outputs = append(out.Outputs, r.Outputs...)
 		switch {
 		case r.Skipped:
 			out.Skipped++

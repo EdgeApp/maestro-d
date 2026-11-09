@@ -51,6 +51,8 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
+	// BlobsDir is the blob store's root (default <home>/blobs).
+	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
 	StartArgs []string
 	// Ready, when set, is written a line to once the listeners are up (the
@@ -66,6 +68,7 @@ type Server struct {
 	events   *EventBus
 	idle     *idleTimer
 	idem     *idemCache
+	blobs    *BlobStore
 	// idemGrace: how long a dropped TCP request waits for its retry.
 	idemGrace time.Duration
 
@@ -91,12 +94,16 @@ func New(cfg Config, deps Deps) *Server {
 	if cfg.ReportsDir == "" {
 		cfg.ReportsDir = ReportsDir(cfg.Name)
 	}
+	if cfg.BlobsDir == "" {
+		cfg.BlobsDir = DefaultBlobRoot()
+	}
 	s := &Server{
 		cfg:       cfg,
 		deps:      deps,
 		registry:  NewRegistry(cfg.Name, deps.ListDevices),
 		events:    NewEventBus(0),
 		idem:      newIdemCache(),
+		blobs:     NewBlobStore(cfg.BlobsDir),
 		idemGrace: idemGrace,
 		attached:  map[string]*attached{},
 		attaching: map[string]chan struct{}{},
@@ -164,6 +171,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
+	}
+	if n := s.blobs.Expire(BlobExpiry); n > 0 {
+		logger.Info("Deleted %d blob(s) unused for %v", n, BlobExpiry)
 	}
 	sockPath := SocketPath(s.cfg.Name)
 	_ = os.Remove(sockPath)
@@ -328,6 +338,12 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("PUT /v1/devices/{id}/vars", s.handleSetVars)
 	mux.HandleFunc("POST /v1/devices/{id}/vars", s.handleSetVars)
 	mux.HandleFunc("POST /v1/devices/{id}/eval", s.handleEval)
+	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", s.handleBlobHead)
+	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", s.handleBlobPut)
+	mux.HandleFunc("POST /v1/devices/{id}/apps", s.idempotent(s.handleInstallApp))
+	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", s.handleUninstallApp)
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts", s.handleListArtifacts)
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", s.handleGetArtifact)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeUsage, "no route for %s %s", r.Method, r.URL.Path))
 	})
@@ -361,8 +377,11 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 		}
 		s.idle.Touch()
 		w.Header().Set("X-Maestro-Api-Version", APIVersion)
+		clientOutputs := r.Header.Get(HeaderClientOutputs) != ""
 		if tcp {
-			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr}))
+			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr, ClientOutputs: clientOutputs}))
+		} else if clientOutputs {
+			r = r.WithContext(withCaller(r.Context(), Caller{ClientOutputs: true}))
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -384,6 +403,7 @@ func writeError(w http.ResponseWriter, e *Error) {
 }
 
 func writeErrorStatus(w http.ResponseWriter, status int, e *Error) {
+	w.Header().Set(HeaderErrorCode, string(e.Code))
 	writeJSON(w, status, FailureEnvelope(e))
 }
 
@@ -705,6 +725,9 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := a.session.Execute(ctx, step)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+		res.ForRemote(a.reportDir)
+	}
 	status := http.StatusOK
 	if !res.OK {
 		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
@@ -742,7 +765,11 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	outs := a.session.ExecuteAll(ctx, steps, req.ContinueOnError)
 	results := make([]StepResult, 0, len(outs))
 	for _, o := range outs {
-		results = append(results, ResultFromOutcome(a.id, a.reportDir, o))
+		res := ResultFromOutcome(a.id, a.reportDir, o)
+		if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+			res.ForRemote(a.reportDir)
+		}
+		results = append(results, res)
 	}
 	res := StepsResultFrom(a.id, results)
 	status := http.StatusOK
@@ -815,6 +842,9 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := a.session.RunFlow(ctx, *f)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+		res.ForRemote(a.reportDir)
+	}
 	status := http.StatusOK
 	if !res.OK {
 		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})

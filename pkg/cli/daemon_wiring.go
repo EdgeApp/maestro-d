@@ -37,6 +37,9 @@ func daemonDeps() daemon.Deps {
 		InstallSystemImage: emulator.InstallSystemImage,
 		DeleteSimulator:    simulator.DeleteSimulator,
 		DeleteAVD:          emulator.DeleteAVD,
+		InstallApp:         daemonInstallApp,
+		UninstallApp:       daemonUninstallApp,
+		AppID:              appIDOf,
 	}
 }
 

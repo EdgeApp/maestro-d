@@ -33,6 +33,22 @@ step-running calls carry request ids and are retried with the same id
 after a dropped connection; see
 [request ids](rest.md#request-ids-and-retries).
 
+On a hub, files travel with the calls, as they do for the CLI: a command's
+input files (`addMedia`, a `runScript` ending in `.js`, an
+`assertScreenshot` reference, …) and `attach({appFile})`
+are packed by the bundled binary (`maestro-d pack`, so both clients pack
+identically; `$MAESTRO_D_BIN` names it when no platform package is
+installed), uploaded when the hub lacks them, and sent as `blob:` refs. A
+hub attaches no Appium driver for a script: `driver: 'appium'`,
+`appiumUrl` and `extra.capsFile` are refused `FORBIDDEN`. A
+bare value counts: `device.addMedia('photo.png')`. Output files
+(`takeScreenshot({path})`, a missing `assertScreenshot` baseline, a
+mismatch's `_diff.png`) are fetched back to the path you gave, resolved
+against `cwd` (default `process.cwd()`), so a script that writes a
+screenshot and reads it back runs unchanged. `device.installApp(file)`,
+`device.uninstallApp(appId)`, `device.artifacts()` and
+`device.artifact(path)` are `POST/DELETE …/apps` and `GET …/artifacts`.
+
 Device management maps one to one onto the REST routes: `catalog()` is
 `GET /v1/catalog`, `createDevice()` is `POST /v1/devices` with `create`,
 `startDevice()` (whose `platform` may be left out for `avd:<name>` and for

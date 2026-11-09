@@ -85,16 +85,36 @@ A remote caller drives devices but not the host. These are refused with
 - A path on the host in a step: `addMedia` files, `runScript` file (a value
   ending in `.js`; other values are inline JavaScript and run), `uploadFile`
   path(s), `runWebViewScript`/`runBrowserScript` file, `loadAuthState`,
-  `assertScreenshot`, and the `runFlow`/`retry` file — whether absolute,
-  relative, or built from a `${VAR}`. Nothing on the host is read.
+  and the `runFlow`/`retry` file — whether absolute, relative, or built
+  from a `${VAR}`. Nothing on the host is read. Upload the file instead
+  ([blobs](#blobs-uploaded-files)) and name it
+  `blob:sha256:<hex>/<basename>`; the daemon gives the step its own copy,
+  with that basename and extension. A ref whose hash is not 64 lowercase
+  hex digits, or whose basename is not a plain file name, is `FORBIDDEN`
+  before any file is opened.
 - An output path that is absolute or contains `..` (`takeScreenshot`,
   `saveAuthState`). A relative one is written under the session's report
-  directory, in `outputs/`.
+  directory, in `outputs/<path>` (`takeScreenshot` adds `.png` when it has
+  no extension), and the result lists it in [`outputs`](#outputs).
+  `startRecording`'s path is a device path on Android and passes through.
+- `assertScreenshot`'s reference: a `blob:` ref is compared; a relative
+  path that names no uploaded file is a **baseline**, written to
+  `outputs/<path>` (`.png` added) as a local first run writes it beside the
+  flow; an absolute host path is `FORBIDDEN`. On a mismatch the diff image
+  is written to `outputs/`, named after the caller's reference —
+  `outputs/<first 8 hex of the ref's sha256>/<basename>_diff.png` for a
+  `blob:` ref — and listed in `outputs`; the failure message names that
+  output, not a path on the daemon's host.
 - `?cwd=` on a command, `cwd` in a `/steps` or `/flows` body, and `file` in
   a `/flows` body: send the flow's `yaml` instead.
 - An attach with `platform: web` (or a browser driver), `outputDir`,
-  `flowDir`, `extra.userDataDir` or `extra.browser`, or an `appFile` or
-  `extra.capsFile` that is a host path rather than an uploaded `blob:` ref.
+  `flowDir`, `extra.userDataDir` or `extra.browser`, or an `appFile` that
+  is a host path rather than an uploaded `blob:` ref.
+- An Appium attach: `driver: appium` (any case), `appiumUrl`, or any
+  `extra.capsFile`, even a `blob:` ref. Appium capabilities can name host
+  files and programs (`appium:app`, `appium:chromedriverExecutable`), and
+  `appiumUrl` would open sessions to any address the daemon can reach. A
+  unix-socket caller attaches with Appium as before.
 
 A daemon listening beyond loopback also keeps its own environment to
 itself: sessions import none of its variables (so `${HOME}`, `GET …/vars`,
@@ -102,9 +122,29 @@ itself: sessions import none of its variables (so `${HOME}`, `GET …/vars`,
 `serve --pass-env NAME`. A unix-socket-only or loopback-only daemon imports
 its environment as before.
 
+### Outputs
+
+A step, batch or flow result carries `outputs`, the files its output
+fields wrote, as paths under the report directory (`outputs/<path>`),
+nested steps and subflows included. Fetch each with
+[`GET …/artifacts/{path}`](#get-v1devicesidartifactspath). It is present
+for a remote caller, and for any caller that sends
+`X-Maestro-Client-Outputs: 1`: a client that names its own output files
+(the CLI with `--target-hub`, the JavaScript library on a hub) sends it, so
+its relative output paths go to `outputs/` even when it reaches the daemon
+over loopback. A local call without it writes where it always has and has
+no `outputs`.
+
+The CLI and the JavaScript library, when they target another machine,
+never send their own output path: they send
+`<first 8 hex of sha256(caller path)>/<basename>`, then fetch the result's
+`outputs` back to the caller's path (relative to their own working
+directory, or absolute). `takeScreenshot --path name` writes `name.png` on
+the client, as a local run would.
+
 ## Request ids and retries
 
-`POST …/commands/{name}`, `…/steps` and `…/flows` may carry
+`POST …/commands/{name}`, `…/steps`, `…/flows` and `…/apps` may carry
 `X-Maestro-Request-Id`. The daemon keeps each device's last 256 outcomes
 by id for 10 minutes: a repeat of an id that is still running waits for
 that run's outcome, and a repeat of a finished one is answered from the
@@ -336,7 +376,7 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 | --- | --- | --- |
 | `platform` | `--platform` | `android`, `ios`, `web`, `mock`; inferred from the id when omitted |
 | `driver` | `--driver` | |
-| `appFile` | `--app-file` | installed on attach unless `noAppInstall` |
+| `appFile` | `--app-file` | installed on attach unless `noAppInstall`; a host path, or an uploaded `blob:sha256:<hex>/<basename>` ref (the only form a remote caller may send) |
 | `appId` | `--app-id` | default for `launchApp`, `stopApp`, `clearState`, … |
 | `url` | `--url` | web |
 | `teamId` | `--team-id` | physical iOS: signs WebDriverAgent; omitted, the daemon's own `MAESTRO_TEAM_ID` / `DEVELOPMENT_TEAM` |
@@ -360,7 +400,10 @@ Answers `{"ok": true, "device": {…}}`. Errors: `DEVICE_NOT_FOUND`,
 `DEVICE_IN_USE`, `DEVICE_ERROR` (driver would not start — the message has
 the driver's own error), and for a [remote caller](#remote-callers)
 `FORBIDDEN` on `web`, `outputDir`, `flowDir`, `extra.userDataDir`,
-`extra.browser`, or a host-path `appFile`/`extra.capsFile`.
+`extra.browser`, a host-path `appFile`, or Appium (`driver: appium`,
+`appiumUrl`, `extra.capsFile`). A `blob:` ref in `appFile` (or, from a
+local caller, `extra.capsFile`) that is malformed is `FORBIDDEN`, and one
+the daemon was never sent is `USAGE`.
 
 ### `POST /v1/devices/{id}/detach`
 
@@ -448,6 +491,7 @@ The response is a **step result**:
 | `element` | the element a selector resolved to, when there was one |
 | `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the file path for `startRecording` |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
+| `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |
 
 Unknown `{name}`: `USAGE`. A value the parser rejects (unknown field, wrong
@@ -482,6 +526,8 @@ failure and the status is its code's (`422` for `COMMAND_FAILED`):
 }
 ```
 
+A batch's `outputs` collects every result's `outputs`.
+
 Query `wait` and `cwd` as for commands.
 
 ### `POST /v1/devices/{id}/flows` — a flow file
@@ -500,6 +546,105 @@ relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.
 The response is one step result of type `runFlow` whose `subSteps` are the
 flow's steps.
+
+## Blobs (uploaded files)
+
+Every daemon keeps a content-addressed store at
+`$MAESTRO_D_HOME/blobs/sha256/<hex>` (default `~/.maestro-d`). A client
+that targets a daemon on another machine uploads each file a step, an
+install or an attach needs, then names it `blob:sha256:<hex>/<basename>`.
+The routes are per device, so on a mesh they reach the device's owner; the
+device need not be attached. Blobs unused for 7 days are deleted when the
+daemon starts. `{sha256}` must be 64 lowercase hex digits, or the request
+is `FORBIDDEN` before any file is opened.
+
+### `HEAD /v1/devices/{id}/blobs/{sha256}`
+
+`200` when the daemon has the blob, `404` when it does not. Either way
+`Upload-Offset` says how many bytes it holds (of a partial upload, for a
+404).
+
+### `PUT /v1/devices/{id}/blobs/{sha256}`
+
+The body is the file's bytes, streamed (not subject to the 32 MiB JSON
+cap). `Content-Range: bytes START-END/TOTAL` resumes an upload at
+`START`, which must not be past `Upload-Offset`; without it the body is the
+whole file. Bytes that arrive before a dropped connection are kept. When
+the file is complete its sha256 is checked before it becomes visible: a
+mismatch is `USAGE` and nothing is kept.
+
+```json
+{ "ok": true, "exitCode": 0, "sha256": "…", "offset": 81234, "complete": true }
+```
+
+`201` when the blob was stored, `200` when the daemon already had it,
+`202` when a range left it incomplete. Concurrent uploads of one hash are
+serialised.
+
+Over TCP the CLI and the JavaScript library upload this way: after a reset
+or refused connection, a `503` (`DAEMON_UNAVAILABLE` or `PEER_UNAVAILABLE`,
+when a hub loses its link to the device's hub) or a gateway's 502/504, on
+the `HEAD` or the `PUT`, they ask again and resume from `Upload-Offset`, up
+to 3 times, waiting 0.5 s, 1 s and 2 s.
+
+```sh
+SUM=$(shasum -a 256 photo.png | cut -d' ' -f1)
+curl -s -H "$H" -I $D/v1/devices/$ID/blobs/$SUM                     # 404: not there yet
+curl -s -H "$H" -X PUT --data-binary @photo.png $D/v1/devices/$ID/blobs/$SUM
+curl -s -H "$H" $D/v1/devices/$ID/commands/addMedia -d "{\"files\":[\"blob:sha256:$SUM/photo.png\"]}"
+```
+
+`maestro-d pack PATH… --json` prints each file's `sha256`, `size` and `ref`.
+A directory (an iOS `.app`) is packed as a deterministic zip — sorted
+entries, fixed timestamps — named after the directory, and the daemon
+unpacks it into the step's or installer's copy.
+
+## Apps
+
+### `POST /v1/devices/{id}/apps`
+
+```sh
+curl -s -H "$H" $D/v1/devices/emulator-5554/apps -d '{"app": "blob:sha256:…/settings_apk-debug.apk"}'
+```
+
+Installs an app without attaching, with the installers `attach --app-file`
+uses (`adb install -r -g`; `simctl install`; `devicectl`, then go-ios, on a
+physical iPhone). `app` is a `blob:` ref, or — local callers only — a path
+on the daemon's host (`.apk`, `.app` or `.ipa`). `reinstall: true`
+uninstalls the app first; `platform` overrides the platform the file and
+the device imply. The answer names the app:
+
+```json
+{ "ok": true, "exitCode": 0, "device": "emulator-5554", "appId": "io.appium.settings" }
+```
+
+`appId` is the `CFBundleIdentifier` of an `.app` or an `.ipa`'s
+`Payload/*.app`, or an `.apk`'s package name from `aapt2 dump packagename`
+(the newest `build-tools` under `$ANDROID_HOME`); without `aapt2` it is
+left out. An installer failure is `DEVICE_ERROR`.
+
+### `DELETE /v1/devices/{id}/apps/{appId}`
+
+Uninstalls by bundle id or package name.
+
+## Artifacts
+
+### `GET /v1/devices/{id}/artifacts`
+
+The attached session's report directory: screenshots, `outputs/`,
+recordings, hierarchy dumps, the report files. Uploaded inputs (`blobs/`)
+are left out.
+
+```json
+{ "ok": true, "exitCode": 0, "device": "…", "reportDir": "…",
+  "artifacts": [ { "path": "outputs/3f2a91c0/photos.png", "size": 81234, "modTime": "2026-11-08T20:01:02Z" }, … ] }
+```
+
+### `GET /v1/devices/{id}/artifacts/{path…}`
+
+One file's bytes. `path` is relative to the report directory, as the
+listing and `outputs` name it; an absolute path, a `..` element, or a
+symlink that leads out of the directory is `FORBIDDEN`.
 
 ## Reading state
 

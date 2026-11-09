@@ -197,6 +197,15 @@ every platform) / `hierarchyRaw()` → the driver's own XML/JSON (`Buffer`); `st
 `eval(script)` runs JavaScript in the session's engine; `refresh()` re-reads
 the device record; `events({after?, signal})` streams this device's events.
 
+#### Apps and artifacts
+
+| | |
+| --- | --- |
+| `installApp(file, {reinstall?, platform?})` | install an `.apk`, `.app` or `.ipa` without attaching; resolves `{appId}` when the daemon can read it. On a hub the file is uploaded first, unless the hub has it |
+| `uninstallApp(appId)` | remove an app by bundle id or package name |
+| `artifacts()` | the session's report files: `{path, size, modTime}[]` |
+| `artifact(path)` | one of them as a `Buffer` (`outputs/…`, `report.json`, …) |
+
 #### Lifecycle
 
 `detach()` closes the driver; `stop({force?})` also shuts the device down.
@@ -229,6 +238,7 @@ interface StepResult {
   artifacts: { screenshotBefore?, screenshotAfter?, viewHierarchy? }
   subSteps?: SubStep[]
   reportDir: string   // where artifacts for this session live
+  outputs?: string[]  // on a hub: files the step's output fields wrote (outputs/…), already fetched back
 }
 ```
 
@@ -298,6 +308,18 @@ hub, commands send no `?cwd=`, `run()`/`runYaml()` and `flow({yaml})`
 send no `cwd`, and `flow({file})` reads the file here and sends its YAML.
 The hub treats the script as a remote caller: `runShell` and host paths in
 steps are refused with `FORBIDDEN`.
+
+Files travel with the calls instead. A command's input files (`addMedia`,
+`runScript('x.js')`, an `assertScreenshot` reference, `uploadFile`, …) and
+`attach({appFile})` are packed by the maestro-d binary
+(`$MAESTRO_D_BIN`, the platform package, or `PATH`), uploaded when the hub
+lacks them, and sent as `blob:sha256:<hex>/<basename>` refs; bare values
+count (`addMedia('photo.png')`). A hub attaches no Appium driver:
+`driver: 'appium'`, `appiumUrl` and `extra.capsFile` are `FORBIDDEN`. Output files — `takeScreenshot({path})`,
+an `assertScreenshot` baseline the hub writes because you have none yet, a
+mismatch's `_diff.png` — are fetched back to the path you gave, relative
+to `cwd` or absolute. `pack(paths)` and `upload(...)` are exported for
+callers of the REST API.
 
 Over TCP (`hub` or `url`) every command, batch and flow carries an
 `X-Maestro-Request-Id`; a dropped connection, `PEER_UNAVAILABLE` or a

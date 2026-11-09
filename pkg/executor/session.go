@@ -101,6 +101,9 @@ type StepOutcome struct {
 	// Forbidden is set when the call's caller policy denied a step: the
 	// daemon reports it as FORBIDDEN.
 	Forbidden *PolicyDenial `json:"forbidden,omitempty"`
+	// Outputs name the files a remote call's output fields wrote, relative
+	// to the report directory (outputs/<path>), nested steps included.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // Err returns the outcome as a Go error (nil on success).
@@ -283,7 +286,16 @@ func (s *Session) Execute(ctx context.Context, step flow.Step) *StepOutcome {
 	defer s.mu.Unlock()
 	ctx, call, done := s.beginPolicy(ctx)
 	defer done()
-	return s.applyDenial(s.executeLocked(ctx, step), call)
+	return s.applyDenial(s.withOutputs(s.executeLocked(ctx, step), call), call)
+}
+
+// withOutputs records on out the files the call's policy wrote since the
+// last outcome.
+func (s *Session) withOutputs(out *StepOutcome, call *CallerPolicy) *StepOutcome {
+	if out != nil {
+		out.Outputs = append(out.Outputs, call.takeOutputs(s.OutputDir())...)
+	}
+	return out
 }
 
 // beginPolicy installs the caller policy carried by ctx (the daemon puts
@@ -339,7 +351,7 @@ func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnE
 			case <-ctx.Done():
 			}
 		}
-		out := s.applyDenial(s.executeLocked(ctx, step), call)
+		out := s.applyDenial(s.withOutputs(s.executeLocked(ctx, step), call), call)
 		outs = append(outs, out)
 		if out.Forbidden != nil {
 			break
@@ -365,7 +377,7 @@ func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
 	}
 	ctx, call, done := s.beginPolicy(ctx)
 	defer done()
-	return s.applyDenial(s.runFlowLocked(ctx, f), call)
+	return s.applyDenial(s.withOutputs(s.runFlowLocked(ctx, f), call), call)
 }
 
 func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {

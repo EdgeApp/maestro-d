@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
 )
 
 // fromAddr makes every request look as if it came from addr, as a TCP
@@ -153,24 +156,31 @@ func TestCaller_RemoteAttachRefusals(t *testing.T) {
 	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
 	ctx := context.Background()
 	cases := map[string]AttachConfig{
-		"web":         {Platform: "web"},
-		"web driver":  {Driver: "cdp"},
-		"outputDir":   {Platform: "mock", OutputDir: "/tmp/x"},
-		"flowDir":     {Platform: "mock", FlowDir: "/tmp/x"},
-		"appFile":     {Platform: "mock", AppFile: "/tmp/app.apk"},
-		"userDataDir": {Platform: "mock", Extra: map[string]any{"userDataDir": "/tmp/profile"}},
-		"browser":     {Platform: "mock", Extra: map[string]any{"browser": "/bin/sh"}},
-		"capsFile":    {Platform: "mock", Extra: map[string]any{"capsFile": "/tmp/caps.json"}},
+		"web":           {Platform: "web"},
+		"web driver":    {Driver: "cdp"},
+		"outputDir":     {Platform: "mock", OutputDir: "/tmp/x"},
+		"flowDir":       {Platform: "mock", FlowDir: "/tmp/x"},
+		"appFile":       {Platform: "mock", AppFile: "/tmp/app.apk"},
+		"userDataDir":   {Platform: "mock", Extra: map[string]any{"userDataDir": "/tmp/profile"}},
+		"browser":       {Platform: "mock", Extra: map[string]any{"browser": "/bin/sh"}},
+		"capsFile":      {Platform: "mock", Extra: map[string]any{"capsFile": "/tmp/caps.json"}},
+		"capsFile blob": {Platform: "mock", Extra: map[string]any{"capsFile": "blob:sha256:" + sha([]byte("{}")) + "/c.json"}},
+		"appium":        {Platform: "android", Driver: "Appium"},
+		"appiumUrl":     {Platform: "mock", AppiumURL: "http://10.0.0.9:4723"},
 	}
 	for name, cfg := range cases {
 		if _, err := env.remote.Attach(ctx, "mock-1", cfg); err == nil || codeOf(t, err) != CodeForbidden {
 			t.Errorf("%s: want FORBIDDEN, got %v", name, err)
 		}
 	}
-	// Blob refs pass the route check; the unix socket attaches web as today.
-	if _, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock", AppFile: "blob:sha256:" + strings.Repeat("0", 64) + "/a.apk",
-		Extra: map[string]any{"capsFile": "blob:sha256:" + strings.Repeat("1", 64) + "/c.json"}}); err != nil {
-		t.Fatalf("blob refs: %v", err)
+	// An uploaded app passes the route check; the unix socket attaches web
+	// as today.
+	app := []byte("PK\x03\x04")
+	if _, e := env.s.blobs.Put(sha(app), "", bytes.NewReader(app)); e != nil {
+		t.Fatal(e)
+	}
+	if _, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock", AppFile: "blob:sha256:" + sha(app) + "/a.apk"}); err != nil {
+		t.Fatalf("blob ref: %v", err)
 	}
 	if _, err := env.local.Attach(ctx, "mock-2", AttachConfig{Platform: "web"}); err != nil {
 		t.Fatalf("unix-socket web attach: %v", err)
@@ -334,5 +344,61 @@ func TestCallerHelpers(t *testing.T) {
 	s := New(Config{}, Deps{})
 	if !s.remoteTCP("garbage") || s.remoteTCP("127.0.0.1:1") || !s.remoteTCP("[2001:db8::1]:1") {
 		t.Fatal("remoteTCP")
+	}
+}
+
+// 5.harness-review.1: Appium capabilities name host files and programs, and
+// appiumUrl aims the daemon at any address, so a remote attach gets no
+// Appium; the route applies this only to remote callers.
+func TestCheckRemoteAttach_Appium(t *testing.T) {
+	blob := "blob:sha256:" + strings.Repeat("a", 64) + "/caps.json"
+	for _, tc := range []struct {
+		name  string
+		cfg   AttachConfig
+		field string
+	}{
+		{"driver appium", AttachConfig{Platform: "android", Driver: "appium"}, "driver"},
+		{"driver Appium", AttachConfig{Driver: "Appium"}, "driver"},
+		{"driver APPIUM padded", AttachConfig{Platform: "ios", Driver: " APPIUM "}, "driver"},
+		{"appiumUrl", AttachConfig{Platform: "android", AppiumURL: "http://127.0.0.1:4723"}, "appiumUrl"},
+		{"capsFile blob", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": blob}}, "extra.capsFile"},
+		{"capsFile path", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": "/tmp/caps.json"}}, "extra.capsFile"},
+		{"capsFile non-string", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": map[string]any{"appium:app": "/bin/sh"}}}, "extra.capsFile"},
+		{"no driver", AttachConfig{Platform: "android"}, ""},
+		{"uiautomator2", AttachConfig{Platform: "android", Driver: "uiautomator2"}, ""},
+		{"devicelab", AttachConfig{Platform: "ios", Driver: "devicelab"}, ""},
+		{"empty capsFile", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": ""}}, ""},
+	} {
+		e := checkRemoteAttach(&tc.cfg)
+		switch {
+		case tc.field == "" && e != nil:
+			t.Errorf("%s: refused: %v", tc.name, e)
+		case tc.field != "" && (e == nil || e.Code != CodeForbidden || e.Details["field"] != tc.field):
+			t.Errorf("%s: want FORBIDDEN on %s, got %+v", tc.name, tc.field, e)
+		}
+	}
+}
+
+// A unix-socket caller attaches with Appium as today: the route never
+// applies the remote check to it.
+func TestCaller_LocalAppiumAttach(t *testing.T) {
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	ctx := context.Background()
+	var got AttachConfig
+	next := env.s.deps.NewDriver
+	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
+		got = cfg
+		return next(ctx, id, cfg)
+	}
+	cfg := AttachConfig{Platform: "mock", Driver: "appium", AppiumURL: "http://127.0.0.1:4723",
+		Extra: map[string]any{"capsFile": "/tmp/caps.json"}}
+	if _, err := env.local.Attach(ctx, "mock-1", cfg); err != nil {
+		t.Fatalf("unix-socket Appium attach: %v", err)
+	}
+	if got.Driver != "appium" || got.AppiumURL != cfg.AppiumURL || got.Extra["capsFile"] != "/tmp/caps.json" {
+		t.Fatalf("driver got %+v", got)
+	}
+	if _, err := env.remote.Attach(ctx, "mock-2", cfg); codeOf(t, err) != CodeForbidden {
+		t.Fatalf("remote Appium attach: %v", err)
 	}
 }
