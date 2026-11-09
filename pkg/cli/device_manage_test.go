@@ -41,7 +41,7 @@ func newFakeDaemon(t *testing.T, f *fakeDaemon) *daemon.Client {
 		_ = json.NewEncoder(w).Encode(f.reply)
 	}))
 	t.Cleanup(hs.Close)
-	return daemon.NewHTTPClient(hs.URL, "")
+	return daemon.NewHTTPClient(hs.URL, "", nil)
 }
 
 func parseFor(t *testing.T, flags []dflag, args ...string) (*daemonOpts, []string) {

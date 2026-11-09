@@ -90,6 +90,7 @@ static attach(opts?: ConnectOptions & DeviceAttachOptions): Promise<MaestroDevic
 | `idleTimeout` | seconds idle before the spawned daemon exits (0 = never; default 1800) |
 | `http`, `token` | also listen on TCP (`127.0.0.1:7788`) with a bearer token |
 | `url`, `token` | connect to an existing TCP listener instead of the unix socket (nothing is spawned) |
+| `hub`, `token`, `ca` | connect to the daemon or hub on another machine: `'host[:port]'` (port 7433 by default), `'https://host[:port]'`, or `true` for `localhost:7433`. Nothing is spawned, `name` is ignored, and no working directory is sent (see below). `ca` is PEM text or a file path for a self-signed certificate. Defaults: `$MAESTRO_D_HUB`, `$MAESTRO_D_TOKEN`, `$MAESTRO_D_CA` |
 | `bin` | path to the binary (else `$MAESTRO_D_BIN`, the platform package, `PATH`) |
 | `startTimeout` | ms to wait for the daemon to come up (default 20000) |
 | `log` | `(line) => void` for "Starting daemon …" progress |
@@ -99,7 +100,8 @@ Instance:
 
 | member | |
 | --- | --- |
-| `name`, `info`, `started` | daemon name, its `daemon.json`, whether this call spawned it |
+| `name`, `info`, `started` | daemon name (the hub's URL for `hub`), its `daemon.json`, whether this call spawned it |
+| `hub` | true when connected with `hub` / `$MAESTRO_D_HUB` |
 | `status()` | daemon info plus the devices it has attached or booted |
 | `devices({platform?})` | connected devices, booted simulators/emulators, attached sessions |
 | `device(id)` | one device record (`DEVICE_NOT_FOUND`) |
@@ -204,7 +206,7 @@ the device record; `events({after?, signal})` streams this device's events.
 | option | |
 | --- | --- |
 | `wait: false` | return `BUSY` instead of queueing behind a step already running on this device |
-| `cwd` | directory relative paths in the step resolve against (default `process.cwd()`) |
+| `cwd` | directory relative paths in the step resolve against (default `process.cwd()`); not sent to a hub |
 | `signal` | `AbortSignal`; the step is cancelled on the device and the call rejects with `INTERRUPTED` |
 
 ### Results
@@ -260,9 +262,14 @@ class MaestroError extends Error {
 | `DEVICE_IN_USE` | 5 | 409 | another daemon has the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot, or `deleteDevice` on one maestro-d did not create |
 | `INTERRUPTED` | 130 | 499 | the `signal` fired |
+| `FORBIDDEN` | 2 | 403 | a remote caller asked for the daemon's host: `runShell`, a host path, `cwd`, a web attach |
+| `PEER_UNAVAILABLE` | 3 | 503 | hub mesh: the device's hub is unreachable (retried automatically) |
+| `HUB_NAME_TAKEN`, `HUB_VERSION` | 5 | 409 | hub mesh: a joining hub's name is taken, or its API version differs |
+| `LEASE_REQUIRED`, `LEASE_EXPIRED` | 5 | 409 | hub: the device's lease is missing or expired |
 
 `isMaestroError(err, code?)` narrows in a `catch`. `EXIT_CODES` and
-`HTTP_STATUS` export the table.
+`HTTP_STATUS` export the table, and `codeFromStatus(status)` the code for
+a response that has no envelope (`401` is `USAGE`, `403` `FORBIDDEN`).
 
 ### Environment
 
@@ -272,6 +279,30 @@ class MaestroError extends Error {
 | `MAESTRO_DEVICE` | default device id for `attach()` |
 | `MAESTRO_D_BIN` | path to the Go binary |
 | `MAESTRO_D_HOME` | run-file root (default `~/.maestro-d`); sockets, logs and reports live under `run/<name>/` |
+| `MAESTRO_D_HUB` | connect to this hub (`host[:port]`, `https://host[:port]`) when neither `hub` nor `url` is given |
+| `MAESTRO_D_TOKEN` | bearer token for `hub` / `url` when `token` is not given |
+| `MAESTRO_D_CA` | PEM file of trust roots for an https hub, when `ca` is not given |
+
+### Another machine: `hub`
+
+```js
+const md = await MaestroD.connect({ hub: '192.168.64.1', token: process.env.T })
+const dev = await md.attach({ device: '99FA590E-…' })
+await dev.launchApp('com.apple.Preferences')
+```
+
+Precedence: an explicit `hub` or `url` option, then `$MAESTRO_D_HUB`, then
+the local daemon — so a script that passes only `name`, such as
+`e2e/iosLandscape.e2e.ts`, follows `MAESTRO_D_HUB` unchanged. Against a
+hub, commands send no `?cwd=`, `run()`/`runYaml()` and `flow({yaml})`
+send no `cwd`, and `flow({file})` reads the file here and sends its YAML.
+The hub treats the script as a remote caller: `runShell` and host paths in
+steps are refused with `FORBIDDEN`.
+
+Over TCP (`hub` or `url`) every command, batch and flow carries an
+`X-Maestro-Request-Id`; a dropped connection, `PEER_UNAVAILABLE` or a
+gateway's 502/504 is retried up to 3 times with the same id, and the
+daemon runs each id once.
 
 ## Recipes
 

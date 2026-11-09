@@ -59,7 +59,7 @@ func newTestEnv(t *testing.T, stepDelay time.Duration) *testEnv {
 	env.s.info = Info{Name: env.s.cfg.Name, PID: os.Getpid(), APIVersion: APIVersion, Version: "test"}
 	hs := httptest.NewServer(env.s.Handler())
 	t.Cleanup(hs.Close)
-	env.c = NewHTTPClient(hs.URL, "")
+	env.c = NewHTTPClient(hs.URL, "", nil)
 	return env
 }
 
@@ -397,10 +397,24 @@ func TestServer_APIVersionAndToken(t *testing.T) {
 	hs := httptest.NewServer(s.routes(true))
 	defer hs.Close()
 
-	if _, err := NewHTTPClient(hs.URL, "").Status(context.Background()); codeOf(t, err) != CodeUsage {
+	if _, err := NewHTTPClient(hs.URL, "", nil).Status(context.Background()); codeOf(t, err) != CodeUsage {
 		t.Fatalf("expected USAGE (401), got %v", err)
 	}
-	if _, err := NewHTTPClient(hs.URL, "secret").Status(context.Background()); err != nil {
+	// A wrong token of the same length, a prefix and an extension are all
+	// refused (BearerAuthorized compares the whole header in constant time).
+	for _, tok := range []string{"secreT", "secre", "secrets"} {
+		if _, err := NewHTTPClient(hs.URL, tok, nil).Status(context.Background()); codeOf(t, err) != CodeUsage {
+			t.Fatalf("token %q: expected USAGE (401), got %v", tok, err)
+		}
+	}
+	if BearerAuthorized("secret", "secret") || !BearerAuthorized("Bearer secret", "secret") {
+		t.Fatal("BearerAuthorized wants the whole \"Bearer <token>\" header")
+	}
+	// A listener without a token lets every header through, none included.
+	if !BearerAuthorized("", "") || !BearerAuthorized("Bearer x", "") || BearerAuthorized("", "secret") {
+		t.Fatal("BearerAuthorized with and without a token")
+	}
+	if _, err := NewHTTPClient(hs.URL, "secret", nil).Status(context.Background()); err != nil {
 		t.Fatalf("with token: %v", err)
 	}
 	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/v1/status", nil)
@@ -511,10 +525,29 @@ func TestCodes_Table(t *testing.T) {
 		{"", 0, 200}, {CodeCommandFailed, 1, 422}, {CodeUsage, 2, 400}, {CodeDaemonUnavailable, 3, 503},
 		{CodeDeviceError, 4, 502}, {CodeBusy, 5, 409}, {CodeDeviceExternal, 5, 409}, {CodeDeviceInUse, 5, 409},
 		{CodeDeviceNotFound, 4, 404}, {CodeDeviceNotAttached, 2, 404}, {CodeInterrupted, 130, 499}, {CodeInternal, 4, 500},
+		{CodeForbidden, 2, 403}, {CodePeerUnavailable, 3, 503}, {CodeHubNameTaken, 5, 409}, {CodeHubVersion, 5, 409},
+		{CodeLeaseRequired, 5, 409}, {CodeLeaseExpired, 5, 409},
+	}
+	if len(cases)-1 != len(Codes) {
+		t.Fatalf("the table covers %d codes, Codes has %d", len(cases)-1, len(Codes))
 	}
 	for _, c := range cases {
 		if c.code.ExitCode() != c.exit || c.code.HTTPStatus() != c.http {
 			t.Errorf("%s: exit %d http %d", c.code, c.code.ExitCode(), c.code.HTTPStatus())
 		}
+	}
+	if Code("NEW_THING").ExitCode() != 4 || Code("NEW_THING").HTTPStatus() != 500 {
+		t.Error("unknown codes")
+	}
+	// CodeFromHTTPStatus inverts HTTPStatus where a status has one code;
+	// 401 (the token check) is USAGE and 403 FORBIDDEN.
+	for status, want := range map[int]Code{422: CodeCommandFailed, 400: CodeUsage, 401: CodeUsage, 403: CodeForbidden,
+		503: CodeDaemonUnavailable, 502: CodeDeviceError, 409: CodeBusy, 404: CodeDeviceNotFound, 418: CodeInternal} {
+		if got := CodeFromHTTPStatus(status); got != want {
+			t.Errorf("CodeFromHTTPStatus(%d) = %s, want %s", status, got, want)
+		}
+	}
+	if e := errorFromResponse(403, []byte("<html>forbidden</html>")); e.Code != CodeForbidden || e.ExitCode() != 2 {
+		t.Errorf("a bare 403: %+v", e)
 	}
 }

@@ -5,9 +5,11 @@ package cli
 // and exit codes across the command surface.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,11 +71,25 @@ type result struct {
 	code           int
 }
 
-func (e *e2e) run(args ...string) result {
-	e.t.Helper()
-	cmd := exec.Command(e.bin, args...)
-	cmd.Dir = e.cwd
-	cmd.Env = append(os.Environ(),
+// targetEnv are the variables that point a client at a TCP daemon or hub.
+// The harness drops them, so a targeting shell never reaches the cases
+// that test the local daemon; TestE2E_TargetHub sets them for itself.
+var targetEnv = []string{"MAESTRO_D_HUB", "MAESTRO_D_TOKEN", "MAESTRO_D_CA"}
+
+// env is the environment of every command the harness runs, plus extra.
+func (e *e2e) env(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		drop := false
+		for _, t := range targetEnv {
+			drop = drop || k == t
+		}
+		if !drop {
+			env = append(env, kv)
+		}
+	}
+	env = append(env,
 		daemon.EnvHome+"="+e.home,
 		daemon.EnvBin+"="+e.bin,
 		daemon.EnvName+"=",
@@ -81,8 +97,22 @@ func (e *e2e) run(args ...string) result {
 		"NO_COLOR=1",
 	)
 	if e.coverDir != "" {
-		cmd.Env = append(cmd.Env, "GOCOVERDIR="+e.coverDir)
+		env = append(env, "GOCOVERDIR="+e.coverDir)
 	}
+	return append(env, extra...)
+}
+
+func (e *e2e) run(args ...string) result {
+	e.t.Helper()
+	return e.runEnv(nil, args...)
+}
+
+// runEnv is run with extra environment variables.
+func (e *e2e) runEnv(extra []string, args ...string) result {
+	e.t.Helper()
+	cmd := exec.Command(e.bin, args...)
+	cmd.Dir = e.cwd
+	cmd.Env = e.env(extra...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -348,7 +378,7 @@ func TestE2E_AttachFailureAndInterrupt(t *testing.T) {
 	os.WriteFile(loop, []byte("while:\n  visible: Login\ncommands:\n  - tapOn: Login\n"), 0o644)
 	cmd := exec.Command(e.bin, "repeat", "--yaml", loop)
 	cmd.Dir = e.cwd
-	cmd.Env = append(os.Environ(), daemon.EnvHome+"="+e.home, daemon.EnvBin+"="+e.bin, daemon.EnvName+"=", daemon.EnvDevice+"=")
+	cmd.Env = e.env()
 	var errb bytes.Buffer
 	cmd.Stderr = &errb
 	if err := cmd.Start(); err != nil {
@@ -395,4 +425,113 @@ func TestE2E_DeviceManagementRefusals(t *testing.T) {
 		t.Errorf("--json puts the envelope on stdout:\n%s", r.stdout)
 	}
 	e.ok("stop")
+}
+
+func TestE2E_HarnessDropsTargetEnv(t *testing.T) {
+	t.Setenv("MAESTRO_D_HUB", "203.0.113.1:7433")
+	t.Setenv("MAESTRO_D_TOKEN", "parent-token")
+	t.Setenv("MAESTRO_D_CA", "/parent/ca.pem")
+	e := &e2e{t: t, home: t.TempDir(), bin: "maestro-d"}
+	for _, kv := range e.env() {
+		for _, k := range targetEnv {
+			if strings.HasPrefix(kv, k+"=") {
+				t.Fatalf("%s reached the harness environment", kv)
+			}
+		}
+	}
+	if env := e.env("MAESTRO_D_HUB=x"); env[len(env)-1] != "MAESTRO_D_HUB=x" {
+		t.Fatal("a case can still set it for itself")
+	}
+}
+
+// TestE2E_TargetHub drives a TCP daemon (serve --http --token) with
+// one-shots through MAESTRO_D_HUB and --target-hub, and checks that no
+// local daemon is spawned.
+func TestE2E_TargetHub(t *testing.T) {
+	e := newE2E(t)
+	serve := exec.Command(e.bin, "serve", "--daemon", "th", "--http", "127.0.0.1:0", "--token", "e2e-token", "--idle-timeout", "0")
+	serve.Dir = e.cwd
+	serve.Env = e.env()
+	stdout, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve.Stdout = w
+	if err := serve.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	// Reap it as soon as it exits, so `stop` sees it gone.
+	exited := make(chan struct{})
+	go func() { _ = serve.Wait(); close(exited) }()
+	t.Cleanup(func() {
+		_ = serve.Process.Kill()
+		<-exited
+	})
+	addr := ""
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		if line := sc.Text(); strings.HasPrefix(line, "READY") {
+			for _, f := range strings.Fields(line) {
+				if strings.HasPrefix(f, "http=") {
+					addr = strings.TrimPrefix(f, "http=")
+				}
+			}
+			break
+		}
+	}
+	if addr == "" {
+		t.Fatal("serve printed no READY line with an http address")
+	}
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+	hub := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=e2e-token"}
+
+	// MAESTRO_D_HUB and MAESTRO_D_TOKEN target the TCP daemon.
+	r := e.runEnv(hub, "tapOn", "Login", "--device", "mock-1", "--platform", "mock")
+	if r.code != 0 || !strings.Contains(r.stdout, "✓ tapOn") || strings.Contains(r.stderr, "Started daemon") {
+		t.Fatalf("targeted tapOn: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	// --target-hub=ADDR and --token on the line do the same; tapOn's text
+	// after a bare flag is still the text.
+	r = e.ok("tapOn", "--target-hub="+addr, "--token", "e2e-token", "Login")
+	if !strings.Contains(r.stdout, `text="Login"`) {
+		t.Fatalf("stdout: %s", r.stdout)
+	}
+	r = e.ok("status", "--target-hub="+addr, "--token", "e2e-token", "--json")
+	if !strings.Contains(r.stdout, `"name": "th"`) {
+		t.Fatalf("status: %s", r.stdout)
+	}
+	e.ok("device", "list", "--target-hub="+addr, "--token", "e2e-token")
+	// A step list runs from its YAML; the file stays on the client.
+	steps := filepath.Join(e.cwd, "remote-steps.yaml")
+	_ = os.WriteFile(steps, []byte("- tapOn: One\n- tapOn: Two\n"), 0o644)
+	r = e.runEnv(hub, "run", steps)
+	if r.code != 0 || !strings.Contains(r.stdout, "2 passed") {
+		t.Fatalf("run: %s%s", r.stdout, r.stderr)
+	}
+	flowFile := filepath.Join(e.cwd, "remote-flow.yaml")
+	_ = os.WriteFile(flowFile, []byte("appId: com.example\n---\n- tapOn: ${USER}\n"), 0o644)
+	r = e.runEnv(hub, "run", flowFile, "-e", "USER=carol")
+	if r.code != 0 || !strings.Contains(r.stdout, "carol") {
+		t.Fatalf("run flow: %s%s", r.stdout, r.stderr)
+	}
+
+	// Without the token: 401 → USAGE, exit 2.
+	r = e.fails(2, "tapOn", "Login", "--target-hub="+addr)
+	if envelopeCode(t, r.stderr) != daemon.CodeUsage || !strings.Contains(r.stderr, "bearer token") {
+		t.Fatalf("no token: %s", r.stderr)
+	}
+	// Unreachable: exit 3, and nothing is spawned.
+	r = e.fails(3, "tapOn", "Login", "--target-hub=127.0.0.1:1", "--token", "x")
+	if envelopeCode(t, r.stderr) != daemon.CodeDaemonUnavailable {
+		t.Fatal("expected DAEMON_UNAVAILABLE")
+	}
+	// --output-dir names a directory on the daemon's host.
+	e.fails(2, "tapOn", "Login", "--target-hub="+addr, "--token", "e2e-token", "--output-dir", "/tmp/x")
+
+	r = e.ok("ps", "--json")
+	if strings.Contains(r.stdout, `"name": "default"`) || !strings.Contains(r.stdout, `"name": "th"`) {
+		t.Fatalf("a targeted command spawned a local daemon:\n%s", r.stdout)
+	}
+	e.ok("stop", "--daemon", "th")
 }

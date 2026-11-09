@@ -60,7 +60,34 @@ const (
 	CodeInterrupted Code = "INTERRUPTED"
 	// CodeInternal: a bug in the daemon. Exit 4 / HTTP 500.
 	CodeInternal Code = "INTERNAL"
+	// CodeForbidden: a remote caller asked for something only a local
+	// caller may do — a host path, runShell, ?cwd=, a web attach. Exit 2 /
+	// HTTP 403; details name the denied step and field.
+	CodeForbidden Code = "FORBIDDEN"
+	// CodePeerUnavailable: the hub that owns the device cannot be reached
+	// over the mesh. Exit 3 / HTTP 503; details.hub names it. Clients retry
+	// it with the same request id.
+	CodePeerUnavailable Code = "PEER_UNAVAILABLE"
+	// CodeHubNameTaken: a peer's hello used a name already in the mesh.
+	// Exit 5 / HTTP 409.
+	CodeHubNameTaken Code = "HUB_NAME_TAKEN"
+	// CodeHubVersion: a peer speaks another API version. Exit 5 / HTTP 409.
+	CodeHubVersion Code = "HUB_VERSION"
+	// CodeLeaseRequired: a mutating request on a hub without the device's
+	// lease. Exit 5 / HTTP 409.
+	CodeLeaseRequired Code = "LEASE_REQUIRED"
+	// CodeLeaseExpired: the request's lease has expired or was released.
+	// Exit 5 / HTTP 409.
+	CodeLeaseExpired Code = "LEASE_EXPIRED"
 )
+
+// Codes lists every code, for tables and tests.
+var Codes = []Code{
+	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
+	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
+	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired,
+}
 
 // ExitCode returns the CLI exit status for the code.
 func (c Code) ExitCode() int {
@@ -69,13 +96,13 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached:
+	case CodeUsage, CodeDeviceNotAttached, CodeForbidden:
 		return 2
-	case CodeDaemonUnavailable:
+	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
 	case CodeDeviceError, CodeDeviceNotFound, CodeInternal:
 		return 4
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse:
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
 		return 5
 	case CodeInterrupted:
 		return 130
@@ -92,11 +119,13 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeUsage:
 		return http.StatusBadRequest
-	case CodeDaemonUnavailable:
+	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeDeviceError:
 		return http.StatusBadGateway
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse:
+	case CodeForbidden:
+		return http.StatusForbidden
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
 		return http.StatusConflict
 	case CodeDeviceNotFound, CodeDeviceNotAttached:
 		return http.StatusNotFound
@@ -113,8 +142,10 @@ func CodeFromHTTPStatus(status int) Code {
 	switch status {
 	case http.StatusUnprocessableEntity:
 		return CodeCommandFailed
-	case http.StatusBadRequest:
+	case http.StatusBadRequest, http.StatusUnauthorized:
 		return CodeUsage
+	case http.StatusForbidden:
+		return CodeForbidden
 	case http.StatusServiceUnavailable:
 		return CodeDaemonUnavailable
 	case http.StatusBadGateway:
@@ -242,7 +273,16 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		SubSteps:   o.SubSteps,
 		ReportDir:  reportDir,
 	}
-	if o.Error != nil {
+	if o.Forbidden != nil {
+		d := o.Forbidden
+		details := map[string]any{"reason": d.Reason}
+		for k, v := range map[string]string{"step": d.Step, "command": d.Command, "field": d.Field, "path": d.Path} {
+			if v != "" {
+				details[k] = v
+			}
+		}
+		r.Error = &ErrorBody{Code: CodeForbidden, Message: d.Reason, Step: o.Description, Details: details}
+	} else if o.Error != nil {
 		body := &ErrorBody{Code: CodeCommandFailed, Message: o.Error.Message, Step: o.Description}
 		if o.Panicked {
 			body.Code = CodeDeviceError
@@ -507,6 +547,8 @@ type Info struct {
 	ReportsDir string   `json:"reportsDir"`
 	// IdleTimeout is in seconds; 0 = never.
 	IdleTimeout int `json:"idleTimeout"`
+	// TLS is true when the TCP listener serves HTTPS.
+	TLS bool `json:"tls,omitempty"`
 }
 
 // Event is one entry on the /v1/events stream.

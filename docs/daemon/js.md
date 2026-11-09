@@ -24,6 +24,15 @@ reference: installation, the `MaestroD` / `MaestroDevice` API, result
 and error shapes, `CallOptions` (`signal`, `wait`, `cwd`), events and
 recipes. This page covers how it fits with the rest of the fork.
 
+`MaestroD.connect({hub: 'host[:port]' | true, token, ca})` (or
+`$MAESTRO_D_HUB`, `$MAESTRO_D_TOKEN`, `$MAESTRO_D_CA`) talks to a daemon
+on another machine over TCP or TLS, the counterpart of the CLI's
+`--target-hub`: nothing is spawned, no working directory is sent, and the
+daemon applies its [remote-caller](rest.md#remote-callers) rules. Over TCP
+step-running calls carry request ids and are retried with the same id
+after a dropped connection; see
+[request ids](rest.md#request-ids-and-retries).
+
 Device management maps one to one onto the REST routes: `catalog()` is
 `GET /v1/catalog`, `createDevice()` is `POST /v1/devices` with `create`,
 `startDevice()` (whose `platform` may be left out for `avd:<name>` and for

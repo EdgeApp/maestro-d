@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
@@ -29,8 +32,20 @@ type Config struct {
 	Name string
 	// HTTPAddr optionally opens a TCP listener (127.0.0.1:port).
 	HTTPAddr string
-	// Token, when set, is required as `Authorization: Bearer` on TCP.
+	// Token, when set, is required as `Authorization: Bearer` on TCP. A
+	// listener beyond loopback, and any hub, refuses to start without one.
 	Token string
+	// TLSCert and TLSKey make the TCP listener serve HTTPS.
+	TLSCert, TLSKey string
+	// Hub makes every TCP caller remote, loopback included: only the unix
+	// socket is local. (`hub start` sets it.)
+	Hub bool
+	// AllowRemoteShell lets remote callers run runShell.
+	AllowRemoteShell bool
+	// PassEnv names the variables of the daemon's own environment that
+	// sessions import when the daemon does not import its environment
+	// (a hub, or a listener beyond loopback).
+	PassEnv []string
 	// IdleTimeout shuts the daemon down after this much inactivity; 0
 	// disables it.
 	IdleTimeout time.Duration
@@ -50,6 +65,9 @@ type Server struct {
 	registry *Registry
 	events   *EventBus
 	idle     *idleTimer
+	idem     *idemCache
+	// idemGrace: how long a dropped TCP request waits for its retry.
+	idemGrace time.Duration
 
 	mu       sync.Mutex
 	attached map[string]*attached
@@ -78,6 +96,8 @@ func New(cfg Config, deps Deps) *Server {
 		deps:      deps,
 		registry:  NewRegistry(cfg.Name, deps.ListDevices),
 		events:    NewEventBus(0),
+		idem:      newIdemCache(),
+		idemGrace: idemGrace,
 		attached:  map[string]*attached{},
 		attaching: map[string]chan struct{}{},
 		done:      make(chan struct{}),
@@ -96,12 +116,45 @@ func (s *Server) Registry() *Registry { return s.registry }
 // Handler returns the HTTP handler (for tests and the unix socket).
 func (s *Server) Handler() http.Handler { return s.routes(false) }
 
+// TCPHandler returns the handler the TCP listener serves: bearer-token
+// checked, and with remote callers told apart from local ones.
+func (s *Server) TCPHandler() http.Handler { return s.routes(true) }
+
+// checkListen refuses a TCP listener that would let anyone in: a hub, or a
+// --http address beyond loopback, needs a token; TLS needs both files.
+func (s *Server) checkListen() *Error {
+	if s.cfg.HTTPAddr == "" {
+		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
+			return Errorf(CodeUsage, "--tls-cert/--tls-key need a TCP listener (--http)")
+		}
+		return nil
+	}
+	if s.cfg.Token == "" && (s.cfg.Hub || !isLoopbackListen(s.cfg.HTTPAddr)) {
+		return Errorf(CodeUsage, "listening on %s, beyond loopback, needs --token (MAESTRO_D_TOKEN)", s.cfg.HTTPAddr)
+	}
+	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
+		return Errorf(CodeUsage, "--tls-cert and --tls-key go together")
+	}
+	return nil
+}
+
 // Run listens on the unix socket (and TCP when configured), writes
 // daemon.json, and blocks until the daemon shuts down. Signals SIGINT and
 // SIGTERM trigger a graceful shutdown.
 func (s *Server) Run(ctx context.Context) error {
 	if err := ValidateName(s.cfg.Name); err != nil {
 		return err
+	}
+	if e := s.checkListen(); e != nil {
+		return e
+	}
+	var tlsConfig *tls.Config
+	if s.cfg.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			return Errorf(CodeUsage, "load --tls-cert/--tls-key: %v", err)
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 	if live, _ := LiveInfo(s.cfg.Name); live != nil {
 		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
@@ -134,6 +187,9 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
 		httpAddr = tcpLn.Addr().String()
+		if tlsConfig != nil {
+			tcpLn = tls.NewListener(tcpLn, tlsConfig)
+		}
 		s.listeners = append(s.listeners, tcpLn)
 		s.servers = append(s.servers, &http.Server{Handler: s.routes(true)})
 	}
@@ -151,6 +207,7 @@ func (s *Server) Run(ctx context.Context) error {
 		RunDir:      RunDir(s.cfg.Name),
 		ReportsDir:  s.cfg.ReportsDir,
 		IdleTimeout: int(s.cfg.IdleTimeout / time.Second),
+		TLS:         tlsConfig != nil,
 	}
 	if err := WriteInfo(&s.info); err != nil {
 		return err
@@ -173,7 +230,10 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	logger.Info("maestro-d %q ready: socket=%s http=%s idle=%v", s.cfg.Name, sockPath, httpAddr, s.cfg.IdleTimeout)
+	logger.Info("maestro-d %q ready: socket=%s http=%s tls=%t idle=%v", s.cfg.Name, sockPath, httpAddr, tlsConfig != nil, s.cfg.IdleTimeout)
+	if httpAddr != "" && !s.importsEnv() {
+		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
+	}
 	if s.cfg.Ready != nil {
 		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
 	}
@@ -257,9 +317,9 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("POST /v1/devices/{id}/attach", s.handleAttach)
 	mux.HandleFunc("POST /v1/devices/{id}/detach", s.handleDetach)
 	mux.HandleFunc("GET /v1/devices/{id}", s.handleGetDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", s.handleCommand)
-	mux.HandleFunc("POST /v1/devices/{id}/steps", s.handleSteps)
-	mux.HandleFunc("POST /v1/devices/{id}/flows", s.handleFlow)
+	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", s.idempotent(s.handleCommand))
+	mux.HandleFunc("POST /v1/devices/{id}/steps", s.idempotent(s.handleSteps))
+	mux.HandleFunc("POST /v1/devices/{id}/flows", s.idempotent(s.handleFlow))
 	mux.HandleFunc("GET /v1/devices/{id}/screenshot", s.handleScreenshot)
 	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", s.handleHierarchy)
 	mux.HandleFunc("GET /v1/devices/{id}/state", s.handleState)
@@ -274,14 +334,22 @@ func (s *Server) routes(tcp bool) http.Handler {
 	return s.middleware(mux, tcp)
 }
 
+// BearerAuthorized reports whether an Authorization header is let through
+// a TCP listener whose bearer token is token: every header when token is
+// empty (a listener without a token, which checkListen allows only on a
+// loopback address of a plain daemon), else exactly "Bearer <token>",
+// compared in constant time. The daemon and the hub mesh's router both
+// check with it.
+func BearerAuthorized(header, token string) bool {
+	return token == "" || subtle.ConstantTimeCompare([]byte(header), []byte("Bearer "+token)) == 1
+}
+
 func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tcp && s.cfg.Token != "" {
-			if r.Header.Get("Authorization") != "Bearer "+s.cfg.Token {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				writeErrorStatus(w, http.StatusUnauthorized, Errorf(CodeUsage, "missing or invalid bearer token"))
-				return
-			}
+		if tcp && !BearerAuthorized(r.Header.Get("Authorization"), s.cfg.Token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeErrorStatus(w, http.StatusUnauthorized, Errorf(CodeUsage, "missing or invalid bearer token"))
+			return
 		}
 		if s.shuttingDown.Load() && r.URL.Path != "/v1/status" {
 			writeError(w, Errorf(CodeDaemonUnavailable, "daemon %q is shutting down", s.cfg.Name))
@@ -293,6 +361,9 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 		}
 		s.idle.Touch()
 		w.Header().Set("X-Maestro-Api-Version", APIVersion)
+		if tcp {
+			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr}))
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -447,6 +518,13 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 	if e := decodeBody(r, &cfg); e != nil {
 		writeError(w, e)
 		return
+	}
+	if CallerFrom(r.Context()).Remote {
+		if e := checkRemoteAttach(&cfg); e != nil {
+			s.logForbidden(r, e)
+			writeError(w, e)
+			return
+		}
 	}
 	a, e := s.ensureAttached(r.Context(), id, &cfg)
 	if e != nil {
@@ -604,6 +682,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cwd := r.URL.Query().Get("cwd")
+	if cwd != "" && CallerFrom(r.Context()).Remote {
+		e := forbidden("?cwd= names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
 	src := "request"
 	if cwd != "" {
 		src = filepath.Join(cwd, "request.yaml")
@@ -623,7 +707,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	res := ResultFromOutcome(a.id, a.reportDir, out)
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -635,6 +719,12 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	}
 	var req StepsRequest
 	if e := decodeBody(r, &req); e != nil {
+		writeError(w, e)
+		return
+	}
+	if req.Cwd != "" && CallerFrom(r.Context()).Remote {
+		e := forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.logForbidden(r, e)
 		writeError(w, e)
 		return
 	}
@@ -657,7 +747,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	res := StepsResultFrom(a.id, results)
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -671,6 +761,20 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	if e := decodeBody(r, &req); e != nil {
 		writeError(w, e)
 		return
+	}
+	if CallerFrom(r.Context()).Remote {
+		var e *Error
+		switch {
+		case req.Cwd != "":
+			e = forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		case req.File != "":
+			e = forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (yaml)", req.File).WithDetails("field", "file")
+		}
+		if e != nil {
+			s.logForbidden(r, e)
+			writeError(w, e)
+			return
+		}
 	}
 	var f *flow.Flow
 	var err error
@@ -713,7 +817,7 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	res := ResultFromOutcome(a.id, a.reportDir, out)
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -721,9 +825,24 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 // runCtx is the context a step runs under: cancelled when the client goes
 // away or the daemon shuts down.
 func (s *Server) runCtx(r *http.Request, a *attached) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(executor.WithCallerPolicy(r.Context(), s.callerPolicy(r.Context(), a)))
 	stop := context.AfterFunc(a.baseCtx(), cancel)
 	return ctx, func() { stop(); cancel() }
+}
+
+// stepStatus is the HTTP status of a step result, logging a policy denial.
+func (s *Server) stepStatus(r *http.Request, res *Error) int {
+	if res == nil {
+		return http.StatusOK
+	}
+	if res.Code == CodeForbidden {
+		s.logForbidden(r, res)
+	}
+	return res.Code.HTTPStatus()
+}
+
+func (s *Server) logForbidden(r *http.Request, e *Error) {
+	logger.Info("FORBIDDEN %s %s from %s: %s", r.Method, r.URL.Path, describeCaller(CallerFrom(r.Context())), e.Message)
 }
 
 // ---------------------------------------------------------------------------

@@ -207,7 +207,7 @@ func startMgmtServer(t *testing.T, host *fakeHost) *mgmtEnv {
 	}
 	hs := httptest.NewServer(s.Handler())
 	t.Cleanup(hs.Close)
-	return &mgmtEnv{t: t, host: host, s: s, c: NewHTTPClient(hs.URL, "")}
+	return &mgmtEnv{t: t, host: host, s: s, c: NewHTTPClient(hs.URL, "", nil)}
 }
 
 func wantCode(t *testing.T, err error, code Code, contains ...string) {

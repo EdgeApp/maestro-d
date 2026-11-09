@@ -119,12 +119,52 @@ step and leaves both in place for the next command. If the device is already
 attached, attach flags are ignored (a warning goes to stderr when `--app-id`
 differs from the one in effect; `detach` and `attach` again to change them).
 
+### Another machine's daemon: `--target-hub`
+
+Every client command — the one-shots, `run`, `device …`, `attach`,
+`detach`, `get`, `set`, `eval` and `status` — also takes:
+
+| flag | |
+| --- | --- |
+| `--target-hub[=HOST[:PORT]]` | talk to the daemon at `HOST:PORT` over TCP instead of the local one (default `$MAESTRO_D_HUB`). Bare means `localhost:7433`; the port defaults to 7433; `https://HOST[:PORT]` uses TLS |
+| `--token T` | the bearer token it requires (default `$MAESTRO_D_TOKEN`) |
+| `--ca FILE` | a PEM trust root for a daemon with a self-signed certificate (default `$MAESTRO_D_CA`) |
+
+The value must be joined with `=`: the flag never takes the next word, so
+in `maestro-d tapOn --target-hub Login`, `Login` is still the text to tap
+(and the daemon is `localhost:7433`).
+
+```sh
+# on the device's machine
+maestro-d serve --daemon shared --http 0.0.0.0:7433 --token "$T" &
+# anywhere on the network
+export MAESTRO_D_TOKEN=$T
+maestro-d device list --target-hub=192.168.64.1
+maestro-d launchApp com.apple.Preferences --target-hub=192.168.64.1 --device "$UDID"
+maestro-d get screenshot --target-hub=192.168.64.1 --device "$UDID" --out shot.png
+```
+
+A targeted command never starts a daemon; an unreachable one exits 3
+(`DAEMON_UNAVAILABLE`), and a missing or wrong token exits 2 (`USAGE`).
+It sends no working directory, and `run FILE` sends the file's YAML rather
+than its path, because the daemon is on another machine. That daemon treats
+a caller from beyond loopback as **remote**: `runShell` and host paths in
+steps are refused with `FORBIDDEN` (exit 2) — see
+[remote callers](rest.md#remote-callers). For the same reason a targeted
+command refuses `--output-dir` and `--user-data-dir` (`USAGE`), and ignores
+an `--output-dir` that came only from `MAESTRO_OUTPUT`, with a note on
+stderr.
+
+Over TCP every step-running request carries a request id, and the CLI
+retries a dropped connection with the same id up to 3 times (0.5 s, 1 s,
+2 s); the daemon runs each id once. `--verbose` prints each retry.
+
 ## Daemon lifecycle
 
 | command | |
 | --- | --- |
 | `start [--http ADDR --token T] [--idle-timeout N] [attach flags]` | start the named daemon in the background if it is not running; with `--device` also attach |
-| `serve` | run the daemon in the foreground (what `start` spawns; useful under a supervisor) |
+| `serve [--http ADDR --token T] [--tls-cert F --tls-key F] [--pass-env NAME …]` | run the daemon in the foreground (what `start` spawns; useful under a supervisor). `--tls-cert`/`--tls-key` serve HTTPS on `--http`. An `--http` address beyond loopback needs `--token`, and sessions then import none of this process's environment except each `--pass-env NAME` |
 | `status` | daemon pid, version, socket, report dir, idle deadline and its devices; exit 3 when not running |
 | `ps` | every daemon of this user (running or stale) with the devices it holds |
 | `stop [--all] [--timeout N]` | detach every device, shut down the simulators/emulators the daemon booted, exit |
@@ -210,6 +250,10 @@ maestro-d eval 'maestro.copiedText'
 | `MAESTRO_DEVICE` | default `--device` |
 | `MAESTRO_D_HOME` | run-file root: sockets, logs, reports (default `~/.maestro-d`) |
 | `MAESTRO_D_BIN` | binary to spawn as the daemon (default: this executable) |
+| `MAESTRO_D_HUB` | default `--target-hub` (a TCP daemon or hub to talk to instead of the local one) |
+| `MAESTRO_D_TOKEN` | default `--token` |
+| `MAESTRO_D_CA` | default `--ca` |
+| `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `serve --tls-cert`/`--tls-key` |
 | `MAESTRO_RUNNER_HOME` | install home: `bin/`, `drivers/`, `cache/`, `browsers/` (default: the parent of the binary's `bin/`, i.e. `~/.maestro-d`). Upstream's variable, upstream's name |
 
 ## Recipes

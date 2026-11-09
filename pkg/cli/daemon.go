@@ -98,8 +98,13 @@ func printJSONStdout(v any) {
 	printJSON(os.Stdout, v)
 }
 
-// connectDaemon dials the named daemon, spawning it unless --no-spawn.
+// connectDaemon dials the named daemon, spawning it unless --no-spawn. With
+// --target-hub (or MAESTRO_D_HUB) it returns a TCP client for that daemon
+// or hub instead, and never spawns.
 func connectDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
+	if o.Target != "" {
+		return connectTarget(o)
+	}
 	opts := daemon.SpawnOptions{
 		NoSpawn:      !spawn || o.NoSpawn,
 		IdleTimeout:  o.IdleTimeout,
@@ -141,10 +146,10 @@ func resolveDevice(ctx context.Context, c *daemon.Client, o *daemonOpts) (string
 	case 1:
 		return attached[0], nil
 	case 0:
-		return "", daemon.Errorf(daemon.CodeUsage, "no device attached to daemon %q; pass --device ID (and --platform / --team-id … for the first command)", o.Name)
+		return "", daemon.Errorf(daemon.CodeUsage, "no device attached to %s; pass --device ID (and --platform / --team-id … for the first command)", targetLabel(o))
 	}
-	return "", daemon.Errorf(daemon.CodeUsage, "daemon %q has %d devices attached; pass --device one of: %s",
-		o.Name, len(attached), strings.Join(attached, ", "))
+	return "", daemon.Errorf(daemon.CodeUsage, "%s has %d devices attached; pass --device one of: %s",
+		targetLabel(o), len(attached), strings.Join(attached, ", "))
 }
 
 // ensureAttached attaches the device with the invocation's flags when the
@@ -500,7 +505,17 @@ API (--http), or to attach a device up front:
 	}),
 }
 
-var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4])
+var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
+	strFlag("tls-cert", "Serve HTTPS on --http with this PEM certificate (with --tls-key)", []string{"MAESTRO_D_TLS_CERT"},
+		func(o *daemonOpts, v string) { o.TLSCert = v }),
+	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
+		func(o *daemonOpts, v string) { o.TLSKey = v }),
+	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import when --http listens beyond loopback (repeatable); no other one is imported",
+		apply: func(o *daemonOpts, v string) error {
+			o.PassEnv = append(o.PassEnv, v)
+			return nil
+		}},
+})
 
 var daemonServeCommand = &cli.Command{
 	Name:            "serve",
@@ -528,6 +543,9 @@ var daemonServeCommand = &cli.Command{
 			Name:        o.Name,
 			HTTPAddr:    o.HTTPAddr,
 			Token:       o.Token,
+			TLSCert:     o.TLSCert,
+			TLSKey:      o.TLSKey,
+			PassEnv:     o.PassEnv,
 			IdleTimeout: idle,
 			ReportsDir:  daemon.ReportsDir(o.Name),
 			StartArgs:   os.Args[1:],
@@ -610,7 +628,7 @@ var daemonStopCommand = &cli.Command{
 	}),
 }
 
-var statusFlags = flagSet(daemonSelectFlags)
+var statusFlags = flagSet(daemonSelectFlags, targetFlags)
 
 var daemonStatusCommand = &cli.Command{
 	Name:            "status",
@@ -619,7 +637,13 @@ var daemonStatusCommand = &cli.Command{
 	Description:     flagsDoc("", statusFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(statusFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-		client, err := daemon.Dial(o.Name)
+		var client *daemon.Client
+		var err error
+		if o.Target != "" {
+			client, err = connectTarget(o)
+		} else {
+			client, err = daemon.Dial(o.Name)
+		}
 		if err != nil {
 			return err
 		}
@@ -638,7 +662,11 @@ var daemonStatusCommand = &cli.Command{
 		fmt.Printf("daemon %q: pid %d, version %s, up since %s\n", d.Name, d.PID, d.Version, d.StartedAt)
 		fmt.Printf("  socket:  %s\n", d.SocketPath)
 		if d.HTTPAddr != "" {
-			fmt.Printf("  http:    http://%s\n", d.HTTPAddr)
+			scheme := "http"
+			if d.TLS {
+				scheme = "https"
+			}
+			fmt.Printf("  %-8s %s://%s\n", scheme+":", scheme, d.HTTPAddr)
 		}
 		fmt.Printf("  reports: %s\n", d.ReportsDir)
 		if d.IdleTimeout > 0 {
@@ -702,11 +730,11 @@ var daemonPsCommand = &cli.Command{
 }
 
 var (
-	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1])
-	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], []dflag{
+	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags)
+	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
 		intFlag("boot-timeout", "Seconds to wait for boot (default 180)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
-	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], []dflag{
+	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
 		boolFlag("force", "Shut down even if the daemon did not boot it", nil, func(o *daemonOpts, v bool) { o.force = v }),
 		boolFlag("orphans", "Shut down devices left behind by dead daemons", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
 	})
@@ -827,7 +855,7 @@ daemons that are no longer alive.`, deviceStopFlags),
 	},
 }
 
-var attachCmdFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags)
+var attachCmdFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags)
 
 var daemonAttachCommand = &cli.Command{
 	Name:      "attach",
@@ -865,7 +893,7 @@ explicitly to control the flags or to pay the driver start-up cost early.
 	}),
 }
 
-var detachFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag), []dflag{
+var detachFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag), targetFlags, []dflag{
 	boolFlag("all", "Detach every device", nil, func(o *daemonOpts, v bool) { o.stopAll = v }),
 })
 
@@ -916,7 +944,7 @@ var daemonDetachCommand = &cli.Command{
 	}),
 }
 
-var runFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, []dflag{
+var runFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags, []dflag{
 	boolFlag("continue-on-error", "Keep running remaining steps after a failure (step lists only)", nil, func(o *daemonOpts, v bool) { o.force = v }),
 })
 
@@ -953,6 +981,16 @@ reflects the first failure. '-' reads stdin.
 		if err != nil {
 			return err
 		}
+		if o.Target != "" {
+			// The file is on this machine, not the target's: send its YAML,
+			// with no working directory (a remote caller may not name one).
+			if isStepList(data) {
+				res, err := client.Steps(ctx, id, daemon.StepsRequest{YAML: string(data), ContinueOnError: o.force}, !o.NoWait)
+				return emitSteps(o, res, err)
+			}
+			res, err := client.Flow(ctx, id, daemon.FlowRequest{YAML: string(data), Env: o.Attach.Env}, !o.NoWait)
+			return emitStep(o, res, err)
+		}
 		if isStepList(data) {
 			res, err := client.Steps(ctx, id, daemon.StepsRequest{YAML: string(data), ContinueOnError: o.force, Cwd: cwd}, !o.NoWait)
 			return emitSteps(o, res, err)
@@ -981,7 +1019,7 @@ func isStepList(data []byte) bool {
 	return node.Kind == yaml.SequenceNode && !strings.Contains(string(data), "\n---")
 }
 
-var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, []dflag{
+var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags, []dflag{
 	strFlag("out", "Write the screenshot to this file (default screenshot-<time>.png; '-' for stdout)", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
 	boolFlag("raw", "Hierarchy as the driver's raw XML/JSON instead of the normalized tree", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	boolFlag("compact", "Hierarchy as a flat, greppable listing (as `hierarchy --compact`)", nil, func(o *daemonOpts, v bool) { o.compact = v }),
@@ -1091,7 +1129,7 @@ var daemonGetCommand = &cli.Command{
 	}),
 }
 
-var setFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags)
+var setFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags)
 
 var daemonSetCommand = &cli.Command{
 	Name:            "set",
@@ -1126,7 +1164,7 @@ var daemonSetCommand = &cli.Command{
 	}),
 }
 
-var evalFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags)
+var evalFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags)
 
 var daemonEvalCommand = &cli.Command{
 	Name:      "eval",

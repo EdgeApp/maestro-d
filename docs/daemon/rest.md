@@ -9,6 +9,7 @@ of it; anything that can speak HTTP can drive a device the same way.
 | --- | --- | --- |
 | unix socket | always | `~/.maestro-d/run/<name>/daemon.sock` (`$MAESTRO_D_HOME` overrides the root) |
 | TCP | daemon started with `--http ADDR` | `http://ADDR`, with `Authorization: Bearer <token>` when `--token` was given |
+| TCP + TLS | `serve --http ADDR --tls-cert F --tls-key F` | `https://ADDR`; a self-signed certificate needs its trust root on the client (`--ca`, `ca`) |
 
 ```sh
 maestro-d start --daemon api --http 127.0.0.1:7788 --token s3cret
@@ -24,7 +25,11 @@ Two headers matter:
   with `DAEMON_UNAVAILABLE`. Every response carries it.
 - `Authorization: Bearer <token>` — required on TCP when the daemon has a
   token; never checked on the unix socket (file permissions do that).
-  A missing or wrong token is `401` with a `USAGE` body.
+  A missing or wrong token is `401` with a `USAGE` body. A daemon whose
+  `--http` address reaches beyond loopback (`0.0.0.0:7433`, a LAN address)
+  refuses to start without `--token`.
+- `X-Maestro-Request-Id: <uuid>` — optional; see
+  [Request ids and retries](#request-ids-and-retries).
 
 Every request resets the idle timer.
 
@@ -58,7 +63,59 @@ Every request resets the idle timer.
   another step is running waits for its turn; `?wait=false` makes it fail
   at once with `BUSY` (409) instead.
 - Closing the connection mid-step cancels the step on the device
-  (`INTERRUPTED`, 499 if the response can still be written).
+  (`INTERRUPTED`, 499 if the response can still be written). A TCP request
+  that carries a request id is the exception: it keeps running for 10 s so
+  a retry can collect its outcome, and is cancelled only if none arrives.
+
+## Remote callers
+
+The daemon decides for **each request** whether its sender may reach the
+host it runs on, not by who attached the session:
+
+- The unix socket is always local.
+- On `serve --http`, a TCP request from a loopback address is local, as
+  before, and one from any other address is **remote**. (On a hub, from
+  `hub start`, every TCP request is remote, loopback included.)
+
+A remote caller drives devices but not the host. These are refused with
+`FORBIDDEN` (403, exit 2), with the step and field in `details`:
+
+- `runShell`, at the top level or nested in `runFlow`/`retry`/`repeat`
+  commands, a `/steps` list or an inline flow. The call stops at that step.
+- A path on the host in a step: `addMedia` files, `runScript` file (a value
+  ending in `.js`; other values are inline JavaScript and run), `uploadFile`
+  path(s), `runWebViewScript`/`runBrowserScript` file, `loadAuthState`,
+  `assertScreenshot`, and the `runFlow`/`retry` file — whether absolute,
+  relative, or built from a `${VAR}`. Nothing on the host is read.
+- An output path that is absolute or contains `..` (`takeScreenshot`,
+  `saveAuthState`). A relative one is written under the session's report
+  directory, in `outputs/`.
+- `?cwd=` on a command, `cwd` in a `/steps` or `/flows` body, and `file` in
+  a `/flows` body: send the flow's `yaml` instead.
+- An attach with `platform: web` (or a browser driver), `outputDir`,
+  `flowDir`, `extra.userDataDir` or `extra.browser`, or an `appFile` or
+  `extra.capsFile` that is a host path rather than an uploaded `blob:` ref.
+
+A daemon listening beyond loopback also keeps its own environment to
+itself: sessions import none of its variables (so `${HOME}`, `GET …/vars`,
+`eval` and scripts see only what callers set), except the names listed with
+`serve --pass-env NAME`. A unix-socket-only or loopback-only daemon imports
+its environment as before.
+
+## Request ids and retries
+
+`POST …/commands/{name}`, `…/steps` and `…/flows` may carry
+`X-Maestro-Request-Id`. The daemon keeps each device's last 256 outcomes
+by id for 10 minutes: a repeat of an id that is still running waits for
+that run's outcome, and a repeat of a finished one is answered from the
+cache (with `X-Maestro-Replayed: true`), so a retried `inputText` never
+types twice.
+
+The CLI and the JavaScript library send a fresh id on each of these calls
+over TCP and, after a reset or refused connection, `PEER_UNAVAILABLE`, or
+a 502/504 from a gateway (not the daemon's own `DEVICE_ERROR`), retry it
+up to 3 times with the same id, waiting 0.5 s, 1 s and 2 s. Reads and
+attaches are retried the same way.
 
 ## Errors
 
@@ -75,6 +132,15 @@ Every request resets the idle timer.
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
 | `INTERRUPTED` | 499 | 130 | the request was cancelled mid-step |
+| `FORBIDDEN` | 403 | 2 | a [remote caller](#remote-callers) asked for the host: `runShell`, a host path, `cwd`, a web attach |
+| `PEER_UNAVAILABLE` | 503 | 3 | hub mesh: the hub that owns the device cannot be reached (`details.hub`); clients retry it |
+| `HUB_NAME_TAKEN` | 409 | 5 | hub mesh: a joining hub's name is already in use |
+| `HUB_VERSION` | 409 | 5 | hub mesh: a joining hub speaks another API version |
+| `LEASE_REQUIRED` | 409 | 5 | hub: a mutating request without the device's `X-Maestro-Lease` |
+| `LEASE_EXPIRED` | 409 | 5 | hub: the request's lease has expired or was released |
+
+The last four belong to hubs and are part of the protocol now so every
+client maps them; a `serve` daemon never answers with them.
 
 A failed step with `optional: true` is *not* an error: `200`, `ok: true`,
 and `error` filled in for inspection.
@@ -96,7 +162,8 @@ curl -s -H "$H" $D/v1/status
     "httpAddr": "127.0.0.1:7788", "startedAt": "2026-09-10T10:00:00Z",
     "runDir": "/Users/me/.maestro-d/run/api",
     "reportsDir": "/Users/me/.maestro-d/run/api/reports",
-    "idleTimeout": 1800
+    "idleTimeout": 1800,
+    "tls": false
   },
   "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
   "idleShutdownAt": "2026-09-10T10:30:00Z"
@@ -291,7 +358,9 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 
 Answers `{"ok": true, "device": {…}}`. Errors: `DEVICE_NOT_FOUND`,
 `DEVICE_IN_USE`, `DEVICE_ERROR` (driver would not start — the message has
-the driver's own error).
+the driver's own error), and for a [remote caller](#remote-callers)
+`FORBIDDEN` on `web`, `outputDir`, `flowDir`, `extra.userDataDir`,
+`extra.browser`, or a host-path `appFile`/`extra.capsFile`.
 
 ### `POST /v1/devices/{id}/detach`
 
@@ -350,7 +419,7 @@ validated the same way as the outer command.
 | query | |
 | --- | --- |
 | `wait=false` | `BUSY` instead of queueing behind a running step |
-| `cwd=DIR` | directory relative paths in the value (`runFlow: file`, `runScript`, `addMedia`) resolve against |
+| `cwd=DIR` | directory relative paths in the value (`runFlow: file`, `runScript`, `addMedia`) resolve against; local callers only (`FORBIDDEN` from a [remote caller](#remote-callers)) |
 
 The response is a **step result**:
 
@@ -424,8 +493,8 @@ curl -s -H "$H" $D/v1/devices/29271FDH200ABP/flows -d '{
 }'
 ```
 
-`file` (a path on the daemon's host) or `yaml` (the file's text, with the
-`appId:` / `---` header). The flow runs as `maestro-runner test` would —
+`file` (a path on the daemon's host; local callers only) or `yaml` (the
+file's text, with the `appId:` / `---` header). The flow runs as `maestro-runner test` would —
 `onFlowStart`/`onFlowComplete` hooks, the flow's own `env`, `runFlow`
 relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.

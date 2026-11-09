@@ -27,7 +27,7 @@ import (
 )
 
 // oneShotFlags are the table flags every one-shot accepts.
-var oneShotFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags)
+var oneShotFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags)
 
 // oneShotCommands builds one cli.Command per known step type.
 func oneShotCommands() []*cli.Command {
@@ -146,7 +146,13 @@ func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p 
 	if err != nil {
 		return err
 	}
-	cwd, _ := os.Getwd()
+	// Relative paths resolve against the caller's directory — on this
+	// machine. A targeted daemon is another machine, and a remote caller
+	// may not name a directory there, so no cwd is sent.
+	cwd := ""
+	if o.Target == "" {
+		cwd, _ = os.Getwd()
+	}
 	client, id, err := session(ctx, o)
 	if err != nil {
 		return err

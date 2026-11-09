@@ -74,6 +74,12 @@ export type ErrorCode =
   | 'DEVICE_NOT_ATTACHED'
   | 'INTERRUPTED'
   | 'INTERNAL'
+  | 'FORBIDDEN'
+  | 'PEER_UNAVAILABLE'
+  | 'HUB_NAME_TAKEN'
+  | 'HUB_VERSION'
+  | 'LEASE_REQUIRED'
+  | 'LEASE_EXPIRED'
 
 export interface ErrorBody {
   code: ErrorCode
@@ -331,6 +337,8 @@ export interface DaemonInfo {
   reportsDir: string
   /** Seconds; 0 = never. */
   idleTimeout: number
+  /** True when the TCP listener serves HTTPS. */
+  tls?: boolean
 }
 
 export interface StatusResult extends Envelope {

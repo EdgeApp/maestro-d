@@ -35,6 +35,21 @@ type daemonOpts struct {
 	Token        string
 	StartTimeout int // seconds
 
+	// Target is a TCP daemon or hub (--target-hub / MAESTRO_D_HUB) as
+	// given: HOST[:PORT] or http(s)://HOST[:PORT]. Empty means the local
+	// named daemon over its unix socket.
+	Target string
+	// CAFile adds a trust root for a self-signed hub (--ca / MAESTRO_D_CA).
+	CAFile string
+
+	// serve: TLS files and the environment names sessions may import.
+	TLSCert, TLSKey string
+	PassEnv         []string
+
+	// explicit records the table flags given on the command line (not
+	// from the environment).
+	explicit map[string]bool
+
 	// Attach configuration, sent as-is when the CLI has to attach.
 	Attach daemon.AttachConfig
 	// AttachSet lists the attach flags that were given explicitly, so a
@@ -97,6 +112,10 @@ const (
 	kindBool
 	kindInt
 	kindSlice
+	// kindOptionalValue takes a value only when joined with "="
+	// (--target-hub=h); bare, it never takes the next token, so in
+	// `tapOn --target-hub Login` "Login" stays the tapOn text.
+	kindOptionalValue
 )
 
 // dflag is one entry of the shared flag table.
@@ -160,6 +179,28 @@ func extra(a *daemon.AttachConfig, k string, v any) {
 	a.Extra[k] = v
 }
 
+// tokenFlag is the bearer token: required by a TCP listener that has one,
+// and sent by a client that targets one.
+var tokenFlag = strFlag("token", "Bearer token: required on the TCP listener (serve/start), sent to a --target-hub", []string{"MAESTRO_D_TOKEN"},
+	func(o *daemonOpts, v string) { o.Token = v })
+
+// targetFlags point a client command at a TCP daemon or hub instead of the
+// local named daemon. A targeted command never spawns a daemon.
+var targetFlags = []dflag{
+	{name: "target-hub", kind: kindOptionalValue, env: []string{"MAESTRO_D_HUB"},
+		usage: "Talk to the daemon or hub at HOST[:PORT] (default port 7433; https:// for TLS) instead of the local one; bare means localhost:7433",
+		apply: func(o *daemonOpts, v string) error {
+			if v == "" {
+				v = "localhost"
+			}
+			o.Target = v
+			return nil
+		}},
+	strFlag("ca", "PEM file of a trust root for a --target-hub with a self-signed certificate", []string{"MAESTRO_D_CA"},
+		func(o *daemonOpts, v string) { o.CAFile = v }),
+	tokenFlag,
+}
+
 // Flag groups. A command lists the groups it accepts.
 var (
 	// daemonSelectFlags pick the daemon and output mode.
@@ -186,8 +227,7 @@ var (
 			}),
 		strFlag("http", "Also listen on this TCP address (host:port) for the REST API", []string{"MAESTRO_D_HTTP"},
 			func(o *daemonOpts, v string) { o.HTTPAddr = v }),
-		strFlag("token", "Bearer token required on the TCP listener", []string{"MAESTRO_D_TOKEN"},
-			func(o *daemonOpts, v string) { o.Token = v }),
+		tokenFlag,
 		intFlag("start-timeout", "Seconds to wait for a spawned daemon to become ready (default 20)", nil,
 			func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	}
@@ -272,11 +312,19 @@ var (
 	}
 )
 
-// flagSet joins groups into one ordered list.
+// flagSet joins groups into one ordered list; a flag in two groups (the
+// token is a spawn flag and a target flag) is listed once.
 func flagSet(groups ...[]dflag) []dflag {
 	var out []dflag
+	seen := map[string]bool{}
 	for _, g := range groups {
-		out = append(out, g...)
+		for _, f := range g {
+			if seen[f.name] {
+				continue
+			}
+			seen[f.name] = true
+			out = append(out, f)
+		}
 	}
 	return out
 }
@@ -385,6 +433,8 @@ func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (
 				} else if !hasValue {
 					value = "true"
 				}
+			case f.kind == kindOptionalValue:
+				// Bare: the flag's own default; never the next token.
 			case !hasValue:
 				if v, ok := takesValue(args[i+1:]); ok {
 					value, i = v, i+1
@@ -467,10 +517,49 @@ func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (
 			}
 		}
 	}
+	o.explicit = explicit
 	if err := o.finish(); err != nil {
 		return nil, nil, err
 	}
+	if err := o.checkTargeted(); err != nil {
+		return nil, nil, err
+	}
 	return o, p, nil
+}
+
+// checkTargeted refuses the attach settings that name directories on the
+// target's host: an explicit --output-dir or --user-data-dir is a usage
+// error, and an outputDir that came only from MAESTRO_OUTPUT (a shell set
+// up for local runs) is dropped with a notice. Appium capabilities are
+// refused from either source: a hub attaches no Appium for a remote caller.
+func (o *daemonOpts) checkTargeted() error {
+	if o.Target == "" {
+		return nil
+	}
+	for _, name := range []string{"output-dir", "user-data-dir"} {
+		if o.explicit[name] {
+			return daemon.Errorf(daemon.CodeUsage, "--%s names a directory on the daemon's host; it cannot be used with --target-hub", name)
+		}
+	}
+	if v, _ := o.Attach.Extra["capsFile"].(string); v != "" {
+		flag := "APPIUM_CAPS"
+		if o.explicit["caps"] {
+			flag = "--caps"
+		}
+		return daemon.Errorf(daemon.CodeUsage, "%s cannot be used with --target-hub: a hub attaches no Appium driver for a remote caller", flag)
+	}
+	if o.Attach.OutputDir != "" {
+		fmt.Fprintf(os.Stderr, "note: ignoring MAESTRO_OUTPUT=%s with --target-hub (it names a directory on the daemon's host)\n", o.Attach.OutputDir)
+		o.Attach.OutputDir = ""
+		kept := o.AttachSet[:0]
+		for _, n := range o.AttachSet {
+			if n != "output-dir" {
+				kept = append(kept, n)
+			}
+		}
+		o.AttachSet = kept
+	}
+	return nil
 }
 
 var negNumRe = regexp.MustCompile(`^-[0-9]+(\.[0-9]+)?$`)
@@ -552,6 +641,8 @@ func flagsUsage(flags []dflag) string {
 			names += " value"
 		case kindInt:
 			names += " N"
+		case kindOptionalValue:
+			names += "[=HOST[:PORT]]"
 		}
 		fmt.Fprintf(&b, "   %-32s %s\n", names, f.usage)
 	}

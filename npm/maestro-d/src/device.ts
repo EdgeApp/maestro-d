@@ -2,6 +2,10 @@
 // method of the same name; each call becomes one step in the device's
 // session, executed by the daemon with the unmodified maestro-runner code.
 
+import { randomUUID } from 'node:crypto'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
 import { MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandParams } from './generated/commands.js'
 import type { Transport } from './transport.js'
@@ -23,7 +27,10 @@ export type Scalar = string | number | boolean
 export interface CallOptions {
   /** Return BUSY instead of queueing behind a step already running on the device. */
   wait?: boolean
-  /** Directory relative paths in the step resolve against (default process.cwd()). */
+  /**
+   * Directory relative paths in the step resolve against (default
+   * process.cwd()). Not sent to a hub, which is another machine.
+   */
   cwd?: string
   signal?: AbortSignal
 }
@@ -175,10 +182,10 @@ export class MaestroDevice {
     if (typeof name !== 'string' || name === '') throw new TypeError('command name must be a non-empty string')
     const { fields, call } = splitOptions(opts)
     const body = buildValue(name, value, fields)
-    const path =
-      `${this.base}/commands/${encodeURIComponent(name)}` +
-      query({ cwd: call.cwd ?? process.cwd(), wait: call.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepResult>(path, { method: 'POST', body, signal: this.sig(call) })
+    const cwd = this.transport.hub ? undefined : (call.cwd ?? process.cwd())
+    const url =
+      `${this.base}/commands/${encodeURIComponent(name)}` + query({ cwd, wait: call.wait === false ? 'false' : undefined })
+    const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(call), requestId: this.requestId() })
     return checkResult(res)
   }
 
@@ -199,10 +206,16 @@ export class MaestroDevice {
   }
 
   private async steps(req: { steps?: Step[]; yaml?: string }, opts: RunOptions): Promise<StepsResult> {
-    const body = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
-    const path = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepsResult>(path, { method: 'POST', body, signal: this.sig(opts) })
+    const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true }
+    if (!this.transport.hub) body.cwd = opts.cwd ?? process.cwd()
+    const url = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
+    const res = await this.transport.json<StepsResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
+  }
+
+  /** A fresh request id for a step-running call over TCP (kept across retries). */
+  private requestId(): string | undefined {
+    return this.transport.tcp ? randomUUID() : undefined
   }
 
   /**
@@ -211,9 +224,25 @@ export class MaestroDevice {
    */
   async flow(opts: FlowOptions): Promise<StepResult> {
     if (!opts.file && !opts.yaml) throw new TypeError('flow() needs a file or yaml')
-    const body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
-    const path = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepResult>(path, { method: 'POST', body, signal: this.sig(opts) })
+    let body: Record<string, unknown>
+    if (this.transport.hub) {
+      // The file is on this machine, not the hub's: send its YAML, and no
+      // working directory (a hub refuses host paths).
+      let yaml = opts.yaml
+      if (yaml === undefined) {
+        const file = path.resolve(opts.cwd ?? process.cwd(), opts.file as string)
+        try {
+          yaml = fs.readFileSync(file, 'utf8')
+        } catch (err) {
+          throw MaestroError.of('USAGE', `flow(): ${(err as Error).message}`, { cause: err })
+        }
+      }
+      body = { yaml, env: opts.env }
+    } else {
+      body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
+    }
+    const url = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
+    const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
   }
 

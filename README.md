@@ -109,9 +109,17 @@ can share one device session.
   with `create`, `DELETE …?delete=true`) and JavaScript (`catalog()`,
   `createDevice()`, `deleteDevice()`). Only what maestro-d created is deleted
   without `--force`.
+- **Devices on another machine.** `--target-hub[=HOST[:PORT]]` (or
+  `$MAESTRO_D_HUB`) points any client command at a daemon started with
+  `serve --http ADDR --token T` (`--tls-cert`/`--tls-key` for HTTPS);
+  JavaScript connects with `MaestroD.connect({hub})`. Callers from beyond
+  loopback drive devices but not the host: `runShell` and host paths are
+  refused with `FORBIDDEN`, and the daemon's environment stays on the host.
+  Request ids make a retried command over a lossy link run once.
 - **Machine-readable failure.** One error table shared by all three interfaces:
-  `COMMAND_FAILED` 1/422, `USAGE` 2/400, `DAEMON_UNAVAILABLE` 3/503,
-  `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409, `INTERRUPTED` 130/499.
+  `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
+  `DAEMON_UNAVAILABLE` 3/503, `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409,
+  `INTERRUPTED` 130/499.
 - **Events.** Server-sent events for every step and device transition, resumable
   with `Last-Event-ID`.
 

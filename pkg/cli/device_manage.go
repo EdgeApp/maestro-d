@@ -26,11 +26,11 @@ func manageStr(name, usage string, set func(s *daemon.CreateSpec, v string)) dfl
 }
 
 var (
-	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], []dflag{
+	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
 		boolFlag("available", "Also list Android system images that sdkmanager can download", nil,
 			func(o *daemonOpts, v bool) { o.manage.available = v }),
 	})
-	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], []dflag{
+	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, []dflag{
 		manageStr("name", "Name of the new simulator or AVD (required)", func(s *daemon.CreateSpec, v string) { s.Name = v }),
 		manageStr("type", "iOS: device type name or id (default: the newest iPhone the runtime supports)", func(s *daemon.CreateSpec, v string) { s.Type = v }),
 		manageStr("runtime", "iOS: runtime, e.g. iOS-26-5 or 26.5 (default: the newest installed)", func(s *daemon.CreateSpec, v string) { s.Runtime = v }),
@@ -48,7 +48,7 @@ var (
 			func(o *daemonOpts, v bool) { o.manage.spec.AcceptLicenses = v }),
 		intFlag("boot-timeout", "Seconds to wait for boot (default 120)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
-	deviceDeleteFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], []dflag{
+	deviceDeleteFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
 		boolFlag("force", "Delete even if maestro-d did not create it", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	})
 )

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +15,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 )
@@ -25,6 +30,11 @@ type Client struct {
 	http  *http.Client
 	base  string
 	token string
+	// retry makes the client send request ids and retry with the same id
+	// (TCP clients, whose link can drop; the unix socket cannot).
+	retry bool
+	// sleep waits between retries (tests replace it).
+	sleep func(context.Context, time.Duration) error
 	// Name is the daemon name this client was dialled for (informational).
 	Name string
 	// Info is daemon.json when the client was created from it.
@@ -46,13 +56,105 @@ func NewUnixClient(sockPath string) *Client {
 	return &Client{http: &http.Client{Transport: tr}, base: "http://maestro-d"}
 }
 
-// NewHTTPClient connects over TCP to a daemon started with --http.
-func NewHTTPClient(baseURL, token string) *Client {
+// NewHTTPClient connects over TCP to a daemon started with --http, or to a
+// hub. An https:// base URL uses TLS, verified against tlsConfig's roots
+// when given (nil means the system roots). The client sends request ids
+// on step-running calls and retries them with the same id after a dropped
+// connection, PEER_UNAVAILABLE, or a gateway's 502/504.
+func NewHTTPClient(baseURL, token string, tlsConfig *tls.Config) *Client {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if !strings.Contains(baseURL, "://") {
 		baseURL = "http://" + baseURL
 	}
-	return &Client{http: &http.Client{}, base: baseURL, token: token}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsConfig != nil {
+		tr.TLSClientConfig = tlsConfig
+	}
+	return &Client{http: &http.Client{Transport: tr}, base: baseURL, token: token, retry: true, sleep: sleepCtx}
+}
+
+// BaseURL is the daemon's address for a TCP client ("http://maestro-d" for
+// the unix socket).
+func (c *Client) BaseURL() string { return c.base }
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// retryDelays are the waits before each retry: 0.5 s, then doubling, at
+// most 4 s, three retries in all.
+var retryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second}
+
+// carriesRequestID reports whether a request gets an X-Maestro-Request-Id:
+// every POST that runs steps (commands, steps, flows), which the daemon's
+// outcome cache answers once per id.
+func carriesRequestID(method, path string) bool {
+	if method != http.MethodPost || !strings.HasPrefix(path, "/v1/devices/") {
+		return false
+	}
+	p, _, _ := strings.Cut(path, "?")
+	return strings.Contains(p, "/commands/") || strings.HasSuffix(p, "/steps") || strings.HasSuffix(p, "/flows")
+}
+
+// retryable reports whether a request may be sent again: one with a
+// request id, a read, or an attach (attaching an attached device returns
+// it).
+func retryable(req *http.Request) bool {
+	switch {
+	case req.Header.Get(HeaderRequestID) != "":
+		return true
+	case req.Method == http.MethodGet || req.Method == http.MethodHead:
+		return true
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/attach"):
+		return true
+	}
+	return false
+}
+
+// retryableErr reports whether a transport error is a dropped or refused
+// connection, not a certificate or name problem that a retry cannot fix.
+func retryableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var certErr *tls.CertificateVerificationError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var dnsErr *net.DNSError
+	if errors.As(err, &certErr) || errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &dnsErr) {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{"connection reset", "connection refused", "broken pipe", "EOF", "server closed"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryableResponse reports whether a response asks for a retry: the
+// owning hub was unreachable (PEER_UNAVAILABLE), or a gateway in between
+// answered 502/504 without a maestro-d envelope (a daemon's own
+// DEVICE_ERROR is a 502 too, and is final).
+func retryableResponse(status int, body []byte) bool {
+	var env Envelope
+	decoded := json.Unmarshal(body, &env) == nil && env.Error != nil && env.Error.Code != ""
+	if decoded {
+		return env.Error.Code == CodePeerUnavailable
+	}
+	return status == http.StatusBadGateway || status == http.StatusGatewayTimeout
 }
 
 // Dial returns a client for a running daemon, or (nil, nil) when no daemon
@@ -95,20 +197,66 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	if c.retry && carriesRequestID(method, path) {
+		req.Header.Set(HeaderRequestID, uuid.New().String())
+	}
 	return req, nil
 }
 
 // do sends the request and returns the raw response. Transport failures
 // become DAEMON_UNAVAILABLE; a cancelled ctx becomes INTERRUPTED.
 func (c *Client) do(req *http.Request) (*http.Response, *Error) {
-	resp, err := c.http.Do(req)
-	if err != nil {
-		if req.Context().Err() != nil {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.http.Do(req)
+		if err != nil && req.Context().Err() != nil {
 			return nil, WrapErr(CodeInterrupted, req.Context().Err())
 		}
-		return nil, Errorf(CodeDaemonUnavailable, "daemon %s: %v", c.describe(), unwrapURLError(err))
+		canRetry := c.retry && attempt < len(retryDelays) && retryable(req) && (req.Body == nil || req.GetBody != nil)
+		if err == nil && canRetry && (resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout) {
+			data, rerr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if rerr == nil && !retryableResponse(resp.StatusCode, data) {
+				resp.Body = io.NopCloser(bytes.NewReader(data))
+				return resp, nil
+			}
+			err = fmt.Errorf("HTTP %d", resp.StatusCode)
+			if rerr != nil {
+				err = rerr
+			}
+		} else if err == nil {
+			return resp, nil
+		} else if !canRetry || !retryableErr(err) {
+			return nil, Errorf(CodeDaemonUnavailable, "daemon %s: %v", c.describe(), unwrapURLError(err))
+		}
+		logRetry(req, attempt+1, unwrapURLError(err))
+		if serr := c.sleep(req.Context(), retryDelays[attempt]); serr != nil {
+			return nil, WrapErr(CodeInterrupted, serr)
+		}
+		next := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, berr := req.GetBody()
+			if berr != nil {
+				return nil, WrapErr(CodeInternal, berr)
+			}
+			next.Body = body
+		}
+		req = next
 	}
-	return resp, nil
+}
+
+// RetryLog, when set, is told about every retry (the CLI prints these with
+// --verbose).
+var RetryLog func(format string, args ...any)
+
+func logRetry(req *http.Request, attempt int, err error) {
+	if RetryLog == nil {
+		return
+	}
+	id := req.Header.Get(HeaderRequestID)
+	if id == "" {
+		id = "-"
+	}
+	RetryLog("retry %d/%d of %s %s (request %s) after: %v", attempt, len(retryDelays), req.Method, req.URL.Path, id, err)
 }
 
 func (c *Client) describe() string {

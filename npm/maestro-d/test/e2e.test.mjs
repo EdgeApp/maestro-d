@@ -23,6 +23,11 @@ process.env.MAESTRO_D_HOME = path.join(tmp, 'home')
 process.env.MAESTRO_D_BIN = bin
 delete process.env.MAESTRO_DEVICE
 delete process.env.MAESTRO_D
+// A shell set up to target a hub must not reach the local-daemon cases;
+// the hub case below sets these for itself.
+delete process.env.MAESTRO_D_HUB
+delete process.env.MAESTRO_D_TOKEN
+delete process.env.MAESTRO_D_CA
 
 const MOCK = { device: 'mock-1', platform: 'mock' }
 
@@ -484,6 +489,68 @@ describe('interruption', () => {
     // The device is usable again afterwards.
     const r = await dev.tapOn('AfterAbort')
     assert.equal(r.ok, true)
+  })
+})
+
+describe('hub', () => {
+  test('connect({hub}) drives a TCP daemon; a lost answer is retried and runs once', async () => {
+    const tcp = await MaestroD.connect({ name: 'jstesthub', http: '127.0.0.1:0', token: 'hub-token', idleTimeout: 120 })
+    const target = tcp.info.httpAddr
+    assert.ok(target, 'the daemon reports its TCP address')
+    // A proxy that forwards everything, but loses the answer to the first
+    // step-running request: the daemon ran it, the client never hears.
+    let lost = 0
+    const seen = []
+    const proxy = http.createServer((req, res) => {
+      const chunks = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        const up = http.request({ host: '127.0.0.1', port: Number(target.split(':').pop()), method: req.method, path: req.url, headers: req.headers }, (ur) => {
+          const body = []
+          ur.on('data', (c) => body.push(c))
+          ur.on('end', () => {
+            if (req.url.includes('/commands/') && lost === 0) {
+              lost++
+              seen.push(req.headers['x-maestro-request-id'])
+              return req.socket.destroy()
+            }
+            if (req.url.includes('/commands/')) seen.push(req.headers['x-maestro-request-id'], ur.headers['x-maestro-replayed'])
+            res.writeHead(ur.statusCode, ur.headers)
+            res.end(Buffer.concat(body))
+          })
+        })
+        up.end(Buffer.concat(chunks))
+      })
+    })
+    await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve))
+    process.env.MAESTRO_D_HUB = `127.0.0.1:${proxy.address().port}`
+    process.env.MAESTRO_D_TOKEN = 'hub-token'
+    try {
+      const hub = await MaestroD.connect()
+      assert.equal(hub.hub, true)
+      const hdev = await hub.attach({ device: 'mock-hub', platform: 'mock' })
+      const r = await hdev.evalScript('${output.n = (output.n || 0) + 1}')
+      assert.equal(r.ok, true)
+      assert.equal(lost, 1)
+      assert.equal(seen[0], seen[1], 'the retry carried the same request id')
+      assert.equal(seen[2], 'true', 'the daemon answered the retry from its cache')
+      assert.equal(await hdev.eval('output.n'), 1, 'and ran the step once')
+      // A later call gets a fresh id and runs normally.
+      assert.equal((await hdev.tapOn('Hub')).ok, true)
+      assert.notEqual(seen[3], seen[0])
+      await hdev.detach()
+      hub.close()
+    } finally {
+      delete process.env.MAESTRO_D_HUB
+      delete process.env.MAESTRO_D_TOKEN
+      proxy.close()
+      await tcp.shutdown()
+    }
+    // Wrong token: 401 → USAGE.
+    await rejects(
+      () => MaestroD.connect({ url: `http://${target}`, token: 'nope' }),
+      (err) => assert.ok(isMaestroError(err), String(err)),
+    )
   })
 })
 

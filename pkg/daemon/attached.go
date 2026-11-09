@@ -114,6 +114,8 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		FlowDir:        cfg.FlowDir,
 		AlertMonitor:   alertMonitor,
 		CommandTimeout: cfg.CommandTimeout,
+		ImportEnv:      s.importsEnv(),
+		PassEnv:        s.cfg.PassEnv,
 	}
 	session, err := executor.NewSession(base, driver, rc, sc)
 	if err != nil {

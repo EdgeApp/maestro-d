@@ -48,6 +48,15 @@ type SessionConfig struct {
 	// CommandTimeout overrides the driver's default element-find timeout in
 	// milliseconds (flow `commandTimeout:`). 0 keeps the driver default.
 	CommandTimeout int
+	// ImportEnv copies the daemon's own environment (its upper-case
+	// variables) into the session, as upstream's flow runner does. A hub,
+	// or a daemon listening beyond loopback, leaves it off so remote
+	// callers never see the host user's secrets through ${NAME}, vars or
+	// eval.
+	ImportEnv bool
+	// PassEnv names variables of the daemon's environment imported even
+	// when ImportEnv is off (--pass-env).
+	PassEnv []string
 }
 
 // StepOutcome is the result of executing one step through a Session. It is
@@ -89,6 +98,9 @@ type StepOutcome struct {
 	// SubSteps are the nested results of compound steps (runFlow, repeat,
 	// retry), straight from the report.
 	SubSteps []report.Command `json:"subSteps,omitempty"`
+	// Forbidden is set when the call's caller policy denied a step: the
+	// daemon reports it as FORBIDDEN.
+	Forbidden *PolicyDenial `json:"forbidden,omitempty"`
 }
 
 // Err returns the outcome as a Go error (nil on success).
@@ -189,7 +201,15 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 
 	// Prelude — mirrors FlowRunner.Run() up to the first step.
 	driver.SetContext(ctx)
-	fr.script.ImportSystemEnv()
+	if sc.ImportEnv {
+		fr.script.ImportSystemEnv()
+	} else {
+		for _, name := range sc.PassEnv {
+			if v, ok := os.LookupEnv(name); ok {
+				fr.script.SetVariable(name, v)
+			}
+		}
+	}
 	fr.script.SetVariables(rc.Env)
 	fr.script.SetFlowDir(sc.FlowDir)
 	if info := driver.GetPlatformInfo(); info != nil {
@@ -261,7 +281,46 @@ func (s *Session) Driver() core.Driver { return s.fr.driver }
 func (s *Session) Execute(ctx context.Context, step flow.Step) *StepOutcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.executeLocked(ctx, step)
+	ctx, call, done := s.beginPolicy(ctx)
+	defer done()
+	return s.applyDenial(s.executeLocked(ctx, step), call)
+}
+
+// beginPolicy installs the caller policy carried by ctx (the daemon puts
+// one there per request) on the script engine for this call, under a
+// context the policy cancels when it denies a step. The returned func
+// clears it.
+func (s *Session) beginPolicy(ctx context.Context) (context.Context, *CallerPolicy, func()) {
+	p := CallerPolicyFrom(ctx)
+	if p == nil || s.closed {
+		return ctx, nil, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	call := p.beginCall(s.OutputDir(), cancel)
+	s.fr.script.policy = call
+	return ctx, call, func() {
+		s.fr.script.policy = nil
+		cancel()
+	}
+}
+
+// applyDenial turns an outcome whose call the policy stopped into a
+// FORBIDDEN failure, whatever the step itself reported.
+func (s *Session) applyDenial(out *StepOutcome, call *CallerPolicy) *StepOutcome {
+	d := call.Denial()
+	if d == nil || out == nil {
+		return out
+	}
+	if d.Step == "" {
+		d.Step = out.Description
+	}
+	out.Forbidden = d
+	out.Success = false
+	out.Cancelled = false
+	out.Error = &report.Error{Type: "forbidden", Message: d.Reason}
+	out.Message = d.Reason
+	s.failed = true
+	return out
 }
 
 // ExecuteAll runs steps in order, stopping at the first non-optional
@@ -270,6 +329,8 @@ func (s *Session) Execute(ctx context.Context, step flow.Step) *StepOutcome {
 func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnError bool) []*StepOutcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	ctx, call, done := s.beginPolicy(ctx)
+	defer done()
 	outs := make([]*StepOutcome, 0, len(steps))
 	for i, step := range steps {
 		if i > 0 && s.fr.config.StepDelay > 0 {
@@ -278,8 +339,11 @@ func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnE
 			case <-ctx.Done():
 			}
 		}
-		out := s.executeLocked(ctx, step)
+		out := s.applyDenial(s.executeLocked(ctx, step), call)
 		outs = append(outs, out)
+		if out.Forbidden != nil {
+			break
+		}
 		if !out.Success && !continueOnError {
 			break
 		}
@@ -299,6 +363,12 @@ func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
 	if s.closed {
 		return s.closedOutcome(flow.StepRunFlow, "runFlow")
 	}
+	ctx, call, done := s.beginPolicy(ctx)
+	defer done()
+	return s.applyDenial(s.runFlowLocked(ctx, f), call)
+}
+
+func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 	fr := s.fr
 	name := f.Config.Name
 	if name == "" && f.SourcePath != "" {
@@ -561,6 +631,11 @@ func (s *Session) executeLocked(ctx context.Context, step flow.Step) *StepOutcom
 		case *flow.TakeScreenshotStep:
 			fr.script.ExpandStep(st)
 			result, screenshotPath = fr.executeTakeScreenshot(st, idx)
+		case *flow.RunShellStep:
+			// executeNestedStep has no runShell case (it would reach the
+			// driver), so take executeStep's route.
+			fr.script.ExpandStep(st)
+			result = fr.executeRunShell(st)
 		default:
 			s.applyDefaultAppID(step)
 			result = fr.executeNestedStep(step)

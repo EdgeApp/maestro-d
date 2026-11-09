@@ -39,6 +39,8 @@ never copies their code.
 | `README.md` | Replaced wholesale with the fork's own README; upstream's is kept at `docs/maestro-runner.md`. On a rebase, keep ours and re-read theirs for anything new worth carrying over | whole file |
 | `.gitignore` | Ignore the `maestro-d` binary, `npm/dist-maestro-d/` and `cover-changed`'s `.cover/` | 7 |
 | `pkg/cli/devices.go` | One `// maestro-d` line in `collectDevices`: `entries = avdEntries(entries, includeShutdown)` after `androidEntries()`, so running emulators carry their AVD names and shut-down AVDs list as `avd:<name>` (`devices --all`, `device list`) | 1 |
+| `pkg/executor/scripting.go` | The caller policy: a `policy *CallerPolicy` field on `ScriptEngine`, one `// maestro-d` hook call at the end of `ExpandStep` (`se.policyStep(step)`) and one at the start of `ResolvePath` (`se.policyResolve(path)`). Both are no-ops while no daemon call has installed a policy, so `maestro-runner test` is unchanged | 6 |
+| `pkg/executor/runshell.go` | One `// maestro-d` check at the start of `executeRunShell` (`fr.policyDeniesShell(step)`): a remote caller without `--allow-remote-shell` gets a failed result instead of a shell | 3 |
 
 Everything else is new:
 
@@ -46,10 +48,13 @@ Everything else is new:
 | --- | --- |
 | `pkg/flow/steptype_export.go` | Exported wrappers around the unexported step parser: `StepTypes`, `ParseStep`, `BuildStep` |
 | `pkg/cli/hierarchy_export.go` | `NormalizeHierarchy`, the `hierarchy` command's cross-driver tree, for `GET …/hierarchy` |
-| `pkg/executor/session.go` | `executor.Session` — a long-lived `FlowRunner` that executes one step at a time and keeps variables, report and artifacts between calls |
+| `pkg/executor/session.go` | `executor.Session` — a long-lived `FlowRunner` that executes one step at a time and keeps variables, report and artifacts between calls; installs each call's caller policy, reports a denial as `FORBIDDEN`, and imports the daemon's environment only when asked (`ImportEnv`, `PassEnv`) |
+| `pkg/executor/caller_policy.go` | `CallerPolicy`: the per-request confinement of a remote caller — the typed switch over the path-bearing step fields (`PolicyFields()`), ref mapping, confinement to the call's roots, the output rewrite under `outputs/`, the `runShell` check and the denial record. Reached only through the hooks in `scripting.go` and `runshell.go` |
+| `pkg/hub/hubtest/` | Test harnesses for hubs; `cmd/wanproxy` is the TCP proxy that adds latency, bandwidth limits and dropped connections for the WAN end-to-end tests |
 | `pkg/daemon/` | Daemon server (REST over a unix socket / optional TCP), protocol types, client, spawn logic, device registry (with `created.json`), device catalog/create/delete (`catalog.go`), injected `Deps` (`deps.go`), generated `commands_gen.go` |
 | `pkg/daemon/gen/` | Generator: reflects over the step structs → `commands_gen.go`, `npm/maestro-d/src/generated/commands.ts`, `docs/daemon/commands.md` |
 | `pkg/cli/daemon.go`, `daemon_flags.go`, `daemon_wiring.go`, `oneshot.go` | CLI: `start`/`serve`/`stop`/`status`/`ps`/`device`/`attach`/`detach`/`run`/`get`/`set`/`eval`/`commands` and one command per YAML step type |
+| `pkg/cli/target.go` | `--target-hub`, `--ca`: a TCP or TLS client for a daemon or hub on another machine |
 | `pkg/cli/device_manage.go`, `devices_avd.go` | `device catalog`/`create`/`delete`; AVD names and `avd:<name>` entries in device listings |
 | `pkg/simulator/catalog.go` | The simctl runtime and device-type catalog and the default runtime and iPhone type |
 | `pkg/emulator/catalog.go`, `avdmanager.go`, `avd_serials.go` | The sdkmanager/avdmanager catalog, AVD create/delete, image install, data partition size, and `RunningAVDsBySerial` |
@@ -67,7 +72,8 @@ If an upstream change breaks the build, it is almost certainly one of these.
 | Seam | Used by | What we rely on |
 | --- | --- | --- |
 | `flow.parseStep`, `flow.parseSteps`, `flow.isStepType` (unexported) | `pkg/flow/steptype_export.go` | One YAML node → `flow.Step`; the registry of step type names (the export file keeps its own ordered list, `stepTypeOrder`, filtered through `isStepType`) |
-| `executor.FlowRunner` internals: `executeNestedStep`, `executeRepeat`/`executeRetry`/`executeRunFlow`/`executeSubFlow`, `executeTakeScreenshot`, `captureArtifacts`; `ScriptEngine` | `pkg/executor/session.go` | Executing a single parsed step with the runner's normal retry/optional/gate handling; variable store; `ImportSystemEnv` |
+| `executor.FlowRunner` internals: `executeNestedStep`, `executeRepeat`/`executeRetry`/`executeRunFlow`/`executeSubFlow`, `executeTakeScreenshot`, `executeRunShell`, `captureArtifacts`; `ScriptEngine` | `pkg/executor/session.go` | Executing a single parsed step with the runner's normal retry/optional/gate handling; variable store; `ImportSystemEnv` |
+| `ScriptEngine.ExpandStep` runs before every step executes (top-level `executeStep`, nested `executeNestedStep`), and `ResolvePath` is where the executor turns a path into a file it reads | `pkg/executor/caller_policy.go` | The two places the caller policy checks paths. A new upstream step type with a path field needs a case in `policyStep`; a new way to run a host command needs a check like `executeRunShell`'s |
 | `cli.RunConfig`, `cli.CreateDriver` | `pkg/cli/daemon_wiring.go` (`attachToRunConfig`) | Opening a driver exactly as `maestro-runner test` does |
 | `cli.parseHierarchy`, `cli.formatHierarchy` (unexported) | `pkg/cli/hierarchy_export.go`, `get hierarchy` | The normalized tree and the `--compact`/`--find` renderers of the `hierarchy` command |
 | `emulator.FindAVDManagerBinary`, `emulator.ListAVDs`, `emulator.IsEmulator`, `simulator.CreateSimulator`, `simulator.DeleteSimulator`, `simulator.FindSimctlBinary` | `pkg/cli/daemon_wiring.go`, `devices_avd.go`, `pkg/emulator/*` (fork files) | Tool lookup, AVD listing and simulator create/delete for `device create`/`delete` |
