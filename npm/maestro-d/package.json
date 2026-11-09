@@ -1,6 +1,6 @@
 {
   "name": "maestro-d",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Run Maestro YAML commands one at a time from JavaScript or the shell, on real devices, simulators and emulators. A fork of maestro-runner 1.1.26 with a persistent daemon.",
   "keywords": [
     "maestro",
@@ -56,9 +56,9 @@
     "typescript": "^5.6.0"
   },
   "optionalDependencies": {
-    "maestro-d-darwin-arm64": "0.1.0",
-    "maestro-d-darwin-x64": "0.1.0",
-    "maestro-d-linux-arm64": "0.1.0",
-    "maestro-d-linux-x64": "0.1.0"
+    "maestro-d-darwin-arm64": "2.0.0",
+    "maestro-d-darwin-x64": "2.0.0",
+    "maestro-d-linux-arm64": "2.0.0",
+    "maestro-d-linux-x64": "2.0.0"
   }
 }

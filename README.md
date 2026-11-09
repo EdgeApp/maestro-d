@@ -117,23 +117,36 @@ no JVM.
 
 ## Install
 
-**From source** — Go 1.23+, into its own home so an existing maestro-runner
-install is untouched:
+**From a release** — one command, no Go, Node.js or checkout (macOS and
+Linux, arm64 and x64):
+
+```sh
+curl -fsSL https://github.com/EdgeApp/maestro-d/releases/latest/download/install.sh | bash
+```
+
+It downloads the latest release's tarball for this computer, checks it
+against the release's `SHA256SUMS`, installs it into `~/.maestro-d`
+(`bin/maestro-d` and `drivers/`), and links `maestro-d` into
+`/usr/local/bin` or `/opt/homebrew/bin` when writable, else `~/.local/bin`.
+No sudo. Running it again upgrades in place and keeps `~/.maestro-d/cache`
+(WebDriverAgent builds). After an upgrade, `maestro-d stop --all` so running
+daemons pick up the new binary.
+
+```sh
+curl -fsSL …/install.sh | bash -s -- --version 2.0.0   # a specific release
+curl -fsSL …/install.sh | bash -s -- uninstall         # remove it (keeps cache/)
+```
+
+`--prefix <dir>` and `--bin-dir <dir>` install elsewhere. Each release's
+tarballs (`maestro-d-<version>-<os>-<arch>.tar.gz`, one self-contained home)
+are on the [releases page](https://github.com/EdgeApp/maestro-d/releases) too.
+
+**From source** — Go 1.23+, into the same home:
 
 ```sh
 git clone https://github.com/EdgeApp/maestro-d
 cd maestro-d && make build            # → ~/.maestro-d/bin/maestro-d
 export PATH="$HOME/.maestro-d/bin:$PATH"
-```
-
-**From a release** — each platform tarball is a self-contained home
-(`bin/maestro-d`, `drivers/`):
-
-```sh
-V=0.1.0; T=darwin-arm64                      # or darwin-x64, linux-arm64, linux-x64
-mkdir -p ~/.maestro-d
-curl -fsSL "https://github.com/EdgeApp/maestro-d/releases/download/maestro-d-v$V/maestro-d-$T-$V.tgz" \
-  | tar xz --strip-components=1 -C ~/.maestro-d
 ```
 
 Then check the toolchain and see what is plugged in:

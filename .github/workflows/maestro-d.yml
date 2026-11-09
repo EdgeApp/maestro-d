@@ -66,10 +66,23 @@ jobs:
       - name: Build npm packages
         run: VERSION=${{ steps.v.outputs.version }} ./npm/build-maestro-d-npm.sh
 
+      # The tarballs, SHA256SUMS and install.sh that
+      # `curl -fsSL …/releases/latest/download/install.sh | bash` installs from.
+      - name: Build release tarballs
+        run: VERSION=${{ steps.v.outputs.version }} ./npm/build-maestro-d-tarballs.sh
+
+      # A version with a pre-release part (2.0.0-rc.1) is a prerelease and
+      # never becomes "latest", so the curl install keeps the last release.
       - name: GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: npm/dist-maestro-d/${{ steps.v.outputs.version }}/*.tgz
+          files: |
+            npm/dist-maestro-d/${{ steps.v.outputs.version }}/*.tgz
+            npm/dist-maestro-d/${{ steps.v.outputs.version }}/*.tar.gz
+            npm/dist-maestro-d/${{ steps.v.outputs.version }}/SHA256SUMS
+            npm/dist-maestro-d/${{ steps.v.outputs.version }}/install.sh
+          prerelease: ${{ contains(steps.v.outputs.version, '-') }}
+          make_latest: ${{ !contains(steps.v.outputs.version, '-') }}
           generate_release_notes: true
 
       # Platform packages first, so the main package never resolves to a

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-09
+
+maestro-d's first release you can install with one command, without the repository or npm (see Added). It also brings the physical-device fixes below: emoji and other non-ASCII text on Android, `addMedia` on a physical iPhone, the daemon's team for iOS attaches, and WebDriverAgent on Xcode 27. maestro-d's own version goes from 1.1 to 2.0; the maestro-runner it is built on stays 1.1.26.
+
+### Added
+- **Install with one command, without the repository.** Each maestro-d release now carries a tarball per platform (`maestro-d-<version>-<os>-<arch>.tar.gz`: `bin/maestro-d`, `drivers/`, `LICENSE`), a `SHA256SUMS` over them, and `install.sh`. `curl -fsSL https://github.com/EdgeApp/maestro-d/releases/latest/download/install.sh | bash` installs the latest release into `~/.maestro-d`, checks its checksum and links `maestro-d` onto the PATH, without sudo; `--version`, `--prefix`, `--bin-dir` and `uninstall` cover the rest. An upgrade keeps `~/.maestro-d/cache`. A release tagged with a pre-release version (`maestro-d-v2.0.0-rc.1`) is a GitHub prerelease and never replaces the latest.
+
 ### Fixed
 - **iOS commands work while the app is in landscape.** The viewport was measured once, at attach, and kept its portrait shape for the rest of the session, so in a landscape app an element right of the portrait width was refused as "bounds outside viewport", dropped from page-source matches, and unreachable by an absolute point, and percentage points landed in the wrong place. The WebDriverAgent driver now reads the viewport from `/window/size`, which follows the interface orientation, and reuses it for 500 ms; `setOrientation`, `launchApp` and a new session read it afresh. When WebDriverAgent cannot answer, the size measured at attach is used.
 - **`setOrientation` on iOS accepts `LANDSCAPE_LEFT`, `LANDSCAPE_RIGHT` and `UPSIDE_DOWN`.** They were sent to WebDriverAgent as written, which it rejects; they are now translated to its own orientation keys. `PORTRAIT` and `LANDSCAPE` are unchanged.
