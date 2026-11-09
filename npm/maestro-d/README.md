@@ -110,11 +110,13 @@ Instance:
 | `startDevice({platform?, name, bootTimeout?})` | boot a simulator/AVD by name, UDID or `avd:<name>`; `platform` may be left out for a listed device; the daemon shuts it down on exit |
 | `stopDevice(id, {force?})` | shut a device down; devices the daemon did not boot need `force` (`DEVICE_EXTERNAL`) |
 | `deleteDevice(id, {force?})` | delete a simulator or AVD (stopping it first); ones maestro-d did not create need `force` (`DEVICE_EXTERNAL`) |
-| `attach(opts)` | open a driver and return a `MaestroDevice` (below) |
+| `attach(opts)` | open a driver and return a `MaestroDevice` (below); on a hub it needs a lease the client holds — from `lease()` or `maestro-d lease` (see [Leases](#leases-on-a-hub)) |
+| `lease({device \| select, ttlSec?, holder?, attach?})` | on a hub: lease a device and return its handle, attached unless `attach: false` (see [Leases](#leases-on-a-hub)) |
+| `leasing` | true when the daemon is a hub (`info.hub`) and leases its devices |
 | `detach(id)` | close the driver on a device |
 | `events({device?, after?, signal})` | `AsyncIterable<DaemonEvent>` of step/device events (Server-Sent Events) |
 | `shutdown({wait?})` | detach everything, stop what the daemon booted, exit |
-| `close()` | drop idle connections; the daemon keeps running |
+| `close()` | release the leases this process took with `lease()`, then drop idle connections; the daemon keeps running. Returns a promise |
 
 ### `daemon.attach(opts)` → `MaestroDevice`
 
@@ -209,6 +211,11 @@ the device record; `events({after?, signal})` streams this device's events.
 #### Lifecycle
 
 `detach()` closes the driver; `stop({force?})` also shuts the device down.
+On a hub, `lease` is the handle's lease; `renew({ttlSec?})` restarts its
+fixed window now (default the lease's own window; nothing renews it on its
+own), and `release()` ends it — the hub detaches the device. `detach()`
+leaves the lease held. `release()` on a handle without a lease (a plain
+daemon) does nothing.
 
 #### `CallOptions`
 
@@ -325,6 +332,50 @@ mismatch's `_diff.png` — are fetched back to the path you gave, relative
 to `cwd` or absolute. `pack(paths)`, `upload(...)`, `packFlow(roots)`,
 `uploadBundle(...)` and `fetchBundleOutputs(...)` are exported for callers
 of the REST API.
+
+### Leases on a hub
+
+A hub (`maestro-d hub start`) lends each device to one client at a time;
+`info.hub` names it. Every request for a device must carry that device's
+lease (`LEASE_REQUIRED`, `LEASE_EXPIRED` otherwise). Taking a lease is
+always explicit; once taken, the library sends it for you.
+
+```js
+const md = await MaestroD.connect({ hub: 'hub.lan', token })
+const dev = await md.lease({ select: { platform: 'ios', kind: 'simulator' }, ttlSec: 1800 })
+await dev.launchApp('com.apple.Preferences')   // the lease rides on every call
+await dev.renew({ ttlSec: 1800 })              // only an explicit renew moves its end
+await md.close()                               // releases it
+```
+
+- `lease({device | select, ttlSec, holder, attach})` normalizes `device`
+  through `GET /v1/devices/{id}` (an id the hub does not list is leased as
+  given), takes the lease, and returns the device's handle, **attached**:
+  `attach` defaults to `{}` (the attach options of `attach()`), and
+  `attach: false` only reserves the device. `select` takes the first free
+  device matching `{platform, kind, name, osVersion, hub, boot}`. The lease
+  is a fixed window of `ttlSec` (default 8 hours, or the device's `maxSec`
+  when that is shorter; over the maximum rejects with `USAGE`). Using it
+  never extends it and nothing renews it on its own: at the end of the
+  window the hub detaches the device (a running step rejects with
+  `INTERRUPTED`) and later calls reject with `LEASE_EXPIRED`. It is
+  recorded in `<home>/leases.json`, like `maestro-d lease`, until
+  `release()` or `md.close()`.
+- `attach({device, …})` on a hub uses a lease this client holds — taken in
+  this process, or found in `leases.json` (from `maestro-d lease` in the
+  same home) — and never takes one; without one it rejects with
+  `LEASE_REQUIRED`, naming `md.lease()` and `maestro-d lease --device <id>`.
+  So a script written for a local daemon — `e2e/iosLandscape.e2e.ts` — runs
+  on a hub after `maestro-d lease --device <id>` in the shell.
+- `leases.json` is written through a temporary file and a rename (Node
+  cannot take the CLI's `flock`), so a script and a CLI updating it at the
+  same instant can lose one update; when several processes share a home and
+  lease at once, lease from the shell.
+- Device entries on a hub carry `maxSec`, the device's longest lease
+  window.
+- Another client's device rejects with `DEVICE_IN_USE`; a selector with no
+  match with `DEVICE_NOT_FOUND`. On a daemon that is not a hub, `lease()`
+  rejects with `USAGE` and `attach()` works as before.
 
 Over TCP (`hub` or `url`) every command, batch and flow carries an
 `X-Maestro-Request-Id`; a dropped connection, `PEER_UNAVAILABLE` or a

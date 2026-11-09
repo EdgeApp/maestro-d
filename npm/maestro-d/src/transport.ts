@@ -25,6 +25,9 @@ export const REQUEST_ID_HEADER = 'X-Maestro-Request-Id'
 /** Sent to a hub: the client names its output files and fetches them back from outputs/. */
 export const CLIENT_OUTPUTS_HEADER = 'X-Maestro-Client-Outputs'
 
+/** Header carrying the lease of the device a request is for (a hub's leased devices). */
+export const LEASE_HEADER = 'X-Maestro-Lease'
+
 /** Waits before each retry: 0.5 s, then doubling, three retries in all. */
 export const RETRY_DELAYS = [500, 1000, 2000]
 
@@ -99,6 +102,17 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
+/** The device id of a /v1/devices/{id}… path. */
+function pathDevice(path: string): string | undefined {
+  const m = /^\/v1\/devices\/([^/?]+)/.exec(path)
+  if (!m) return undefined
+  try {
+    return decodeURIComponent(m[1] as string)
+  } catch {
+    return undefined
+  }
+}
+
 export class Transport {
   private readonly agent: http.Agent
   /** The trust roots of an https:// transport given a ca. */
@@ -115,6 +129,13 @@ export class Transport {
   readonly tcp: boolean
   /** True when connected to a hub: no host directories are sent. */
   readonly hub: boolean
+  /**
+   * Device id → the lease sent with every request for that device
+   * (X-Maestro-Lease).
+   */
+  readonly leases = new Map<string, string>()
+  /** Told when the daemon answers LEASE_EXPIRED to a request that carried a lease; the lease is forgotten first. */
+  onLeaseExpired?: (device: string, lease: string) => void
 
   constructor(opts: TransportOptions) {
     this.secure = false
@@ -159,6 +180,23 @@ export class Transport {
     this.agent.destroy()
   }
 
+  /** Add the lease of the device a /v1/devices/{id}… path is for, if one is held. */
+  private leaseHeader(path: string, headers: http.OutgoingHttpHeaders): void {
+    const id = pathDevice(path)
+    const lease = id === undefined ? undefined : this.leases.get(id)
+    if (lease) headers[LEASE_HEADER] = lease
+  }
+
+  /** Forget a lease the daemon reported expired (409 LEASE_EXPIRED for a request that carried it). */
+  private noteLeaseExpired(path: string, lease: string | undefined, res: RawResponse): void {
+    if (!lease || res.status !== 409) return
+    // A HEAD's answer has no body: its code is in the X-Maestro-Error-Code header.
+    if (MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code !== 'LEASE_EXPIRED') return
+    const id = pathDevice(path) as string
+    if (this.leases.get(id) === lease) this.leases.delete(id)
+    this.onLeaseExpired?.(id, lease)
+  }
+
   private request(reqOpts: http.RequestOptions, cb: (res: http.IncomingMessage) => void): http.ClientRequest {
     return this.secure ? https.request(reqOpts, cb) : http.request(reqOpts, cb)
   }
@@ -182,6 +220,8 @@ export class Transport {
   /** Perform a request and return the raw response, retrying a dropped link. */
   async raw(path: string, opts: RequestOptions = {}): Promise<RawResponse> {
     const delays = this.retryable(path, opts) ? this.retryDelays : []
+    const id = pathDevice(path)
+    const lease = id === undefined ? undefined : this.leases.get(id)
     for (let attempt = 0; ; attempt++) {
       let res: RawResponse
       try {
@@ -197,6 +237,7 @@ export class Transport {
         await sleep(delays[attempt] as number, opts.signal)
         continue
       }
+      this.noteLeaseExpired(path, lease, res)
       return res
     }
   }
@@ -215,6 +256,7 @@ export class Transport {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     if (opts.requestId) headers[REQUEST_ID_HEADER] = opts.requestId
+    this.leaseHeader(path, headers)
     // On a hub this client names its output files and fetches them back.
     if (this.hub && method === 'POST') headers[CLIENT_OUTPUTS_HEADER] = '1'
 
@@ -252,6 +294,7 @@ export class Transport {
     }
     if (size > 0) headers['Content-Range'] = `bytes ${offset}-${size - 1}/${size}`
     if (this.token) headers.Authorization = `Bearer ${this.token}`
+    this.leaseHeader(path, headers)
     const reqOpts = { ...this.baseOptions('PUT', headers, signal), path }
     return new Promise<RawResponse>((resolve, reject) => {
       const req = this.request(reqOpts, (res) => {

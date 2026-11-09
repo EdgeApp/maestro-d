@@ -24,6 +24,12 @@ type SpawnOptions struct {
 	StartTimeout time.Duration
 	// ExtraArgs are appended to the serve command line.
 	ExtraArgs []string
+	// Args, when set, replace the whole command line (`hub start
+	// --foreground …`); the spawn options above are then not added.
+	Args []string
+	// Env is added to the child's environment (a hub's token travels here
+	// rather than on its command line).
+	Env []string
 	// Log receives progress lines ("Starting daemon …"); nil = silent.
 	Log func(format string, args ...any)
 }
@@ -71,6 +77,15 @@ func EnsureDaemon(ctx context.Context, name string, opts SpawnOptions) (c *Clien
 	return c, true, nil
 }
 
+// Spawn starts a daemon in the background and waits until it answers, like
+// EnsureDaemon does for one that is not running.
+func Spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	return spawn(ctx, name, opts)
+}
+
 func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error) {
 	bin, err := Binary()
 	if err != nil {
@@ -100,12 +115,15 @@ func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 		args = append(args, "--token", opts.Token)
 	}
 	args = append(args, opts.ExtraArgs...)
+	if len(opts.Args) > 0 {
+		args = opts.Args
+	}
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), opts.Env...)
 	// Own session so a Ctrl-C in the caller's terminal doesn't kill it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if opts.Log != nil {

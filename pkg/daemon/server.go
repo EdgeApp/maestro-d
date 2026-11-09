@@ -40,6 +40,15 @@ type Config struct {
 	// Hub makes every TCP caller remote, loopback included: only the unix
 	// socket is local. (`hub start` sets it.)
 	Hub bool
+	// HubName names a hub (default: the short host name).
+	HubName string
+	// ShareDevices, on a hub, limits the devices remote callers see and
+	// may lease to these ids or names; empty shares every device.
+	ShareDevices []string
+	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
+	// LeaseMaxDevices sets it per device, by id or name.
+	LeaseMax        time.Duration
+	LeaseMaxDevices []LeaseMax
 	// AllowRemoteShell lets remote callers run runShell.
 	AllowRemoteShell bool
 	// PassEnv names the variables of the daemon's own environment that
@@ -69,6 +78,21 @@ type Server struct {
 	idle     *idleTimer
 	idem     *idemCache
 	blobs    *BlobStore
+	// leases are a hub's device leases; leaseMu serialises granting and
+	// ending them.
+	leases  *leaseTable
+	leaseMu sync.Mutex
+	// teardowns counts the lease teardowns not finished yet, the
+	// sweeper's and those waiting for work under their lease included:
+	// Shutdown waits for them before it detaches and shuts down devices.
+	teardowns pending
+	// sharedIDs remembers the stable device ids found in the
+	// --share-device pool; shareSeen, other answers for a short while
+	// (shared). shareGen counts forgetShared calls.
+	shareMu   sync.Mutex
+	sharedIDs map[string]bool
+	shareSeen map[string]shareAnswer
+	shareGen  int
 	// idemGrace: how long a dropped TCP request waits for its retry.
 	idemGrace time.Duration
 
@@ -104,12 +128,19 @@ func New(cfg Config, deps Deps) *Server {
 		events:    NewEventBus(0),
 		idem:      newIdemCache(),
 		blobs:     NewBlobStore(cfg.BlobsDir),
+		leases:    newLeaseTable(),
+		sharedIDs: map[string]bool{},
+		shareSeen: map[string]shareAnswer{},
 		idemGrace: idemGrace,
 		attached:  map[string]*attached{},
 		attaching: map[string]chan struct{}{},
 		done:      make(chan struct{}),
 	}
 	s.registry.deps = deps
+	s.events.observe = s.forgetShared
+	if cfg.Hub {
+		s.info.Hub = s.hubName()
+	}
 	s.idle = newIdleTimer(cfg.IdleTimeout, func() {
 		logger.Info("Idle for %v, shutting down", cfg.IdleTimeout)
 		s.Shutdown("idle")
@@ -188,7 +219,9 @@ func (s *Server) Run(ctx context.Context) error {
 	httpAddr := ""
 	if s.cfg.HTTPAddr != "" {
 		addr := s.cfg.HTTPAddr
-		if strings.HasPrefix(addr, ":") {
+		// `serve --http :port` means loopback; a hub's --listen :port binds
+		// every interface.
+		if strings.HasPrefix(addr, ":") && !s.cfg.Hub {
 			addr = "127.0.0.1" + addr
 		}
 		tcpLn, err := net.Listen("tcp", addr)
@@ -219,6 +252,9 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout: int(s.cfg.IdleTimeout / time.Second),
 		TLS:         tlsConfig != nil,
 	}
+	if s.cfg.Hub {
+		s.info.Hub = s.hubName()
+	}
 	if err := WriteInfo(&s.info); err != nil {
 		return err
 	}
@@ -243,6 +279,17 @@ func (s *Server) Run(ctx context.Context) error {
 	logger.Info("maestro-d %q ready: socket=%s http=%s tls=%t idle=%v", s.cfg.Name, sockPath, httpAddr, tlsConfig != nil, s.cfg.IdleTimeout)
 	if httpAddr != "" && !s.importsEnv() {
 		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
+	}
+	if s.cfg.Hub {
+		share := "every device"
+		if len(s.cfg.ShareDevices) > 0 {
+			share = strings.Join(s.cfg.ShareDevices, ", ")
+		}
+		logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.info.Hub, s.hubLeaseMax(),
+			leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
+		sweepCtx, stopSweep := context.WithCancel(ctx)
+		defer stopSweep()
+		go s.runLeaseSweeper(sweepCtx)
 	}
 	if s.cfg.Ready != nil {
 		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
@@ -276,6 +323,9 @@ func (s *Server) Shutdown(reason string) {
 		s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 		go func() {
 			defer close(s.done)
+			// A hub's leases end first: requests under them are
+			// cancelled, and their lease events go out.
+			s.endAllLeases()
 			s.detachAll()
 			s.registry.ShutdownOwned()
 			RemoveRunFiles(s.cfg.Name)
@@ -318,32 +368,41 @@ func (s *Server) detachAll() {
 func (s *Server) routes(tcp bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	mux.HandleFunc("GET /v1/events", s.events.ServeSSE)
+	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
-	mux.HandleFunc("DELETE /v1/devices/{id}", s.handleStopDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/attach", s.handleAttach)
-	mux.HandleFunc("POST /v1/devices/{id}/detach", s.handleDetach)
-	mux.HandleFunc("GET /v1/devices/{id}", s.handleGetDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", s.idempotent(s.handleCommand))
-	mux.HandleFunc("POST /v1/devices/{id}/steps", s.idempotent(s.handleSteps))
-	mux.HandleFunc("POST /v1/devices/{id}/flows", s.idempotent(s.handleFlow))
-	mux.HandleFunc("GET /v1/devices/{id}/screenshot", s.handleScreenshot)
-	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", s.handleHierarchy)
-	mux.HandleFunc("GET /v1/devices/{id}/state", s.handleState)
-	mux.HandleFunc("GET /v1/devices/{id}/info", s.handleInfo)
-	mux.HandleFunc("GET /v1/devices/{id}/vars", s.handleGetVars)
-	mux.HandleFunc("PUT /v1/devices/{id}/vars", s.handleSetVars)
-	mux.HandleFunc("POST /v1/devices/{id}/vars", s.handleSetVars)
-	mux.HandleFunc("POST /v1/devices/{id}/eval", s.handleEval)
-	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", s.handleBlobHead)
-	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", s.handleBlobPut)
-	mux.HandleFunc("POST /v1/devices/{id}/apps", s.idempotent(s.handleInstallApp))
-	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", s.handleUninstallApp)
-	mux.HandleFunc("GET /v1/devices/{id}/artifacts", s.handleListArtifacts)
-	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", s.handleGetArtifact)
+	mux.HandleFunc("POST /v1/leases", s.idempotent(s.handleAcquireLease))
+	mux.HandleFunc("GET /v1/leases", s.handleListLeases)
+	mux.HandleFunc("GET /v1/leases/{lid}", s.handleGetLease)
+	mux.HandleFunc("POST /v1/leases/{lid}/renew", s.handleRenewLease)
+	mux.HandleFunc("DELETE /v1/leases/{lid}", s.handleReleaseLease)
+	// Every device route goes through dev: a remote caller sees only the
+	// shared devices, and on a hub the request carries the device's lease.
+	open, leased := func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseOpen, h) },
+		func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseNeeded, h) }
+	mux.HandleFunc("DELETE /v1/devices/{id}", s.dev(leaseIfHeld, s.handleStopDevice))
+	mux.HandleFunc("POST /v1/devices/{id}/attach", leased(s.handleAttach))
+	mux.HandleFunc("POST /v1/devices/{id}/detach", leased(s.handleDetach))
+	mux.HandleFunc("GET /v1/devices/{id}", open(s.handleGetDevice))
+	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", leased(s.idempotent(s.handleCommand)))
+	mux.HandleFunc("POST /v1/devices/{id}/steps", leased(s.idempotent(s.handleSteps)))
+	mux.HandleFunc("POST /v1/devices/{id}/flows", leased(s.idempotent(s.handleFlow)))
+	mux.HandleFunc("GET /v1/devices/{id}/screenshot", leased(s.handleScreenshot))
+	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", leased(s.handleHierarchy))
+	mux.HandleFunc("GET /v1/devices/{id}/state", leased(s.handleState))
+	mux.HandleFunc("GET /v1/devices/{id}/info", open(s.handleInfo))
+	mux.HandleFunc("GET /v1/devices/{id}/vars", leased(s.handleGetVars))
+	mux.HandleFunc("PUT /v1/devices/{id}/vars", leased(s.handleSetVars))
+	mux.HandleFunc("POST /v1/devices/{id}/vars", leased(s.handleSetVars))
+	mux.HandleFunc("POST /v1/devices/{id}/eval", leased(s.handleEval))
+	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobHead))
+	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobPut))
+	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(s.idempotent(s.handleInstallApp)))
+	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", leased(s.handleUninstallApp))
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts", leased(s.handleListArtifacts))
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", leased(s.handleGetArtifact))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeUsage, "no route for %s %s", r.Method, r.URL.Path))
 	})
@@ -442,10 +501,22 @@ func (s *Server) statusResult() StatusResult {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.statusResult())
+	res := s.statusResult()
+	res.Devices = s.visible(r, res.Devices)
+	writeJSON(w, http.StatusOK, res)
 }
 
+// handleShutdown serves POST /v1/shutdown. On a hub only the unix socket
+// may stop the daemon (`maestro-d hub stop` uses it): a TCP caller, which
+// is remote there, and a request a peer forwarded would end every other
+// client's leases and take the hub off the mesh.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Hub && CallerFrom(r.Context()).Remote {
+		e := forbidden("hub %q is stopped from its own machine (maestro-d hub stop), not over TCP", s.hubName())
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -457,10 +528,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 // Device handlers
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	devs := s.registry.List(strings.ToLower(r.URL.Query().Get("platform")))
-	if devs == nil {
-		devs = []DeviceInfo{}
-	}
+	devs := s.visible(r, s.registry.List(strings.ToLower(r.URL.Query().Get("platform"))))
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
@@ -471,12 +539,21 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
 		return
 	}
+	if s.cfg.Hub {
+		devs := []DeviceInfo{info}
+		s.annotate(devs)
+		info = devs[0]
+	}
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 	var req BootRequest
 	if e := decodeBody(r, &req); e != nil {
+		writeError(w, e)
+		return
+	}
+	if e := s.checkShareBoot(r, req); e != nil {
 		writeError(w, e)
 		return
 	}
@@ -509,7 +586,7 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 		req.Delete = true
 	}
 	if req.Delete {
-		s.handleDeleteDevice(w, id, req.Force)
+		s.handleDeleteDevice(w, r, id, req.Force)
 		return
 	}
 	// Detach first if we hold it.
@@ -518,6 +595,8 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
+	// On a hub, stopping the device ends its lease.
+	s.endStoppedLease(r.Context(), endStopped, id)
 	s.events.Publish(Event{Type: "device.stopped", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 }
@@ -546,7 +625,7 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a, e := s.ensureAttached(r.Context(), id, &cfg)
+	a, e := s.attachLeased(r.Context(), id, &cfg)
 	if e != nil {
 		writeError(w, e)
 		return

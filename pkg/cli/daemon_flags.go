@@ -68,6 +68,28 @@ type daemonOpts struct {
 	find    string           // get hierarchy --find
 	manage  deviceManageOpts // device catalog / create
 	pack    packOpts         // pack --flow, and a targeted run
+	hub     hubOpts          // hub start
+	lease   leaseOpts        // lease, and the lease a targeted command takes
+}
+
+// hubOpts are hub start's switches.
+type hubOpts struct {
+	tokenFile string
+	share     []string
+	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
+	leaseMax    []string
+	remoteShell bool
+	foreground  bool
+}
+
+// leaseOpts are lease's switches.
+type leaseOpts struct {
+	// ttl is --ttl in seconds (0: the hub's default window).
+	ttl      int
+	holder   string
+	noAttach bool
+	all      bool
+	sel      daemon.LeaseSelector
 }
 
 // packOpts are pack's flow-bundle switches.

@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"syscall"
@@ -129,7 +131,10 @@ func RemoveRunFiles(name string) {
 	_ = os.Remove(DevicesPath(name))
 }
 
-// PIDAlive reports whether a process with pid exists.
+// PIDAlive reports whether a process with pid exists and has not exited.
+// On Linux a process that exited but was never reaped (a zombie, or one
+// being reaped) still answers signal 0; its /proc stat state says it is
+// gone. That is the case in a container whose PID 1 reaps nothing.
 func PIDAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -139,10 +144,47 @@ func PIDAlive(pid int) bool {
 		return false
 	}
 	err = proc.Signal(syscall.Signal(0))
-	if err == nil {
+	if err != nil && !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	return !procExited(pid)
+}
+
+// procOS and procStat are seams over runtime.GOOS and reading
+// /proc/<pid>/stat, for tests.
+var (
+	procOS   = runtime.GOOS
+	procStat = func(pid int) ([]byte, error) {
+		return os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	}
+)
+
+// procExited reports whether Linux's /proc says pid has exited: state Z
+// (zombie) or X (dead). Elsewhere, or when the file cannot be read, it
+// reports false and signal 0's answer stands.
+func procExited(pid int) bool {
+	if procOS != "linux" {
+		return false
+	}
+	data, err := procStat(pid)
+	if err != nil {
+		return false
+	}
+	// "pid (comm) S …": comm may hold spaces and parentheses, so the
+	// state is the first field after the last ')'.
+	i := bytes.LastIndexByte(data, ')')
+	if i < 0 {
+		return false
+	}
+	fields := bytes.Fields(data[i+1:])
+	if len(fields) == 0 {
+		return false
+	}
+	switch string(fields[0]) {
+	case "Z", "X":
 		return true
 	}
-	return errors.Is(err, syscall.EPERM)
+	return false
 }
 
 // LiveInfo reads daemon.json and checks the recorded pid is alive. It

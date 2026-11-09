@@ -436,6 +436,13 @@ type DeviceInfo struct {
 	// made (recorded in <home>/created.json); only those are deleted
 	// without force.
 	CreatedBy string `json:"createdBy,omitempty"`
+	// Lease is the device's lease on a hub, when it is leased.
+	Lease *DeviceLease `json:"lease,omitempty"`
+	// Available is true on a hub for a ready device that is neither leased
+	// nor attached.
+	Available bool `json:"available,omitempty"`
+	// MaxSec, on a hub, is the longest lease window the device takes.
+	MaxSec int `json:"maxSec,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -598,6 +605,9 @@ type Info struct {
 	IdleTimeout int `json:"idleTimeout"`
 	// TLS is true when the TCP listener serves HTTPS.
 	TLS bool `json:"tls,omitempty"`
+	// Hub is the hub's name when the daemon is a hub (`hub start`): it has
+	// leases, and every TCP caller is remote.
+	Hub string `json:"hub,omitempty"`
 }
 
 // Event is one entry on the /v1/events stream.
@@ -605,7 +615,10 @@ type Event struct {
 	Seq  int64  `json:"seq"`
 	Time string `json:"time"`
 	// Type: step | nestedStep | device.attached | device.detached |
-	// device.booted | device.stopped | daemon.shutdown
+	// device.booted | device.stopped | daemon.shutdown | lease.granted |
+	// lease.released | lease.expired. lease.expired is a lease whose window
+	// ran out; every other end of a lease (a release, its device stopped
+	// or deleted, its attach failing, the hub stopping) is lease.released.
 	Type       string `json:"type"`
 	Device     string `json:"device,omitempty"`
 	Depth      int    `json:"depth,omitempty"`

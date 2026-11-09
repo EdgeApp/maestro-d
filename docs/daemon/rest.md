@@ -10,6 +10,7 @@ of it; anything that can speak HTTP can drive a device the same way.
 | unix socket | always | `~/.maestro-d/run/<name>/daemon.sock` (`$MAESTRO_D_HOME` overrides the root) |
 | TCP | daemon started with `--http ADDR` | `http://ADDR`, with `Authorization: Bearer <token>` when `--token` was given |
 | TCP + TLS | `serve --http ADDR --tls-cert F --tls-key F` | `https://ADDR`; a self-signed certificate needs its trust root on the client (`--ca`, `ca`) |
+| hub | `hub start --listen ADDR --token T` (default `:7433`, every interface) | `http(s)://ADDR` with the bearer token; devices are [leased](#leases-hubs) |
 
 ```sh
 maestro-d start --daemon api --http 127.0.0.1:7788 --token s3cret
@@ -30,6 +31,8 @@ Two headers matter:
   refuses to start without `--token`.
 - `X-Maestro-Request-Id: <uuid>` — optional; see
   [Request ids and retries](#request-ids-and-retries).
+- `X-Maestro-Lease: <lease id>` — on a hub, required on every route that
+  drives a device; see [Leases](#leases-hubs).
 
 Every request resets the idle timer.
 
@@ -178,18 +181,19 @@ attaches are retried the same way.
 | `DEVICE_NOT_FOUND` | 404 | 4 | no such device id |
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
-| `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device |
+| `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
 | `INTERRUPTED` | 499 | 130 | the request was cancelled mid-step |
 | `FORBIDDEN` | 403 | 2 | a [remote caller](#remote-callers) asked for the host: `runShell`, a host path, `cwd`, a web attach |
 | `PEER_UNAVAILABLE` | 503 | 3 | hub mesh: the hub that owns the device cannot be reached (`details.hub`); clients retry it |
 | `HUB_NAME_TAKEN` | 409 | 5 | hub mesh: a joining hub's name is already in use |
 | `HUB_VERSION` | 409 | 5 | hub mesh: a joining hub speaks another API version |
-| `LEASE_REQUIRED` | 409 | 5 | hub: a mutating request without the device's `X-Maestro-Lease` |
+| `LEASE_REQUIRED` | 409 | 5 | hub: a request that drives a device without its `X-Maestro-Lease` (or with another device's lease); the message names `maestro-d lease --device <id>` and `md.lease()`, `details.hint` the command |
 | `LEASE_EXPIRED` | 409 | 5 | hub: the request's lease has expired or was released |
 
-The last four belong to hubs and are part of the protocol now so every
-client maps them; a `serve` daemon never answers with them.
+`PEER_UNAVAILABLE`, `HUB_NAME_TAKEN` and `HUB_VERSION` belong to the hub
+mesh and are part of the protocol now so every client maps them; the two
+lease codes come from a hub. A `serve` daemon answers with none of them.
 
 A failed step with `optional: true` is *not* an error: `200`, `ok: true`,
 and `error` filled in for inspection.
@@ -212,12 +216,17 @@ curl -s -H "$H" $D/v1/status
     "runDir": "/Users/me/.maestro-d/run/api",
     "reportsDir": "/Users/me/.maestro-d/run/api/reports",
     "idleTimeout": 1800,
-    "tls": false
+    "tls": false,
+    "hub": "lab-mac"
   },
   "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
   "idleShutdownAt": "2026-09-10T10:30:00Z"
 }
 ```
+
+`daemon.hub` is the hub's name, present only on a hub (`hub start`):
+clients use it to know the daemon leases its devices. The name is the
+host's short name, lowercased.
 
 The only route that still answers while the daemon is shutting down. It
 runs no device discovery (adb, simctl), so it answers quickly and clients
@@ -227,7 +236,9 @@ use it as their liveness check.
 
 Detaches every device, shuts down the simulators and emulators the daemon
 booted, and exits. Answers `{"ok": true}` first; the process is gone a
-moment later. No body.
+moment later. No body. On a hub it is served only on the unix socket
+(`maestro-d hub stop`): a TCP caller, or a request a peer forwarded, gets
+`FORBIDDEN`.
 
 ### `GET /v1/events` — server-sent events
 
@@ -252,7 +263,11 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"29271FDH200ABP"}
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
-`device.stopped`, `daemon.shutdown`. `message` carries free text where
+`device.stopped`, `daemon.shutdown`, and on a hub `lease.granted`,
+`lease.released` and `lease.expired` (`message` names the holder).
+`lease.expired` is a lease whose window ran out; every other end of a lease
+is `lease.released`: a release, its device stopped or deleted, the attach in
+its `POST /v1/leases` failing, or the hub stopping. `message` carries free text where
 there is any. The stream never ends on its own; close the connection to
 stop.
 
@@ -287,6 +302,20 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
 | `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
+| `lease` | hub only: `{holder, expiresAt}` while the device is leased |
+| `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
+| `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
+
+On a hub started with `--share-device`, a remote caller sees only the
+shared devices, here and in `GET /v1/status`; every other device is
+`DEVICE_NOT_FOUND` on every route, and booting or creating one is refused.
+Its leases are left out of `GET /v1/leases`, and to that caller are
+`LEASE_EXPIRED` on the `/v1/leases/{lid}` routes, as an unknown lease is.
+The hub's unix socket sees every device. Whether an id is in the pool is
+looked up once, not per request or event: a device id is remembered for the
+hub's life, while an emulator serial (whichever AVD boots on that port next
+reuses it) and an id outside the pool are remembered for 30 s, or until a
+device is booted, stopped, created or deleted on the hub, or a lease ends.
 
 ### `GET /v1/catalog[?platform=ios|android][&available=true]`
 
@@ -423,6 +452,117 @@ Closes the driver; the device keeps running. `{"ok": true}`, or
 
 One device, same shape as the list entries. `DEVICE_NOT_FOUND` if the host
 cannot see it and the daemon does not hold it.
+
+## Leases (hubs)
+
+A hub (`maestro-d hub start`) lends each device to one client at a time.
+A client takes a **lease** on the device, then sends its id in
+`X-Maestro-Lease` on every request for that device. A plain daemon has no
+leases: its lease routes answer `USAGE`, and attach-and-own works as
+before.
+
+- **Which routes need it.** Every `/v1/devices/{id}/…` route — attach,
+  detach, commands, steps, flows, apps, blobs, artifacts, screenshot,
+  hierarchy, state, vars and eval — and `DELETE /v1/devices/{id}` while the
+  device is leased. A `DELETE` that names the device by its name is checked
+  as the device the name resolves to. Without the header: `LEASE_REQUIRED` (409, exit 5);
+  with a lease that has ended: `LEASE_EXPIRED` (409, exit 5).
+  `GET /v1/devices/{id}` and `…/info` stay open, and so do the listings.
+  This holds over the hub's unix socket too.
+- **A fixed window.** A lease runs from its grant (or its last explicit
+  renew) for `ttlSec` seconds: 8 hours (28800) by default. Using it never
+  moves its expiry; only `POST /v1/leases/{lid}/renew` does.
+- **Maximum.** Each device has a maximum window: 8 hours, or the hub's
+  `--lease-max DURATION`, or one device's `--lease-max DEVICE=DURATION` (by
+  id or name, as for `--share-device`). A `ttlSec` over it is `USAGE` naming
+  the maximum (`details.maxSec`), and nothing is granted; the same goes for
+  renew. Leases and device listings carry `maxSec`.
+- **Expiry.** At the end of the window the hub ends the lease: a request
+  still running under it is cancelled (it answers `INTERRUPTED` when its step
+  unwinds within about a second, else `LEASE_EXPIRED`; see below), the
+  device is detached, and shut down if the hub booted it for the lease, and
+  it is listed as available again. Every later request with that lease is
+  `LEASE_EXPIRED`. Releasing does the same at once. Work under the lease is
+  cancelled as far as its driver allows: a WebDriverAgent HTTP call runs to
+  its own timeout, and a WebDriverAgent start to its end (minutes when
+  cold). A request whose work has not unwound within about a second answers
+  `LEASE_EXPIRED` without it (an attach at once, and the driver it starts is
+  discarded). Until every request and attach under the ended lease has
+  returned, the device stays attached to it and is not detached, not
+  available, and a new lease on it is `DEVICE_IN_USE` ("being released"),
+  so that work never touches a later holder's session. A request whose
+  answer has already begun when the lease ends finishes that answer itself.
+- **Stopping the device.** Stopping or deleting a leased device
+  (`DELETE /v1/devices/{id}`, with its lease) ends the lease once the stop or
+  delete succeeds (`lease.released`). A lease that ends while that stop runs
+  waits for it and does not shut the device down again. While a device is
+  being released, a stop or delete without its lease is `DEVICE_IN_USE`.
+- **Clients never lease on their own.** The CLI and the JavaScript library
+  send a lease only when the client holds one (`maestro-d lease`, `md.lease()`,
+  recorded in `<home>/leases.json`); without one the request goes bare and
+  the hub answers `LEASE_REQUIRED`.
+
+### `POST /v1/leases`
+
+```sh
+curl -s -H "$H" -X POST $D/v1/leases \
+  -d '{"device":"99FA590E-…","ttlSec":3600,"holder":"ci@builder","attach":{}}'
+curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"simulator"}}'
+```
+
+| field | |
+| --- | --- |
+| `device` | the device to lease: one the hub (or, through the mesh, a peer) lists. An id no hub lists is `DEVICE_NOT_FOUND` and nothing is granted; when a peer did not answer it is `PEER_UNAVAILABLE` instead, since the device may be that peer's |
+| `select` | or the first free device that matches `{platform, kind, name, osVersion, hub, boot}`: platform and kind exactly, `name` the device's name (any case) or id, `osVersion` the version or a prefix (`"26"` matches `26.5`), `hub` this hub's name. Free means ready and neither leased nor attached; with `boot: true` a shut-down simulator or AVD is a candidate too, after the ready ones, and the hub boots it for the lease (`booted: true`) and shuts it down when the lease ends |
+| `ttlSec` | the window: default 28800 (8 hours), or the device's maximum when that is shorter; over the maximum is `USAGE` naming it. A selector skips a candidate whose maximum is shorter, and answers that `USAGE` when none is left |
+| `holder` | who holds it, as listings show; default the caller's address |
+| `attach` | an attach body ([`POST …/attach`](#post-v1devicesidattach)); the device is attached in the same call, and a failed attach ends the lease. Without it the device is only reserved |
+
+```json
+{
+  "ok": true, "exitCode": 0,
+  "lease": { "id": "5ae28c45-60e9-46f6-89e0-66b98f06b61d", "device": "99FA590E-…", "holder": "ci@builder", "expiresAt": "2026-11-08T13:00:00Z", "ttlSec": 3600, "maxSec": 28800 },
+  "device": { …as GET /v1/devices/{id}, with lease… }
+}
+```
+
+A device that another lease holds, or another daemon on the hub's machine
+has attached, is `DEVICE_IN_USE` (`details.holder`/`expiresAt`, or
+`details.owner`); so is one whose ended lease is still detaching it or
+shutting it down (a selector passes over it). Those teardowns hold up no
+lease call for another device. A selector that matches nothing is `DEVICE_NOT_FOUND`
+naming the selector; one whose matches are all taken is `DEVICE_IN_USE`
+listing them in `details.candidates`. The request takes an
+`X-Maestro-Request-Id`, so a retried request is granted once. With
+`attach`, the attach runs under the lease: if the window ends first, the
+answer is `LEASE_EXPIRED` at once, the attach is cancelled (or its driver
+discarded when it returns) and the device is left detached; it is
+released only after that attach has unwound.
+
+### `GET /v1/leases`, `GET /v1/leases/{lid}`
+
+The live leases (`{leases: [Lease…]}`), or one (`{lease}`); a lease that
+has ended is `LEASE_EXPIRED`. On a hub started with `--share-device`, a
+remote caller gets only the shared devices' leases: another device's lease
+is `LEASE_EXPIRED` to it here, on renew and on `DELETE`, and is left as it
+is.
+
+### `POST /v1/leases/{lid}/renew`
+
+Body `{ttlSec?}`. Sets the expiry to now plus `ttlSec`, which becomes the
+lease's window (default the lease's own window); answers `{lease}`. Over
+the device's maximum is `USAGE` naming it, and the lease is left as it was;
+a lease that has ended is `LEASE_EXPIRED`.
+
+```sh
+curl -s -H "$H" -X POST $D/v1/leases/$LEASE/renew -d '{"ttlSec":1800}'
+```
+
+### `DELETE /v1/leases/{lid}`
+
+Ends the lease: the device is detached (and shut down when the hub booted
+it for the lease). Answers the lease as it was; `LEASE_EXPIRED` when it had
+already ended.
 
 ## Steps
 

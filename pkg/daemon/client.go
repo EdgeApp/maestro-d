@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,14 @@ type Client struct {
 	// caller names its output files and fetches them back (a client
 	// targeting a daemon on another machine).
 	ClientOutputs bool
+	// leases maps a device id to the lease this client sends for it in
+	// X-Maestro-Lease (a hub's leased devices).
+	leaseMu sync.Mutex
+	leases  map[string]string
+	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
+	// request that carried this client's lease for device; the lease is
+	// forgotten first.
+	OnLeaseExpired func(device, lease string)
 	// Name is the daemon name this client was dialled for (informational).
 	Name string
 	// Info is daemon.json when the client was created from it.
@@ -106,6 +115,80 @@ func carriesRequestID(method, path string) bool {
 	}
 	p, _, _ := strings.Cut(path, "?")
 	return strings.Contains(p, "/commands/") || strings.HasSuffix(p, "/steps") || strings.HasSuffix(p, "/flows") || strings.HasSuffix(p, "/apps")
+}
+
+// SetLease makes the client send lease with every request for device.
+func (c *Client) SetLease(device, lease string) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	if c.leases == nil {
+		c.leases = map[string]string{}
+	}
+	c.leases[device] = lease
+}
+
+// LeaseOf returns the lease the client sends for device ("" for none).
+func (c *Client) LeaseOf(device string) string {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	return c.leases[device]
+}
+
+// ClearLease stops sending a lease for device.
+func (c *Client) ClearLease(device string) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	delete(c.leases, device)
+}
+
+// pathDevice returns the device id of a /v1/devices/{id}… path.
+func pathDevice(path string) string {
+	rest, ok := strings.CutPrefix(path, "/v1/devices/")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexAny(rest, "/?"); i >= 0 {
+		rest = rest[:i]
+	}
+	id, err := url.PathUnescape(rest)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+// setLeaseHeader adds the device's lease to a request for one of its routes.
+func (c *Client) setLeaseHeader(req *http.Request, path string) {
+	if id := pathDevice(path); id != "" {
+		if lease := c.LeaseOf(id); lease != "" {
+			req.Header.Set(HeaderLease, lease)
+		}
+	}
+}
+
+// noteLeaseExpired forgets a lease the daemon reported expired.
+func (c *Client) noteLeaseExpired(req *http.Request, resp *http.Response) {
+	lease := req.Header.Get(HeaderLease)
+	if lease == "" || resp.StatusCode != http.StatusConflict {
+		return
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+	// A HEAD's answer has no body: its code is in HeaderErrorCode.
+	if errorFromResponse(resp.StatusCode, resp.Header, data).Code != CodeLeaseExpired {
+		return
+	}
+	device := pathDevice(req.URL.Path)
+	if c.LeaseOf(device) == lease {
+		c.ClearLease(device)
+	}
+	if c.OnLeaseExpired != nil {
+		c.OnLeaseExpired(device, lease)
+	}
 }
 
 // retryable reports whether a request may be sent again: one with a
@@ -202,7 +285,8 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	if c.retry && carriesRequestID(method, path) {
+	c.setLeaseHeader(req, path)
+	if c.retry && (carriesRequestID(method, path) || (method == http.MethodPost && path == "/v1/leases")) {
 		req.Header.Set(HeaderRequestID, uuid.New().String())
 	}
 	if c.ClientOutputs && carriesRequestID(method, path) {
@@ -232,6 +316,7 @@ func (c *Client) do(req *http.Request) (*http.Response, *Error) {
 				err = rerr
 			}
 		} else if err == nil {
+			c.noteLeaseExpired(req, resp)
 			return resp, nil
 		} else if !canRetry || !retryableErr(err) {
 			return nil, Errorf(CodeDaemonUnavailable, "daemon %s: %v", c.describe(), unwrapURLError(err))
@@ -821,6 +906,7 @@ func (c *Client) putBlob(ctx context.Context, device, hex, path string, off, siz
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	c.setLeaseHeader(req, devPath(device, "/blobs/"+hex))
 	resp, e := c.do(req)
 	if e != nil {
 		return e
@@ -890,4 +976,53 @@ func (c *Client) Artifact(ctx context.Context, device, path string, w io.Writer)
 		return WrapErr(CodeDaemonUnavailable, err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Leases (hubs)
+
+// AcquireLease takes a lease (POST /v1/leases).
+func (c *Client) AcquireLease(ctx context.Context, req LeaseRequest) (*LeaseResult, error) {
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodPost, "/v1/leases", req, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// Lease returns a live lease by id; LEASE_EXPIRED when it is gone.
+func (c *Client) Lease(ctx context.Context, id string) (*LeaseResult, error) {
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodGet, "/v1/leases/"+url.PathEscape(id), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// RenewLease sets a lease's window to ttlSec seconds from now (0: the
+// lease's own window).
+func (c *Client) RenewLease(ctx context.Context, id string, ttlSec int) (*LeaseResult, error) {
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/renew", RenewRequest{TTLSec: ttlSec}, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ReleaseLease ends a lease: the hub detaches the device.
+func (c *Client) ReleaseLease(ctx context.Context, id string) (*LeaseResult, error) {
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodDelete, "/v1/leases/"+url.PathEscape(id), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// Leases lists a hub's live leases.
+func (c *Client) Leases(ctx context.Context) ([]Lease, error) {
+	var out LeasesResult
+	if e := c.call(ctx, http.MethodGet, "/v1/leases", nil, &out); e != nil {
+		return nil, e
+	}
+	return out.Leases, nil
 }

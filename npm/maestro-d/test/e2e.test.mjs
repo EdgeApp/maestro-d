@@ -12,7 +12,7 @@ import * as path from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { COMMANDS, MaestroD, MaestroError, PACKAGE_BY_TARGET, buildValue, isMaestroError, liveInfo } from '../dist/esm/index.js'
+import { COMMANDS, MaestroD, MaestroError, PACKAGE_BY_TARGET, buildValue, isMaestroError, liveInfo, uploadPath } from '../dist/esm/index.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, '..', '..', '..')
@@ -551,6 +551,240 @@ describe('hub', () => {
       () => MaestroD.connect({ url: `http://${target}`, token: 'nope' }),
       (err) => assert.ok(isMaestroError(err), String(err)),
     )
+  })
+})
+
+describe('leases', () => {
+  /** @type {string} */
+  let addr
+  const token = 'lease-token'
+  const hubName = 'jsleases'
+
+  before(() => {
+    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--listen', '127.0.0.1:0', '--token', token, '--json'], {
+      env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
+    })
+    addr = JSON.parse(out.toString()).daemon.httpAddr
+  })
+
+  after(() => {
+    execFileSync(bin, ['hub', 'stop', '--daemon', hubName])
+  })
+
+  const connectHub = () => MaestroD.connect({ hub: addr, token })
+
+  test('lease() attaches by default; a second client gets DEVICE_IN_USE; close() releases', async () => {
+    const a = await connectHub()
+    assert.equal(a.leasing, true)
+    const d = await a.lease({ device: 'mock-h1', holder: 'alice' })
+    assert.equal(d.info.attached, true)
+    assert.equal(d.lease.device, 'mock-h1')
+    // The default window is 8 hours, the hub's maximum.
+    assert.equal(d.lease.ttlSec, 28800)
+    assert.equal(d.lease.maxSec, 28800)
+    assert.equal((await d.tapOn('Leased')).ok, true)
+    // md.lease() records the lease in leases.json, as `maestro-d lease` does.
+    const onFile = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
+    assert.ok(onFile.some((r) => r.hub === `http://${addr}` && r.device === 'mock-h1' && r.id === d.lease.id), JSON.stringify(onFile))
+    const listed = (await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.equal(listed.lease.holder, 'alice')
+    assert.equal(listed.available, undefined)
+    assert.equal(listed.maxSec, 28800)
+    assert.equal((await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2').available, true)
+
+    const b = await connectHub()
+    await rejects(
+      () => b.lease({ device: 'mock-h1' }),
+      (err) => assert.ok(isMaestroError(err, 'DEVICE_IN_USE'), String(err)),
+    )
+    // Without the lease the hub refuses to run anything on the device. (b
+    // shares this process's home, so b.attach() would find a's lease in
+    // leases.json: one home is one client. Send the request bare.)
+    await rejects(
+      () => b.transport.json('/v1/devices/mock-h1/attach', { method: 'POST', body: { platform: 'mock' } }),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_REQUIRED') && /alice/.test(err.message), String(err)),
+    )
+    await a.close()
+    const gone = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
+    assert.ok(!gone.some((r) => r.device === 'mock-h1'), 'close() dropped the entry')
+    const free = (await b.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.equal(free.lease, undefined)
+    assert.equal(free.attached, false)
+    await b.close()
+  })
+
+  test('attach: false only reserves; a selector picks the first free device', async () => {
+    const md = await connectHub()
+    const first = await md.lease({ select: { platform: 'mock' }, attach: false })
+    assert.equal(first.id, 'mock-h1')
+    assert.equal(first.info.attached, false)
+    await rejects(
+      () => first.tapOn('x'),
+      (err) => assert.ok(isMaestroError(err, 'DEVICE_NOT_ATTACHED'), String(err)),
+    )
+    const second = await md.lease({ select: { platform: 'mock' } })
+    assert.equal(second.id, 'mock-h2')
+    await rejects(
+      () => md.lease({ select: { platform: 'mock' } }),
+      (err) => assert.ok(isMaestroError(err, 'DEVICE_IN_USE'), String(err)),
+    )
+    await rejects(
+      () => md.lease({ select: { platform: 'android', name: 'none' } }),
+      (err) => assert.ok(isMaestroError(err, 'DEVICE_NOT_FOUND') && /platform=android/.test(err.message), String(err)),
+    )
+    await first.release()
+    await first.release() // a second release does nothing
+    await md.close()
+  })
+
+  test('no auto-renew: a lease ends at its window, used or idle; only renew() moves it', async () => {
+    const md = await connectHub()
+    const d = await md.lease({ device: 'mock-h1', ttlSec: 3 })
+    const end = d.lease.expiresAt
+    assert.equal((await d.tapOn('Mine')).ok, true)
+    assert.equal(d.lease.expiresAt, end, 'use does not move the window')
+    // Idle past the window (the hub sweeps every second): expired.
+    await new Promise((resolve) => setTimeout(resolve, 4500))
+    await rejects(
+      () => d.tapOn('Late'),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_EXPIRED'), String(err)),
+    )
+    // An explicit renew moves it, by the ttlSec asked; over the maximum is USAGE.
+    const e = await md.lease({ device: 'mock-h1', ttlSec: 3 })
+    const renewed = await e.renew({ ttlSec: 30 })
+    assert.equal(renewed.id, e.lease.id)
+    assert.equal(renewed.ttlSec, 30)
+    assert.ok(Date.parse(renewed.expiresAt) > Date.parse(end))
+    await new Promise((resolve) => setTimeout(resolve, 4500))
+    assert.equal((await e.tapOn('Renewed')).ok, true)
+    await rejects(
+      () => e.renew({ ttlSec: 28801 }),
+      (err) => assert.ok(isMaestroError(err, 'USAGE') && /maximum/.test(err.message), String(err)),
+    )
+    assert.equal((await e.renew()).ttlSec, 30, 'renew() defaults to the lease window')
+    await rejects(
+      () => md.lease({ device: 'mock-h2', ttlSec: 28801 }),
+      (err) => assert.ok(isMaestroError(err, 'USAGE') && /8h0m0s/.test(err.message), String(err)),
+    )
+    await e.release()
+    assert.equal(await e.renew(), undefined, 'nothing to renew once released')
+    await md.close()
+  })
+
+  test('a lease the hub ended is forgotten on renew', async () => {
+    const md = await connectHub()
+    const d = await md.lease({ device: 'mock-h2', ttlSec: 600, attach: false })
+    const other = await connectHub()
+    await other.transport.json(`/v1/leases/${encodeURIComponent(d.lease.id)}`, { method: 'DELETE' })
+    await rejects(
+      () => d.renew(),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_EXPIRED'), String(err)),
+    )
+    assert.equal(d.lease, undefined)
+    await md.close()
+    await other.close()
+  })
+
+  test('attach() on a hub never takes a lease: LEASE_REQUIRED without one; a lease from leases.json is used', async () => {
+    const md = await connectHub()
+    await rejects(
+      () => md.attach({ device: 'mock-h1', platform: 'mock' }),
+      (err) =>
+        assert.ok(
+          isMaestroError(err, 'LEASE_REQUIRED') && /md\.lease\(\)/.test(err.message) && /maestro-d lease --device/.test(err.message),
+          String(err),
+        ),
+    )
+    const free = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.equal(free.lease, undefined, 'no lease was taken')
+    // A lease taken in the shell, in the same home, is found and used.
+    const out = execFileSync(bin, ['lease', '--device', 'mock-h1', '--no-attach', '--target-hub=' + addr, '--token', token, '--json'])
+    const shell = JSON.parse(out.toString()).lease
+    const d = await md.attach({ device: 'mock-h1', platform: 'mock' })
+    assert.equal(d.lease.id, shell.id)
+    assert.equal(d.info.attached, true)
+    assert.equal((await d.tapOn('ShellLease')).ok, true)
+    // detach() and close() leave a shell's lease alone.
+    await d.detach()
+    await md.close()
+    const md2 = await connectHub()
+    const held = (await md2.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1')
+    assert.ok(held.lease, 'the shell lease outlived close()')
+    // A lease the hub reports expired leaves leases.json.
+    await md2.transport.json(`/v1/leases/${encodeURIComponent(shell.id)}`, { method: 'DELETE' })
+    const again = await rejects(
+      () => md2.attach({ device: 'mock-h1', platform: 'mock' }),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_EXPIRED'), String(err)),
+    )
+    assert.ok(again)
+    const left = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
+    assert.ok(!left.some((r) => r.id === shell.id), JSON.stringify(left))
+    await md2.close()
+  })
+
+  test("a blob upload's body-less HEAD refusal keeps its code: LEASE_REQUIRED, then LEASE_EXPIRED and the entry dropped", async () => {
+    const file = path.join(tmp, 'lease-blob.bin')
+    fs.writeFileSync(file, 'blob under a lease')
+    const md = await connectHub()
+    await rejects(
+      () => uploadPath(md.transport, '/v1/devices/mock-h1', file),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_REQUIRED'), String(err)),
+    )
+    const out = execFileSync(bin, ['lease', '--device', 'mock-h1', '--no-attach', '--target-hub=' + addr, '--token', token, '--json'])
+    const shell = JSON.parse(out.toString()).lease
+    const d = await md.attach({ device: 'mock-h1', platform: 'mock' })
+    assert.equal(d.lease.id, shell.id)
+    const base = `/v1/devices/${encodeURIComponent(d.id)}`
+    await uploadPath(md.transport, base, file)
+    await md.transport.json(`/v1/leases/${encodeURIComponent(shell.id)}`, { method: 'DELETE' })
+    await rejects(
+      () => uploadPath(md.transport, base, file),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_EXPIRED'), String(err)),
+    )
+    const left = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
+    assert.ok(!left.some((r) => r.id === shell.id), JSON.stringify(left))
+    await md.close()
+  })
+
+  test('an id the hub does not list is DEVICE_NOT_FOUND, and nothing is leased', async () => {
+    const md = await connectHub()
+    await rejects(
+      () => md.lease({ device: 'mock-unlisted', attach: { platform: 'mock' } }),
+      (err) => assert.ok(isMaestroError(err, 'DEVICE_NOT_FOUND') && /not listed/.test(err.message), String(err)),
+    )
+    const { leases } = await md.transport.json('/v1/leases')
+    assert.ok(!leases.some((l) => /mock-unlisted/.test(l.device)), JSON.stringify(leases))
+    await md.close()
+  })
+
+  test('an attach that uploads a file follows the lease; a failed one releases it', async () => {
+    const md = await connectHub()
+    const app = path.join(tmp, 'lease-app.apk')
+    fs.writeFileSync(app, 'PK apk')
+    const d = await md.lease({ device: 'mock-h2', attach: { platform: 'mock', appFile: app, noAppInstall: true } })
+    assert.equal(d.info.attached, true)
+    await d.release()
+    await rejects(
+      () => md.lease({ device: 'mock-h2', attach: { platform: 'mock', appFile: path.join(tmp, 'missing.apk') } }),
+      (err) => assert.ok(err instanceof Error),
+    )
+    const listed = (await md.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h2')
+    assert.equal(listed.lease, undefined, 'the failed attach released its lease')
+    await md.close()
+  })
+
+  test('lease() needs a device or a selector, and a hub', async () => {
+    const md = await connectHub()
+    await assert.rejects(() => md.lease({}), TypeError)
+    await assert.rejects(() => md.lease({ device: 'a', select: {} }), TypeError)
+    await md.close()
+    await rejects(
+      () => daemon.lease({ device: 'mock-1' }),
+      (err) => assert.ok(isMaestroError(err, 'USAGE') && /not a hub/.test(err.message), String(err)),
+    )
+    // On a plain daemon release() does nothing and succeeds.
+    await dev.release()
+    assert.equal(dev.info.attached, true)
   })
 })
 

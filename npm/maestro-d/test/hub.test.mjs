@@ -19,6 +19,10 @@ import { isRetryableError, isRetryableResponse } from '../dist/esm/transport.js'
 let requests = []
 /** What the next step-running requests do: 'drop' | 'peer' | 'gateway' | 'device-error'. */
 let plan = []
+/** What the next lease DELETEs answer: 'fail' (a 500 INTERNAL) | 'expired' | undefined (ok). */
+let releasePlan = []
+/** True to answer /v1/status as a hub. */
+let asHub = false
 
 const ok = (extra) => ({ ok: true, exitCode: 0, ...extra })
 const DEVICE = { id: 'mock-1', platform: 'mock', ready: true, attached: true }
@@ -38,7 +42,18 @@ function handler(req, res) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       return res.end('id: 1\nevent: step\ndata: {"type":"step","device":"mock-1","seq":1}\n\n')
     }
-    if (url.pathname === '/v1/status') return send(200, ok({ daemon: { name: 'hub', pid: 1, apiVersion: '1', version: 't' }, devices: [] }))
+    if (url.pathname === '/v1/status') {
+      return send(200, ok({ daemon: { name: 'hub', pid: 1, apiVersion: '1', version: 't', ...(asHub ? { hub: 'hub' } : {}) }, devices: [] }))
+    }
+    if (url.pathname === '/v1/leases' && req.method === 'POST') {
+      return send(200, ok({ lease: { id: 'lease-1', device: 'mock-1', expiresAt: '2099-01-01T00:00:00Z', ttlSec: 600, holder: 'me' } }))
+    }
+    if (url.pathname.startsWith('/v1/leases/') && req.method === 'DELETE') {
+      const next = releasePlan.shift()
+      if (next === 'fail') return send(500, { ok: false, exitCode: 4, error: { code: 'INTERNAL', message: 'store unavailable' } })
+      if (next === 'expired') return send(409, { ok: false, exitCode: 5, error: { code: 'LEASE_EXPIRED', message: 'gone' } })
+      return send(200, ok({}))
+    }
     if (url.pathname.endsWith('/attach')) return send(200, ok({ device: DEVICE }))
     const next = /\/(commands|steps|flows)/.test(url.pathname) ? plan.shift() : undefined
     if (next === 'drop') return req.socket.destroy()
@@ -74,6 +89,8 @@ after(() => {
 beforeEach(() => {
   requests = []
   plan = []
+  releasePlan = []
+  asHub = false
   delete process.env.MAESTRO_D_HUB
   delete process.env.MAESTRO_D_TOKEN
   delete process.env.MAESTRO_D_CA
@@ -262,6 +279,82 @@ describe('TLS', () => {
       await assert.rejects(() => MaestroD.connect({ hub }), (err) => isMaestroError(err, 'DAEMON_UNAVAILABLE') && err.exitCode === 3)
     } finally {
       tlsServer.close()
+    }
+  })
+})
+
+describe('leases.json', () => {
+  test('the format the CLI reads: record, replace, find, drop, prune; an unreadable file reads as empty', async () => {
+    const lf = await import('../dist/esm/leasefile.js')
+    const saved = process.env.MAESTRO_D_HOME
+    process.env.MAESTRO_D_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-leasefile-'))
+    try {
+      assert.deepEqual(lf.loadLeases(), [])
+      const future = new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z')
+      lf.recordLease('http://hub:7433', { id: 'l1', device: 'd1@hub', expiresAt: future, ttlSec: 600, holder: 'me' })
+      lf.recordLease('http://hub:7433', { id: 'l2', device: 'd2@hub', expiresAt: '', ttlSec: 0 })
+      lf.recordLease('unix:hub', { id: 'l3', device: 'd1@hub', expiresAt: future, ttlSec: 600 })
+      lf.recordLease('http://hub:7433', { id: 'l1b', device: 'd1@hub', expiresAt: future, ttlSec: 600 })
+      assert.equal(lf.findLease('http://hub:7433', 'd1@hub').id, 'l1b')
+      const file = JSON.parse(fs.readFileSync(lf.leasesPath(), 'utf8'))
+      assert.deepEqual(Object.keys(file.leases.find((r) => r.id === 'l2')), ['hub', 'device', 'id'])
+      assert.equal(fs.statSync(lf.leasesPath()).mode & 0o777, 0o600)
+      lf.dropLease('http://hub:7433', 'l1b')
+      lf.dropLease('http://hub:7433', 'nothing')
+      assert.equal(lf.findLease('http://hub:7433', 'd1@hub'), undefined)
+      assert.equal(lf.findLease('unix:hub', 'd1@hub').id, 'l3')
+      lf.recordLease('unix:hub', { id: 'old', device: 'd9', expiresAt: new Date(Date.now() - 8 * 24 * 3600_000).toISOString(), ttlSec: 1 })
+      assert.equal(lf.findLease('unix:hub', 'd9'), undefined, 'a week-old entry is pruned')
+      fs.writeFileSync(lf.leasesPath(), '{')
+      assert.deepEqual(lf.loadLeases(), [])
+    } finally {
+      process.env.MAESTRO_D_HOME = saved
+    }
+  })
+})
+
+describe('release', () => {
+  test('a release the hub fails keeps the lease, here and in leases.json, so it can be released again', async () => {
+    const lf = await import('../dist/esm/leasefile.js')
+    const saved = process.env.MAESTRO_D_HOME
+    const home = path.join(tmp, 'release-home')
+    fs.mkdirSync(home, { recursive: true })
+    process.env.MAESTRO_D_HOME = home
+    asHub = true
+    try {
+      const md = await MaestroD.connect({ url: `http://${addr}` })
+      const dev = await md.lease({ select: { platform: 'mock' }, attach: false })
+      assert.equal(dev.lease.id, 'lease-1')
+      assert.equal(lf.findLease(md.leaseKey, 'mock-1').id, 'lease-1')
+
+      releasePlan = ['fail']
+      await assert.rejects(() => dev.release(), (err) => isMaestroError(err, 'INTERNAL'))
+      assert.equal(dev.lease?.id, 'lease-1', 'the handle keeps the lease')
+      assert.equal(lf.findLease(md.leaseKey, 'mock-1')?.id, 'lease-1', 'leases.json keeps the lease')
+
+      // close() swallows the failure, and still keeps the lease for another try.
+      releasePlan = ['fail']
+      await md.close()
+      assert.equal(lf.findLease(md.leaseKey, 'mock-1')?.id, 'lease-1')
+
+      // A second try that succeeds forgets it.
+      await dev.release()
+      assert.equal(dev.lease, undefined)
+      assert.equal(lf.findLease(md.leaseKey, 'mock-1'), undefined)
+      const deletes = requests.filter((r) => r.method === 'DELETE' && r.url === '/v1/leases/lease-1')
+      assert.equal(deletes.length, 3)
+
+      // A hub that answers LEASE_EXPIRED has ended it already: forgotten too.
+      const md2 = await MaestroD.connect({ url: `http://${addr}` })
+      const dev2 = await md2.lease({ select: { platform: 'mock' }, attach: false })
+      releasePlan = ['expired']
+      await dev2.release()
+      assert.equal(dev2.lease, undefined)
+      assert.equal(lf.findLease(md2.leaseKey, 'mock-1'), undefined)
+      await md2.close()
+    } finally {
+      process.env.MAESTRO_D_HOME = saved
+      if (saved === undefined) delete process.env.MAESTRO_D_HOME
     }
   })
 })

@@ -17,6 +17,8 @@ type EventBus struct {
 	ring    []Event
 	ringCap int
 	subs    map[chan Event]string // channel → device filter ("" = all)
+	// observe, when set, sees each event before it is published.
+	observe func(Event)
 }
 
 // NewEventBus creates an event bus keeping the last ringCap events.
@@ -30,6 +32,9 @@ func NewEventBus(ringCap int) *EventBus {
 // Publish stamps and broadcasts an event. Slow subscribers drop events
 // rather than block the step that produced them.
 func (h *EventBus) Publish(ev Event) {
+	if h.observe != nil {
+		h.observe(ev)
+	}
 	h.mu.Lock()
 	h.seq++
 	ev.Seq = h.seq
@@ -87,6 +92,12 @@ func (h *EventBus) Recent(device string, afterSeq int64) []Event {
 
 // ServeSSE streams events as text/event-stream until the client leaves.
 func (h *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
+	h.ServeSSEView(w, r, nil)
+}
+
+// ServeSSEView is ServeSSE with each event passed through view first: an
+// event it returns false for is not sent. nil sends every event.
+func (h *EventBus) ServeSSEView(w http.ResponseWriter, r *http.Request, view func(Event) (Event, bool)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -107,6 +118,12 @@ func (h *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	write := func(ev Event) bool {
+		if view != nil {
+			var ok bool
+			if ev, ok = view(ev); !ok {
+				return true
+			}
+		}
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return true

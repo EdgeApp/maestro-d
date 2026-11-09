@@ -17,6 +17,7 @@ import type {
   DeviceInfo,
   Envelope,
   HierarchyNode,
+  Lease,
   PlatformInfo,
   Step,
   StepResult,
@@ -192,8 +193,15 @@ export class MaestroDevice {
   info: DeviceInfo
   /** Aborts every request made through this handle. */
   readonly signal?: AbortSignal
+  /**
+   * The hub lease this handle holds on the device, if any: from
+   * `MaestroD.lease()`, or the one `attach()` found in leases.json.
+   */
+  lease?: Lease
   private readonly transport: Transport
   private readonly base: string
+  private onRenew?: (lease: Lease) => void
+  private onRelease?: (dev: MaestroDevice, lease: Lease) => void
 
   /** @internal Use `MaestroD.attach()`. */
   constructor(transport: Transport, daemon: { readonly name: string }, info: DeviceInfo, signal?: AbortSignal) {
@@ -444,10 +452,82 @@ export class MaestroDevice {
   // -------------------------------------------------------------------------
   // Lifecycle
 
-  /** Close the driver. The device (and daemon) keep running. */
+  /**
+   * Close the driver. The device (and daemon) keep running; on a hub the
+   * lease stays held until `release()`.
+   */
   async detach(opts: CallOptions = {}): Promise<void> {
     await this.transport.json<Envelope>(`${this.base}/detach`, { method: 'POST', signal: this.sig(opts) })
     this.info = { ...this.info, attached: false }
+  }
+
+  /**
+   * @internal Bind a hub lease to this handle: it is sent with every
+   * request for the device until `release()`. Nothing renews it on its
+   * own.
+   */
+  holdLease(
+    lease: Lease,
+    opts: { onRenew?: (lease: Lease) => void; onRelease?: (dev: MaestroDevice, lease: Lease) => void } = {},
+  ): void {
+    this.lease = lease
+    if (opts.onRenew) this.onRenew = opts.onRenew
+    if (opts.onRelease) this.onRelease = opts.onRelease
+    this.transport.leases.set(lease.device, lease.id)
+  }
+
+  /**
+   * Renew the lease explicitly: its window starts again now and lasts
+   * `ttlSec` seconds (default the lease's own window). A lease is a fixed
+   * window that using the device never extends, so a run longer than the
+   * window renews it. Over the device's maximum (`maxSec`) rejects with
+   * USAGE; once the lease is gone, with LEASE_EXPIRED.
+   */
+  async renew(opts: CallOptions & { ttlSec?: number } = {}): Promise<Lease | undefined> {
+    const lease = this.lease
+    if (!lease) return undefined
+    try {
+      const body = opts.ttlSec !== undefined ? { ttlSec: opts.ttlSec } : {}
+      const res = await this.transport.json<Envelope & { lease: Lease }>(`/v1/leases/${encodeURIComponent(lease.id)}/renew`, {
+        method: 'POST',
+        body,
+        signal: this.sig(opts),
+      })
+      if (this.lease === lease) this.lease = res.lease
+      this.onRenew?.(res.lease)
+      return res.lease
+    } catch (err) {
+      if (err instanceof MaestroError && err.code === 'LEASE_EXPIRED') this.forgetLease()
+      throw err
+    }
+  }
+
+  /**
+   * End this handle's lease: the hub detaches the device and it is free for
+   * others. Does nothing when the handle holds no lease (a daemon that is
+   * not a hub has none). The lease is forgotten (here and in leases.json)
+   * only once the hub has ended it, or answers that it already ended: a
+   * release that fails keeps it, so a later release() or `maestro-d
+   * release` can try again.
+   */
+  async release(opts: CallOptions = {}): Promise<void> {
+    const lease = this.lease
+    if (!lease) return
+    try {
+      await this.transport.json<Envelope>(`/v1/leases/${encodeURIComponent(lease.id)}`, { method: 'DELETE', signal: this.sig(opts) })
+    } catch (err) {
+      if (!(err instanceof MaestroError && err.code === 'LEASE_EXPIRED')) throw err
+    }
+    if (this.lease?.id === lease.id) this.forgetLease()
+    this.info = { ...this.info, attached: false }
+  }
+
+  private forgetLease(): void {
+    const lease = this.lease
+    if (!lease) return
+    this.lease = undefined
+    if (this.transport.leases.get(lease.device) === lease.id) this.transport.leases.delete(lease.device)
+    this.onRelease?.(this, lease)
   }
 
   /**

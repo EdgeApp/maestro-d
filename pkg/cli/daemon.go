@@ -102,6 +102,15 @@ func printJSONStdout(v any) {
 // --target-hub (or MAESTRO_D_HUB) it returns a TCP client for that daemon
 // or hub instead, and never spawns.
 func connectDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
+	c, err := dialDaemon(ctx, o, spawn)
+	if err != nil {
+		return nil, err
+	}
+	wireLeases(c, o)
+	return c, nil
+}
+
+func dialDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
 	if o.Target != "" {
 		return connectTarget(o)
 	}
@@ -162,6 +171,13 @@ func ensureAttached(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 			return nil, err
 		}
 	}
+	return attachIfNeeded(ctx, c, o, id, info)
+}
+
+// attachIfNeeded is ensureAttached with the device's record already read
+// (nil when the daemon does not list it).
+func attachIfNeeded(ctx context.Context, c *daemon.Client, o *daemonOpts, id string, info *daemon.DeviceInfo) (*daemon.DeviceInfo, error) {
+	var err error
 	if info != nil && info.Attached {
 		if o.Attach.AppID != "" && info.AppID != "" && o.Attach.AppID != info.AppID {
 			progress("warning: %s is attached with --app-id %s; ignoring --app-id %s (detach to change it)", id, info.AppID, o.Attach.AppID)
@@ -199,10 +215,22 @@ func session(ctx context.Context, o *daemonOpts) (*daemon.Client, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := ensureAttached(ctx, c, o, id); err != nil {
+	if id, _, err = leaseAndAttach(ctx, c, o, id); err != nil {
 		return nil, "", err
 	}
 	return c, id, nil
+}
+
+// leaseAndAttach sends the device's lease on file, if this client holds
+// one (see lease.go; it never takes one: on a hub, without a lease the
+// attach fails LEASE_REQUIRED), then attaches the device if needed.
+func leaseAndAttach(ctx context.Context, c *daemon.Client, o *daemonOpts, id string) (string, *daemon.DeviceInfo, error) {
+	lid, info, err := heldLease(ctx, c, o, id)
+	if err != nil {
+		return id, nil, err
+	}
+	info, err = attachIfNeeded(ctx, c, o, lid, info)
+	return lid, info, err
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +388,16 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		fmt.Fprintln(w, "No devices.")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+	// A hub's listing carries lease state: show who holds each device.
+	leases := false
+	for _, d := range devs {
+		leases = leases || d.Lease != nil || d.Available
+	}
+	if leases {
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", "NAME")
+	} else {
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+	}
 	for _, d := range devs {
 		state := d.State
 		if d.Busy {
@@ -380,6 +417,17 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		if d.BootedBy == daemon.BootedByDaemon {
 			name += " [booted by daemon]"
 		}
+		if leases {
+			lease := "-"
+			switch {
+			case d.Lease != nil:
+				lease = fmt.Sprintf("%s (%s)", daemon.HolderName(d.Lease.Holder), untilExpiry(d.Lease.ExpiresAt))
+			case d.Available:
+				lease = "available"
+			}
+			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", d.ID, d.Platform, d.Kind, state, att, lease, strings.TrimSpace(name))
+			continue
+		}
 		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", d.ID, d.Platform, d.Kind, state, att, strings.TrimSpace(name))
 	}
 }
@@ -394,7 +442,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
-		installCommand, uninstallCommand, packCommand,
+		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
 	}, oneShotCommands()...)
 }
 
@@ -597,40 +645,46 @@ var daemonStopCommand = &cli.Command{
 				return nil
 			}
 		}
-		timeout := 30 * time.Second
-		if o.StartTimeout > 0 {
-			timeout = time.Duration(o.StartTimeout) * time.Second
+		return stopDaemons(ctx, o, names, "daemon")
+	}),
+}
+
+// stopDaemons shuts the named daemons down and waits for them to exit; with
+// --all, one that is not running is skipped.
+func stopDaemons(ctx context.Context, o *daemonOpts, names []string, what string) error {
+	timeout := 30 * time.Second
+	if o.StartTimeout > 0 {
+		timeout = time.Duration(o.StartTimeout) * time.Second
+	}
+	var stopped []string
+	for _, name := range names {
+		client, err := daemon.Dial(name)
+		if err != nil {
+			return err
 		}
-		var stopped []string
-		for _, name := range names {
-			client, err := daemon.Dial(name)
-			if err != nil {
+		if client == nil {
+			if o.stopAll {
+				continue
+			}
+			return daemon.Errorf(daemon.CodeDaemonUnavailable, "%s %q is not running", what, name)
+		}
+		if err := client.Shutdown(ctx); err != nil {
+			if de, ok := err.(*daemon.Error); !ok || de.Code != daemon.CodeDaemonUnavailable {
 				return err
 			}
-			if client == nil {
-				if o.stopAll {
-					continue
-				}
-				return daemon.Errorf(daemon.CodeDaemonUnavailable, "daemon %q is not running", name)
-			}
-			if err := client.Shutdown(ctx); err != nil {
-				if de, ok := err.(*daemon.Error); !ok || de.Code != daemon.CodeDaemonUnavailable {
-					return err
-				}
-			}
-			if !daemon.WaitForExit(client.Info, timeout) {
-				return daemon.Errorf(daemon.CodeDaemonUnavailable, "daemon %q (pid %d) did not exit within %v", name, client.Info.PID, timeout)
-			}
-			stopped = append(stopped, name)
-			if !o.JSON {
-				fmt.Printf("daemon %q stopped\n", name)
-			}
 		}
-		if o.JSON {
-			printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
+		if !daemon.WaitForExit(client.Info, timeout) {
+			return daemon.Errorf(daemon.CodeDaemonUnavailable, "%s %q (pid %d) did not exit within %v", what, name, client.Info.PID, timeout)
 		}
-		return nil
-	}),
+		stopped = append(stopped, name)
+		if !o.JSON {
+			fmt.Printf("%s %q stopped\n", what, name)
+		}
+	}
+	if o.JSON {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
+	}
+	return nil
 }
 
 var statusFlags = flagSet(daemonSelectFlags, targetFlags)
@@ -666,6 +720,9 @@ var daemonStatusCommand = &cli.Command{
 		d := st.Daemon
 		fmt.Printf("daemon %q: pid %d, version %s, up since %s\n", d.Name, d.PID, d.Version, d.StartedAt)
 		fmt.Printf("  socket:  %s\n", d.SocketPath)
+		if d.Hub != "" {
+			fmt.Printf("  hub:     %s (leases on)\n", d.Hub)
+		}
 		if d.HTTPAddr != "" {
 			scheme := "http"
 			if d.TLS {
@@ -881,7 +938,7 @@ explicitly to control the flags or to pay the driver start-up cost early.
 		if err != nil {
 			return err
 		}
-		dev, err := ensureAttached(ctx, client, o, o.Device)
+		_, dev, err := leaseAndAttach(ctx, client, o, o.Device)
 		if err != nil {
 			return err
 		}

@@ -213,7 +213,7 @@ func TestTargetHub_RefusesHostDirectories(t *testing.T) {
 // the environment, before it sends anything; a local command keeps it.
 func TestTargetHub_RefusesAppiumCaps(t *testing.T) {
 	clearTargetEnv(t)
-	for _, flags := range [][]dflag{attachCmdFlags, oneShotFlags} {
+	for _, flags := range [][]dflag{attachCmdFlags, leaseFlags, oneShotFlags} {
 		_, _, err := parseDaemonArgs([]string{"--target-hub=h", "--caps", "caps.json"}, flags, nil)
 		if de, ok := err.(*daemon.Error); !ok || de.Code != daemon.CodeUsage || !strings.Contains(err.Error(), "--caps") {
 			t.Errorf("--caps: %v", err)

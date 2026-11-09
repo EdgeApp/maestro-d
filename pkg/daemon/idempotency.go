@@ -166,9 +166,15 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// idempotent wraps a step-running handler with the outcome cache. It is
-// the outermost wrapper of its route, so a retry never queues behind the
-// device's busy lock that its own first attempt holds.
+// idempotent wraps a step-running handler with the outcome cache, outside
+// the device's busy lock, so a retry never queues behind the lock its own
+// first attempt holds. On a hub it sits inside the lease guard (dev), not
+// outside it: every attempt, a retry answered from the cache included, is
+// checked for the device's share and lease first, so the cache never
+// replays an outcome to a caller the guard would refuse. The guard's
+// context ends with the lease (underLease); this wrapper detaches the
+// request from its client, so it watches the lease itself (leaseFrom) to
+// keep the lease's end cancelling the request at once.
 func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(HeaderRequestID)
@@ -186,7 +192,19 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 			select {
 			case <-e.done:
 			case <-r.Context().Done():
-				return
+				// The lease ending also ends this context. A client that
+				// is still here gets the running attempt's outcome, which
+				// the lease's end cancels too; only a client that has
+				// gone gets no answer.
+				client := clientContext(r.Context())
+				if client.Err() != nil {
+					return
+				}
+				select {
+				case <-e.done:
+				case <-client.Done():
+					return
+				}
 			}
 			logger.Info("request %s %s %s: answered from the outcome cache (status %d)", id, r.Method, r.URL.Path, e.status)
 			e.replay(w)
@@ -204,6 +222,13 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 		defer cancel()
+		if le := leaseFrom(r.Context()); le != nil {
+			// Detached from the client, but never from its lease: the end
+			// of the lease cancels the request at once, not after the grace.
+			var stopLease context.CancelFunc
+			ctx, stopLease = untilLeaseEnds(ctx, le)
+			defer stopLease()
+		}
 		grace := s.idemGrace
 		stop := context.AfterFunc(r.Context(), func() {
 			t := time.NewTimer(grace)

@@ -242,6 +242,9 @@ already has it) and installed on the device's machine.
 		if err != nil {
 			return err
 		}
+		if id, _, err = heldLease(ctx, client, o, id); err != nil {
+			return err
+		}
 		app, err := filepath.Abs(args[0])
 		if err != nil {
 			return daemon.WrapErr(daemon.CodeUsage, err)
@@ -291,6 +294,9 @@ var uninstallCommand = &cli.Command{
 		}
 		id, err := resolveDevice(ctx, client, o)
 		if err != nil {
+			return err
+		}
+		if id, _, err = heldLease(ctx, client, o, id); err != nil {
 			return err
 		}
 		if err := client.UninstallApp(ctx, id, args[0]); err != nil {

@@ -220,6 +220,50 @@ export interface DeviceInfo {
   owner?: string
   /** 'maestro-d' for a simulator or AVD `createDevice()` made; only those delete without `force`. */
   createdBy?: string
+  /** On a hub: the device's lease, when it is leased. */
+  lease?: DeviceLease
+  /** On a hub: true for a ready device that is neither leased nor attached. */
+  available?: boolean
+  /** On a hub: the longest lease window the device takes, in seconds. */
+  maxSec?: number
+}
+
+/** The lease state a hub's device listings carry. */
+export interface DeviceLease {
+  holder?: string
+  /** RFC 3339: the end of the lease's fixed window. */
+  expiresAt: string
+}
+
+/** A hub's lease on one device (`POST /v1/leases`). */
+export interface Lease {
+  /** Sent as X-Maestro-Lease. */
+  id: string
+  device: string
+  holder?: string
+  /** RFC 3339: the end of the window. Using the lease never moves it; only `renew()` does. */
+  expiresAt: string
+  /** The window's length in seconds. */
+  ttlSec: number
+  /** The device's maximum window in seconds. */
+  maxSec?: number
+  /** True when the hub booted the device for this lease; it shuts it down again when the lease ends. */
+  booted?: boolean
+}
+
+/**
+ * Picks a device on a hub by its properties: platform and kind exactly,
+ * name as the device's name or id, osVersion as the version or a prefix of
+ * it ('26' matches '26.5'), hub as the hub's name.
+ */
+export interface LeaseSelector {
+  platform?: string
+  kind?: string
+  name?: string
+  osVersion?: string
+  hub?: string
+  /** Let a shut-down simulator or AVD be picked; the hub boots it for the lease. */
+  boot?: boolean
 }
 
 /** Options for opening a driver on a device (`maestro-d attach`). */
@@ -260,7 +304,10 @@ export interface AttachOptions {
   outputDir?: string
   /** Base directory for relative paths in steps. */
   flowDir?: string
-  /** Driver-specific extras: headed, browser, windowSize, userDataDir, androidTcpForward, capsFile, newCommandTimeout. */
+  /**
+   * Driver-specific extras: headed, browser, windowSize, userDataDir, androidTcpForward, capsFile, newCommandTimeout.
+   * A hub refuses capsFile, driver appium and appiumUrl as FORBIDDEN: Appium attaches only over the unix socket.
+   */
   extra?: Record<string, unknown>
 }
 
@@ -355,6 +402,8 @@ export interface DaemonInfo {
   idleTimeout: number
   /** True when the TCP listener serves HTTPS. */
   tls?: boolean
+  /** The hub's name when the daemon is a hub: it leases its devices. */
+  hub?: string
 }
 
 export interface StatusResult extends Envelope {

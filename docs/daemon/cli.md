@@ -122,7 +122,8 @@ differs from the one in effect; `detach` and `attach` again to change them).
 ### Another machine's daemon: `--target-hub`
 
 Every client command — the one-shots, `run`, `device …`, `attach`,
-`detach`, `get`, `set`, `eval`, `status`, `install` and `uninstall` — also takes:
+`detach`, `get`, `set`, `eval`, `status`, `install`, `uninstall`, `lease`,
+`renew` and `release` — also takes:
 
 | flag | |
 | --- | --- |
@@ -195,6 +196,74 @@ Over TCP every step-running request (and `install`) carries a request id, and th
 retries a dropped connection with the same id up to 3 times (0.5 s, 1 s,
 2 s); the daemon runs each id once. `--verbose` prints each retry.
 
+### Sharing devices: `hub start` and leases
+
+A **hub** is a daemon that shares this machine's devices with clients on the
+network. It lends each device to one client at a time, with a **lease**.
+
+```sh
+# on the device's machine (the token file must be mode 0600)
+maestro-d hub start --token-file ~/.maestro-d/hub-token --share-device "iPhone 16"
+# anywhere on the network
+export MAESTRO_D_TOKEN=$(cat hub-token)
+maestro-d device list --target-hub=192.168.64.1          # LEASE: holder and time left, or available
+maestro-d lease --device "$UDID" --ttl 2h --target-hub=192.168.64.1   # leasing is always explicit
+maestro-d tapOn General --target-hub=192.168.64.1 --device "$UDID"   # sends the lease on file
+maestro-d renew --device "$UDID" --target-hub=192.168.64.1           # only renew moves the window's end
+maestro-d release --device "$UDID" --target-hub=192.168.64.1
+```
+
+| command | |
+| --- | --- |
+| `hub start [--daemon NAME] [--listen ADDR] --token T \| --token-file F [--tls-cert F --tls-key F] [--share-device ID\|NAME …] [--lease-max [DEVICE=]DURATION …] [--allow-remote-shell] [--pass-env NAME …] [--foreground]` | start a hub (the daemon `hub` unless `--daemon` names another) in the background, with no idle timeout. `--listen` defaults to `:7433` and, unlike `--http`, binds every interface. The token is required; `--token-file` reads it from a file only its owner can read, and the detached hub gets it through its environment, never its command line. `--share-device` (repeatable) puts only those devices, by id or name (a running emulator's AVD name), in the pool; the rest stay private to this machine. `--lease-max` sets the longest lease window: `DURATION` (`8h`, `90m`, or seconds) for the whole hub (default 8h), `DEVICE=DURATION` (repeatable) for one device by id or name, matched like `--share-device`. `--foreground` runs it in this process, for a supervisor |
+| `hub stop [--daemon NAME]` | stop the hub: its leases end and its devices are detached |
+| `lease [--device ID \| --platform P --kind K --name N --os V --hub H [--boot]] [--ttl DURATION] [--holder H] [--no-attach] [attach flags] [--json]` | lease a device, by id or by selector, and attach it (`--no-attach` only reserves it). `--ttl` is the window, a duration (`2h`, `90m`) or seconds; default 8h, or the device's maximum when that is shorter, and over the maximum is `USAGE` (exit 2) naming it. A selector takes the first free match: ready, neither leased nor attached; with `--boot`, else a shut-down simulator or AVD, which the hub boots and shuts down again when the lease ends. With `--device` while this client already holds a live lease on it, it prints that lease instead. `--json` prints `{lease: {id, device, holder, expiresAt, ttlSec, maxSec}, device}` |
+| `renew [--device ID] [--ttl DURATION] [--json]` | renew this client's lease on a device explicitly (without `--device`, every lease it holds on that hub): its window starts again now and lasts `--ttl` (default the lease's own window). Over the device's maximum is `USAGE`; with no lease on file, `LEASE_REQUIRED` (exit 5) |
+| `release --device ID \| --all` | end this client's lease on a device (or all of them on that hub); the hub detaches the device. Against a daemon without leases it does nothing and exits 0 |
+
+How leases work:
+
+- **Every command that drives a device needs its lease.** That is attach,
+  detach, every one-shot, `run`, `get`, `set`, `eval`, `install`,
+  `uninstall` and the uploads. Without it the hub answers `LEASE_REQUIRED`;
+  with a lease that has ended, `LEASE_EXPIRED` (both exit 5). `device list`
+  and a device's own record stay open to every client.
+- **Leasing is always explicit.** No command takes a lease on its own. A
+  command that names a `--device` this client holds no lease on is sent
+  without one, and the hub answers `LEASE_REQUIRED` (exit 5); the message
+  says to run `maestro-d lease --device <id>`. `lease` itself fails
+  `DEVICE_IN_USE` (exit 5), naming the holder, while another client holds
+  the device.
+- **leases.json.** The CLI keeps its leases in `<home>/leases.json`
+  (`$MAESTRO_D_HOME`, else `~/.maestro-d`), keyed by the hub's address and
+  the device id the hub returns, and sends the matching one with every
+  request. Before it looks one up it normalizes `--device` through the
+  hub's `GET /v1/devices/{id}`; an id the hub does not list is kept as
+  given. An entry the hub reports expired is dropped; the next command then
+  fails `LEASE_REQUIRED` until `maestro-d lease` takes a new one. A script
+  using the JavaScript library in the same home finds these leases too.
+  Processes that share the home (parallel shards) update
+  it under an advisory lock on `leases.json.lock`, so none loses another's
+  lease.
+- **A fixed window.** A lease lasts `--ttl` from its grant, used or not;
+  using it never extends it. Only `maestro-d renew` moves its end. Each
+  device has a maximum window (8 hours, or the hub's `--lease-max`);
+  `device list --json` and the lease carry it as `maxSec`.
+- **Expiry.** At the end of the window the hub ends the lease and detaches
+  the device: a step still running is interrupted (`INTERRUPTED`), later
+  commands with the lease fail `LEASE_EXPIRED`, a device the hub booted for
+  the lease is shut down, and the device is listed as available again.
+- **On a hub every TCP caller is remote**, loopback included — `runShell`
+  (unless `--allow-remote-shell`) and host paths are `FORBIDDEN`, and
+  sessions import none of the hub's environment except `--pass-env` names.
+  Only the hub's unix socket is local; commands over it lease the same way.
+
+```sh
+LEASE=$(maestro-d lease --platform ios --kind simulator --ttl 30m --target-hub=hub.lan --json | jq -r .lease.id)
+curl -H "Authorization: Bearer $T" -H "X-Maestro-Lease: $LEASE" \
+  -X POST http://hub.lan:7433/v1/devices/$UDID/commands/tapOn -d '"General"'
+```
+
 ## Daemon lifecycle
 
 | command | |
@@ -215,7 +284,7 @@ maestro-d stop --all
 
 | command | |
 | --- | --- |
-| `device list` (`ls`) | connected devices, simulators (booted or not), running emulators under their AVD names, and shut-down AVDs as `avd:<name>`, with attach state |
+| `device list` (`ls`) | connected devices, simulators (booted or not), running emulators under their AVD names, and shut-down AVDs as `avd:<name>`, with attach state; on a hub also a `LEASE` column: the holder and the time left, or `available`; with `--json` each entry also carries `maxSec` |
 | `device catalog [--platform ios\|android] [--available]` | what `device create` can use: iOS runtimes and device types (simctl), Android system images (sdkmanager; `--available` adds downloadable ones) and hardware profiles (avdmanager) |
 | `device create --platform ios --name N [--type T] [--runtime R] [--no-boot]` | create a simulator; defaults are the newest installed runtime and the newest iPhone it supports |
 | `device create --platform android --name N [--image I] [--profile P] [--data-size S] [--install-image --accept-licenses] [--no-boot]` | create an AVD; defaults are the newest installed `google_apis` image for the host's ABI, `pixel_8` and a 6G data partition (at most 10G) |
@@ -307,7 +376,9 @@ maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 | `MAESTRO_D_HUB` | default `--target-hub` (a TCP daemon or hub to talk to instead of the local one) |
 | `MAESTRO_D_TOKEN` | default `--token` |
 | `MAESTRO_D_CA` | default `--ca` |
-| `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `serve --tls-cert`/`--tls-key` |
+| `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `serve`/`hub start` `--tls-cert`/`--tls-key` |
+| `MAESTRO_D_LISTEN` | default `hub start --listen` |
+| `MAESTRO_D_MOCK_DEVICES` | tests only: `mock-1,mock-2` lists those mock-driver devices as ready, so leases and selectors see them (the mock driver attaches any id but lists none) |
 | `MAESTRO_RUNNER_HOME` | install home: `bin/`, `drivers/`, `cache/`, `browsers/` (default: the parent of the binary's `bin/`, i.e. `~/.maestro-d`). Upstream's variable, upstream's name |
 
 ## Recipes

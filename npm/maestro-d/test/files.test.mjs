@@ -249,6 +249,7 @@ describe('commands on a hub', () => {
     // This test's daemon is a loopback serve, so the host path is its own;
     // a real hub refuses any capsFile as FORBIDDEN (covered in Go).
     const d1 = await hub.attach({ device: 'mock-2', platform: 'mock', extra: { capsFile: path.join(work, 'caps.json') } })
+    assert.equal(puts().length, 0, 'the capabilities file is not uploaded')
     await d1.detach()
     seen = []
     const d2 = await hub.attach({ device: 'mock-2', platform: 'mock', appFile: path.join(work, 'other.apk') })
@@ -301,6 +302,31 @@ describe('commands on a hub', () => {
     faults = [{ method: 'PUT', act: cutPut(0, 502, deviceErr) }]
     await assert.rejects(() => upload(t, '/v1/devices/mock-1', unit), (err) => isMaestroError(err, 'DEVICE_ERROR'))
     assert.equal(puts().length, 1)
+    t.close()
+  })
+
+  test('a HEAD refusal has no body: its code comes from X-Maestro-Error-Code', async () => {
+    const [unit] = await pack([file('head.bin', 'head bytes')])
+    const t = new Transport({ url: `127.0.0.1:${proxy.address().port}`, token: 'files-token', hub: true, retryDelays: [] })
+    const told = []
+    t.onLeaseExpired = (device, lease) => told.push(`${device}=${lease}`)
+    const head = (status, code) => ({ method: 'HEAD', act: (_req, res) => res.writeHead(status, code ? { 'X-Maestro-Error-Code': code } : {}).end() })
+    t.leases.set('mock-1', 'gone')
+    faults = [head(409, 'LEASE_EXPIRED')]
+    await assert.rejects(() => upload(t, '/v1/devices/mock-1', unit), (err) => isMaestroError(err, 'LEASE_EXPIRED'))
+    assert.equal(t.leases.get('mock-1'), undefined, 'the expired lease was forgotten')
+    assert.deepEqual(told, ['mock-1=gone'])
+    for (const [status, code, want] of [
+      [409, 'LEASE_REQUIRED', 'LEASE_REQUIRED'],
+      [409, 'DEVICE_IN_USE', 'DEVICE_IN_USE'],
+      [409, 'NOT_A_CODE', 'BUSY'],
+      [404, 'DEVICE_NOT_FOUND', 'DEVICE_NOT_FOUND'],
+      [403, 'FORBIDDEN', 'FORBIDDEN'],
+    ]) {
+      faults = [head(status, code)]
+      await assert.rejects(() => upload(t, '/v1/devices/mock-1', unit), (err) => isMaestroError(err, want), `${status} ${code}`)
+    }
+    assert.equal(puts().length, 0, 'nothing was uploaded')
     t.close()
   })
 

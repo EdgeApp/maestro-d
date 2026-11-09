@@ -64,6 +64,22 @@ func newCallerEnv(t *testing.T, cfg Config) *callerEnv {
 	}
 }
 
+// lease takes a lease on device when the daemon is a hub, and has every
+// client of the env send it.
+func (e *callerEnv) lease(t *testing.T, device string) {
+	t.Helper()
+	if !e.s.cfg.Hub {
+		return
+	}
+	res, err := e.local.AcquireLease(context.Background(), LeaseRequest{Device: device, Holder: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{e.local, e.remote, e.lo} {
+		c.SetLease(device, res.Lease.ID)
+	}
+}
+
 func wantErrCode(t *testing.T, err error, code Code) *Error {
 	t.Helper()
 	if err == nil {
@@ -101,6 +117,7 @@ func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
 func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
 	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: true})
 	ctx := context.Background()
+	env.lease(t, "mock-1")
 	if _, err := env.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +220,7 @@ func TestCaller_EnvironmentStaysOnTheHost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCallerEnv(t, tc.cfg)
+			env.lease(t, "mock-1")
 			if _, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 				t.Fatal(err)
 			}

@@ -106,6 +106,14 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if cleanup == nil {
 		cleanup = func() {}
 	}
+	if leaseFrom(ctx) != nil && ctx.Err() != nil {
+		// The lease (or its client) ended while a driver start that cannot
+		// be cancelled ran: the driver is discarded, never attached.
+		logger.Info("attach %s: cancelled while the driver started; discarding it", id)
+		discardDriver(id, cleanup)
+		cancel()
+		return nil, Errorf(CodeInterrupted, "attach %s cancelled", id)
+	}
 
 	alertMonitor := true
 	if cfg.AlertMonitor != nil {
@@ -176,6 +184,16 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	return a, nil
 }
 
+// discardDriver runs a driver's cleanup, surviving a panic in it.
+func discardDriver(id string, cleanup func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("driver cleanup for %s panicked: %v", id, r)
+		}
+	}()
+	cleanup()
+}
+
 // baseCtx is cancelled on detach/shutdown.
 func (a *attached) baseCtx() context.Context { return a.base }
 
@@ -183,14 +201,7 @@ func (a *attached) baseCtx() context.Context { return a.base }
 func (a *attached) close() {
 	a.cancel()
 	a.session.Close()
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Warn("driver cleanup for %s panicked: %v", a.id, r)
-			}
-		}()
-		a.cleanup()
-	}()
+	discardDriver(a.id, a.cleanup)
 }
 
 func parseArtifacts(s string) executor.ArtifactMode {

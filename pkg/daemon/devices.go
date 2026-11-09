@@ -46,6 +46,8 @@ type Registry struct {
 	// boot starts a simulator or emulator and returns its id (a seam over
 	// the simulator and emulator managers).
 	boot func(platform, name string, timeout time.Duration) (string, error)
+	// shutdown stops a simulator or emulator (a seam over shutdownDevice).
+	shutdown func(DeviceInfo) error
 }
 
 // NewRegistry creates a registry for daemon name. list discovers live
@@ -60,6 +62,7 @@ func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry
 		booting: map[string]bool{},
 	}
 	r.boot = r.startNative
+	r.shutdown = shutdownDevice
 	return r
 }
 
@@ -385,7 +388,7 @@ func (r *Registry) Stop(id string, force bool) error {
 		return Errorf(CodeDeviceExternal, "device %s was not started by this daemon; use --force to stop it", id).
 			WithDetails("bootedBy", info.BootedBy)
 	}
-	if err := shutdownDevice(info); err != nil {
+	if err := r.shutdown(info); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -432,7 +435,7 @@ func (r *Registry) ShutdownOwned() {
 		go func(d DeviceInfo) {
 			defer wg.Done()
 			logger.Info("Shutting down daemon-booted device %s", d.ID)
-			if err := shutdownDevice(d); err != nil {
+			if err := r.shutdown(d); err != nil {
 				logger.Warn("shutdown %s: %v", d.ID, err)
 			}
 			r.mu.Lock()

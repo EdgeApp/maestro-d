@@ -273,21 +273,23 @@ func (r *Registry) resolveManaged(id string) (DeviceInfo, *Error) {
 // Delete deletes a simulator or AVD. One that `device create` did not make
 // is refused with DEVICE_EXTERNAL unless force. Once the checks pass,
 // detach (when set) closes any driver on it, and a running one is shut
-// down before it is deleted.
-func (r *Registry) Delete(id string, force bool, detach func(id string)) (DeviceInfo, *Error) {
+// down before it is deleted. stopped reports that it shut the device
+// down, which stands even when the delete then fails; info is the device
+// whenever stopped is set.
+func (r *Registry) Delete(id string, force bool, detach func(id string)) (info DeviceInfo, stopped bool, _ *Error) {
 	info, e := r.resolveManaged(id)
 	if e != nil {
-		return DeviceInfo{}, e
+		return DeviceInfo{}, false, e
 	}
 	key := createdKey(info)
 	if key == "" {
 		if info.Kind == "emulator" {
-			return DeviceInfo{}, Errorf(CodeDeviceError, "cannot read the AVD name of %s; delete it by name", info.ID)
+			return DeviceInfo{}, false, Errorf(CodeDeviceError, "cannot read the AVD name of %s; delete it by name", info.ID)
 		}
-		return DeviceInfo{}, Errorf(CodeUsage, "%s is a physical device and cannot be deleted", info.ID)
+		return DeviceInfo{}, false, Errorf(CodeUsage, "%s is a physical device and cannot be deleted", info.ID)
 	}
 	if info.CreatedBy != CreatedByMaestroD && !force {
-		return DeviceInfo{}, Errorf(CodeDeviceExternal, "%s was not created by maestro-d; use --force to delete it", id).
+		return DeviceInfo{}, false, Errorf(CodeDeviceExternal, "%s was not created by maestro-d; use --force to delete it", id).
 			WithDetails("device", info.ID)
 	}
 	var del func(string) error
@@ -297,7 +299,7 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (Device
 		del = r.deps.DeleteAVD
 	}
 	if del == nil {
-		return DeviceInfo{}, Errorf(CodeInternal, "device delete: deleting %s devices is not configured", info.Platform)
+		return DeviceInfo{}, false, Errorf(CodeInternal, "device delete: deleting %s devices is not configured", info.Platform)
 	}
 	if detach != nil {
 		detach(info.ID)
@@ -306,11 +308,11 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (Device
 	if running {
 		logger.Info("device delete: shutting down %s first", info.ID)
 		if err := shutdownForDelete(info); err != nil {
-			return DeviceInfo{}, WrapErr(CodeDeviceError, err)
+			return DeviceInfo{}, false, WrapErr(CodeDeviceError, err)
 		}
 	}
 	if err := del(key); err != nil {
-		return DeviceInfo{}, WrapErr(CodeDeviceError, err)
+		return info, running, WrapErr(CodeDeviceError, err)
 	}
 	if err := forgetCreated(info.Platform, key); err != nil {
 		logger.Warn("created.json: %v", err)
@@ -319,7 +321,7 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (Device
 	delete(r.records, info.ID)
 	r.persistLocked()
 	r.mu.Unlock()
-	return info, nil
+	return info, running, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -350,12 +352,20 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request, req 
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
-func (s *Server) handleDeleteDevice(w http.ResponseWriter, id string, force bool) {
-	info, e := s.registry.Delete(id, force, s.detachForStop)
+func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id string, force bool) {
+	info, stopped, e := s.registry.Delete(id, force, s.detachForStop)
 	if e != nil {
+		if stopped {
+			// It shut the device down before the delete failed: its
+			// lease ends as a stop's does, and the teardown does not stop
+			// it again.
+			s.endStoppedLease(r.Context(), endStopped, id, info.ID)
+			s.events.Publish(Event{Type: "device.stopped", Device: info.ID})
+		}
 		writeError(w, e)
 		return
 	}
+	s.endStoppedLease(r.Context(), endDeleted, id, info.ID)
 	s.events.Publish(Event{Type: "device.deleted", Device: info.ID, Message: info.Name})
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }

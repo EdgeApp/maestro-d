@@ -129,6 +129,17 @@ can share one device session.
   its screenshots come back beside the flow. `runFlow sub/x.yaml` and the
   JavaScript `flow()`, `run(steps)` and `runYaml()` ship their closure the
   same way.
+- **A device hub.** `hub start --token-file F --share-device NAME` shares
+  this machine's devices on the network (`:7433`, every interface; every TCP
+  caller is remote). Clients lease a device explicitly before driving it:
+  `lease --device ID` or by selector (`--platform ios --kind simulator`);
+  no command takes a lease on its own, and without one the hub answers
+  `LEASE_REQUIRED`. A lease is a fixed window (`--ttl`, default 8 hours,
+  at most the hub's `--lease-max`, hub-wide or per device); using it never
+  extends it, only `renew` does, and at its end the hub detaches the device.
+  `device list` shows who holds what; `release` frees a device.
+  JavaScript: `md.lease({select})` and `device.renew()`; `attach()` on a hub
+  uses a lease from `md.lease()` or `maestro-d lease`.
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
   `DAEMON_UNAVAILABLE` 3/503, `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409,
