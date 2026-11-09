@@ -48,7 +48,7 @@ type Server struct {
 	cfg      Config
 	deps     Deps
 	registry *Registry
-	hub      *Hub
+	events   *EventBus
 	idle     *idleTimer
 
 	mu       sync.Mutex
@@ -77,7 +77,7 @@ func New(cfg Config, deps Deps) *Server {
 		cfg:       cfg,
 		deps:      deps,
 		registry:  NewRegistry(cfg.Name, deps.ListDevices),
-		hub:       NewHub(0),
+		events:    NewEventBus(0),
 		attached:  map[string]*attached{},
 		attaching: map[string]chan struct{}{},
 		done:      make(chan struct{}),
@@ -202,7 +202,7 @@ func (s *Server) Shutdown(reason string) {
 	s.shutdownOnce.Do(func() {
 		s.shuttingDown.Store(true)
 		s.idle.Stop()
-		s.hub.Publish(Event{Type: "daemon.shutdown", Message: reason})
+		s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 		go func() {
 			defer close(s.done)
 			s.detachAll()
@@ -235,7 +235,7 @@ func (s *Server) detachAll() {
 			defer wg.Done()
 			a.close()
 			s.registry.MarkDetached(a.id)
-			s.hub.Publish(Event{Type: "device.detached", Device: a.id})
+			s.events.Publish(Event{Type: "device.detached", Device: a.id})
 		}(a)
 	}
 	wg.Wait()
@@ -247,7 +247,7 @@ func (s *Server) detachAll() {
 func (s *Server) routes(tcp bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	mux.HandleFunc("GET /v1/events", s.hub.ServeSSE)
+	mux.HandleFunc("GET /v1/events", s.events.ServeSSE)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
@@ -391,7 +391,7 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
-	s.hub.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
+	s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
@@ -409,13 +409,13 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	if a := s.takeAttached(id); a != nil {
 		a.close()
 		s.registry.MarkDetached(id)
-		s.hub.Publish(Event{Type: "device.detached", Device: id})
+		s.events.Publish(Event{Type: "device.detached", Device: id})
 	}
 	if err := s.registry.Stop(id, req.Force); err != nil {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
-	s.hub.Publish(Event{Type: "device.stopped", Device: id})
+	s.events.Publish(Event{Type: "device.stopped", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
@@ -443,7 +443,7 @@ func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
 	}
 	a.close()
 	s.registry.MarkDetached(id)
-	s.hub.Publish(Event{Type: "device.detached", Device: id})
+	s.events.Publish(Event{Type: "device.detached", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 }
 

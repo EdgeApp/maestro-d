@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// Hub fans events out to SSE subscribers and keeps a small ring buffer so a
+// EventBus fans events out to SSE subscribers and keeps a small ring buffer so a
 // client that reconnects with Last-Event-ID can catch up.
-type Hub struct {
+type EventBus struct {
 	mu      sync.Mutex
 	seq     int64
 	ring    []Event
@@ -19,17 +19,17 @@ type Hub struct {
 	subs    map[chan Event]string // channel → device filter ("" = all)
 }
 
-// NewHub creates a hub keeping the last ringCap events.
-func NewHub(ringCap int) *Hub {
+// NewEventBus creates an event bus keeping the last ringCap events.
+func NewEventBus(ringCap int) *EventBus {
 	if ringCap <= 0 {
 		ringCap = 512
 	}
-	return &Hub{ringCap: ringCap, subs: map[chan Event]string{}}
+	return &EventBus{ringCap: ringCap, subs: map[chan Event]string{}}
 }
 
 // Publish stamps and broadcasts an event. Slow subscribers drop events
 // rather than block the step that produced them.
-func (h *Hub) Publish(ev Event) {
+func (h *EventBus) Publish(ev Event) {
 	h.mu.Lock()
 	h.seq++
 	ev.Seq = h.seq
@@ -54,7 +54,7 @@ func (h *Hub) Publish(ev Event) {
 
 // Subscribe returns a channel of events (optionally for one device) and
 // the events after afterSeq still in the ring buffer.
-func (h *Hub) Subscribe(device string, afterSeq int64) (chan Event, []Event, func()) {
+func (h *EventBus) Subscribe(device string, afterSeq int64) (chan Event, []Event, func()) {
 	ch := make(chan Event, 256)
 	h.mu.Lock()
 	h.subs[ch] = device
@@ -73,7 +73,7 @@ func (h *Hub) Subscribe(device string, afterSeq int64) (chan Event, []Event, fun
 }
 
 // Recent returns the buffered events after afterSeq.
-func (h *Hub) Recent(device string, afterSeq int64) []Event {
+func (h *EventBus) Recent(device string, afterSeq int64) []Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []Event
@@ -86,7 +86,7 @@ func (h *Hub) Recent(device string, afterSeq int64) []Event {
 }
 
 // ServeSSE streams events as text/event-stream until the client leaves.
-func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request) {
+func (h *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

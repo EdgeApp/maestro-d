@@ -117,10 +117,10 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		OnStepComplete: func(idx int, desc string, passed bool, durationMs int64, errMsg string) {
-			s.hub.Publish(Event{Type: "step", Device: id, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
+			s.events.Publish(Event{Type: "step", Device: id, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
 		},
 		OnNestedStep: func(depth int, desc string, passed bool, durationMs int64, errMsg string) {
-			s.hub.Publish(Event{Type: "nestedStep", Device: id, Depth: depth, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
+			s.events.Publish(Event{Type: "nestedStep", Device: id, Depth: depth, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
 		},
 	}
 	sc := executor.SessionConfig{
@@ -157,7 +157,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}
 	s.registry.MarkAttached(info)
-	s.hub.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
+	s.events.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
 	logger.Info("Attached device %s (report %s)", id, reportDir)
 	return a, nil
 }
