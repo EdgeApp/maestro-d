@@ -22,6 +22,7 @@ install-download.sh
 /coverage/
 coverage.out
 coverage.html
+.cover/
 *.test
 *.out
 *.prof

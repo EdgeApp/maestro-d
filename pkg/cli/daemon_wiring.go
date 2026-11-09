@@ -30,6 +30,13 @@ func daemonDeps() daemon.Deps {
 		NewDriver:          daemonNewDriver,
 		ListDevices:        daemonListDevices,
 		NormalizeHierarchy: NormalizeHierarchy,
+		IOSCatalog:         simulator.ListCatalog,
+		AndroidCatalog:     emulator.ListCatalog,
+		CreateSimulator:    simulator.CreateSimulator,
+		CreateAVD:          emulator.CreateAVD,
+		InstallSystemImage: emulator.InstallSystemImage,
+		DeleteSimulator:    simulator.DeleteSimulator,
+		DeleteAVD:          emulator.DeleteAVD,
 	}
 }
 

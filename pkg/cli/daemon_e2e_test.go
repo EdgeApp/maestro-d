@@ -24,7 +24,14 @@ type e2e struct {
 	bin  string
 	home string
 	cwd  string
+	// coverDir, from MAESTRO_D_E2E_COVERDIR, is where the -cover binary
+	// and the daemons it spawns write their coverage (GOCOVERDIR).
+	coverDir string
 }
+
+// envE2ECoverDir makes newE2E build the binary with -cover; `make
+// cover-changed` sets it so code only a subprocess runs is counted.
+const envE2ECoverDir = "MAESTRO_D_E2E_COVERDIR"
 
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
@@ -37,12 +44,20 @@ func newE2E(t *testing.T) *e2e {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "maestro-d")
-	build := exec.Command("go", "build", "-o", bin, ".")
+	args := []string{"build", "-o", bin, "."}
+	coverDir := os.Getenv(envE2ECoverDir)
+	if coverDir != "" {
+		if err := os.MkdirAll(coverDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		args = []string{"build", "-cover", "-o", bin, "."}
+	}
+	build := exec.Command("go", args...)
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	e := &e2e{t: t, bin: bin, home: filepath.Join(dir, "home"), cwd: dir}
+	e := &e2e{t: t, bin: bin, home: filepath.Join(dir, "home"), cwd: dir, coverDir: coverDir}
 	t.Cleanup(func() {
 		e.run("stop", "--all")
 	})
@@ -65,6 +80,9 @@ func (e *e2e) run(args ...string) result {
 		daemon.EnvDevice+"=",
 		"NO_COLOR=1",
 	)
+	if e.coverDir != "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+e.coverDir)
+	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -345,4 +363,36 @@ func TestE2E_AttachFailureAndInterrupt(t *testing.T) {
 	}
 	// The device is free again right away.
 	e.ok("tapOn", "Login")
+}
+
+// TestE2E_DeviceManagementRefusals drives device catalog, create, start and
+// delete through the binary for the refusals that are decided before any
+// simulator or emulator tool runs, so it needs none installed.
+func TestE2E_DeviceManagementRefusals(t *testing.T) {
+	e := newE2E(t)
+	cases := []struct {
+		code int
+		want daemon.Code
+		args []string
+	}{
+		{2, daemon.CodeUsage, []string{"device", "catalog", "--platform", "windows"}},
+		{2, daemon.CodeUsage, []string{"device", "catalog", "extra"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--name", "x"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--platform", "android", "--name", "e2e-x", "--data-size", "12G", "--no-boot"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--platform", "ios", "--name", "e2e-x", "--image", "system-images;a;b;c"}},
+		{2, daemon.CodeUsage, []string{"device", "start", "202611080630-no-such-device"}},
+		{4, daemon.CodeDeviceNotFound, []string{"device", "delete", "202611080630-no-such-device"}},
+		{2, daemon.CodeUsage, []string{"device", "delete"}},
+	}
+	for _, tc := range cases {
+		r := e.fails(tc.code, tc.args...)
+		if got := envelopeCode(t, r.stderr); got != tc.want {
+			t.Errorf("%v: code %s, want %s", tc.args, got, tc.want)
+		}
+	}
+	r := e.fails(2, "device", "create", "--platform", "android", "--name", "e2e-x", "--data-size", "12G", "--json")
+	if !strings.Contains(r.stdout, "above the 10G limit") {
+		t.Errorf("--json puts the envelope on stdout:\n%s", r.stdout)
+	}
+	e.ok("stop")
 }

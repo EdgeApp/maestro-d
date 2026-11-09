@@ -350,6 +350,10 @@ type DeviceInfo struct {
 	// Owner names the daemon that has the device attached, when it is not
 	// this one (ps / DEVICE_IN_USE).
 	Owner string `json:"owner,omitempty"`
+	// CreatedBy is "maestro-d" for a simulator or AVD that `device create`
+	// made (recorded in <home>/created.json); only those are deleted
+	// without force.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -390,15 +394,39 @@ type AttachConfig struct {
 
 // BootRequest is the body of POST /v1/devices.
 type BootRequest struct {
-	Platform string `json:"platform"`
-	// Name is an AVD name, a simulator name, or a simulator UDID.
+	// Platform is ios or android. To boot, it may be left out: an avd:<name>
+	// id means android, and a known simulator name or UDID means ios.
+	Platform string `json:"platform,omitempty"`
+	// Name is an AVD name (or avd:<name>), a simulator name, or a simulator
+	// UDID.
 	Name        string `json:"name"`
 	BootTimeout int    `json:"bootTimeout,omitempty"` // seconds
+	// Create, when set, creates the simulator or AVD first.
+	Create *CreateSpec `json:"create,omitempty"`
+	// Boot boots what Create made (default true). Ignored without Create.
+	Boot *bool `json:"boot,omitempty"`
+}
+
+// CreateSpec describes a simulator (type, runtime) or an AVD (image,
+// profile, dataSize, installImage, acceptLicenses) for `device create`.
+type CreateSpec struct {
+	// Name defaults to BootRequest.Name.
+	Name    string `json:"name,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Image   string `json:"image,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	// DataSize is the AVD's data partition (default 6G, at most 10G).
+	DataSize       string `json:"dataSize,omitempty"`
+	InstallImage   bool   `json:"installImage,omitempty"`
+	AcceptLicenses bool   `json:"acceptLicenses,omitempty"`
 }
 
 // StopDeviceRequest is the body of DELETE /v1/devices/{id}.
 type StopDeviceRequest struct {
 	Force bool `json:"force,omitempty"`
+	// Delete also deletes the simulator or AVD (`?delete=true`).
+	Delete bool `json:"delete,omitempty"`
 }
 
 // StepsRequest is the body of POST /v1/devices/{dev}/steps.

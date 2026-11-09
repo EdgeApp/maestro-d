@@ -73,7 +73,7 @@ Every request resets the idle timer.
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device |
-| `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot (use `force`) |
+| `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
 | `INTERRUPTED` | 499 | 130 | the request was cancelled mid-step |
 
 A failed step with `optional: true` is *not* an error: `200`, `ok: true`,
@@ -98,12 +98,14 @@ curl -s -H "$H" $D/v1/status
     "reportsDir": "/Users/me/.maestro-d/run/api/reports",
     "idleTimeout": 1800
   },
-  "devices": [ … as GET /v1/devices, attached ones only … ],
+  "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
   "idleShutdownAt": "2026-09-10T10:30:00Z"
 }
 ```
 
-The only route that still answers while the daemon is shutting down.
+The only route that still answers while the daemon is shutting down. It
+runs no device discovery (adb, simctl), so it answers quickly and clients
+use it as their liveness check.
 
 ### `POST /v1/shutdown`
 
@@ -151,10 +153,15 @@ not), emulator AVDs — merged with what this and other daemons hold.
   "devices": [
     { "id": "29271FDH200ABP", "platform": "android", "kind": "device", "name": "Pixel 7", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/29271FDH200ABP/20260910-100000" },
     { "id": "CD9D3952-58FA-4E81-AC64-736189D71D1E", "platform": "ios", "kind": "simulator", "name": "iPhone 13 Pro", "osVersion": "26.0", "state": "Shutdown", "ready": false, "attached": false },
-    { "id": "00008110-0006098A02FA801E", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" }
+    { "id": "00008110-0006098A02FA801E", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" },
+    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "state": "device", "ready": true, "attached": false },
+    { "id": "avd:ci-pixel", "platform": "android", "kind": "emulator", "name": "ci-pixel", "state": "Shutdown", "ready": false, "attached": false, "createdBy": "maestro-d" }
   ]
 }
 ```
+
+A running emulator's `name` is its AVD name. An AVD that is not running is
+listed once, as `avd:<name>`; booting it returns the emulator's serial.
 
 | field | |
 | --- | --- |
@@ -163,23 +170,85 @@ not), emulator AVDs — merged with what this and other daemons hold.
 | `busy` | a step is running on it right now |
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
+| `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
 
-### `POST /v1/devices` — boot a simulator or emulator
+### `GET /v1/catalog[?platform=ios|android][&available=true]`
+
+What `create` can use. iOS comes from `simctl list runtimes -j` and
+`simctl list devicetypes -j` (iPhone and iPad types only); Android from
+`sdkmanager --list_installed` (`--list` with `available=true`, which adds
+the images that can be downloaded) and `avdmanager list device -c`.
+
+```json
+{
+  "ok": true, "exitCode": 0,
+  "ios": {
+    "runtimes": [ { "id": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "name": "iOS 26.5", "version": "26.5", "build": "23F77", "available": true, "deviceTypes": ["com.apple.CoreSimulator.SimDeviceType.iPhone-16", "…"] } ],
+    "deviceTypes": [ { "id": "com.apple.CoreSimulator.SimDeviceType.iPhone-16", "name": "iPhone 16", "productFamily": "iPhone", "minRuntimeVersion": "18.0.0" } ]
+  },
+  "android": {
+    "images": [ { "id": "system-images;android-35;google_apis;arm64-v8a", "api": "android-35", "tag": "google_apis", "abi": "arm64-v8a", "installed": true } ],
+    "profiles": ["pixel_8", "pixel_9", "…"]
+  }
+}
+```
+
+Without `platform`, a platform whose tools are missing is left out and
+named in `"errors": {"android": "sdkmanager not found; …"}`. With
+`platform`, a missing tool fails `DEVICE_ERROR` naming the tool and how to
+install it.
+
+### `POST /v1/devices` — boot, or create and boot, a simulator or emulator
 
 ```sh
 curl -s -H "$H" $D/v1/devices -d '{"platform":"ios","name":"iPhone 16","bootTimeout":120}'
+curl -s -H "$H" $D/v1/devices -d '{"name":"avd:ci-pixel"}'
 ```
 
-`name` is a simulator name or UDID, or an Android AVD name. Waits until the
-device is ready and answers `{"ok": true, "device": {…}}` with the booted
-device (its `id` is what to attach). The device is recorded as booted by
-this daemon.
+`name` is a simulator name or UDID, or an Android AVD name (or
+`avd:<name>`). `platform` may be left out: `avd:` means android, and a name
+or UDID that `GET /v1/devices` lists picks that device's platform; anything
+else fails `USAGE`. Waits until the device is ready and answers
+`{"ok": true, "device": {…}}` with the booted device (its `id` is what to
+attach — an emulator's serial). The device is recorded as booted by this
+daemon.
+
+With `create`, the device is created first, recorded in
+`<home>/created.json`, and booted unless `"boot": false`:
+
+```sh
+curl -s -H "$H" $D/v1/devices -d '{"platform":"ios","name":"ci-phone","create":{"type":"iPhone 16","runtime":"iOS-26-5"}}'
+curl -s -H "$H" $D/v1/devices -d '{"platform":"android","name":"ci-pixel","boot":false,
+  "create":{"image":"system-images;android-35;google_apis;arm64-v8a","profile":"pixel_8","dataSize":"8G"}}'
+```
+
+| `create` field | |
+| --- | --- |
+| `name` | defaults to the request's `name` |
+| `type`, `runtime` | iOS: a device type name or id, and a runtime id, short form (`iOS-26-5`), name or version; defaults are the newest installed runtime and the newest iPhone it supports |
+| `image`, `profile` | Android: an sdkmanager package path and an avdmanager profile; defaults are the newest installed `google_apis` image for the host's ABI (`arm64-v8a` on Apple silicon) and `pixel_8` |
+| `dataSize` | Android: the data partition (`disk.dataPartition.size`), default `6G`, refused above `10G` |
+| `installImage`, `acceptLicenses` | Android: download a missing image with `sdkmanager --install`; `installImage` without `acceptLicenses` fails `USAGE` |
+
+A duplicate name, an unknown runtime, type, image or profile, a missing
+image without `installImage`, and a field of the other platform fail
+`USAGE` before anything is created. Without `boot: false` the answer is the
+booted device; with it, the shut-down one (an AVD as `avd:<name>`).
 
 ### `DELETE /v1/devices/{id}`
 
 Detaches if attached, then shuts the simulator/emulator down. Refuses with
 `DEVICE_EXTERNAL` unless the daemon booted it; body `{"force": true}` or
 `?force=true` overrides. Answers `{"ok": true}`.
+
+With `?delete=true` (or body `{"delete": true}`) it deletes the simulator
+or AVD instead: `{id}` may be a UDID, a simulator name, `avd:<name>`, an
+AVD name or a running emulator's serial (which deletes its AVD). Only
+devices `create` made are deleted without `force`; anything else fails
+`DEVICE_EXTERNAL` and is left untouched. A device that is attached is
+detached, a running one is shut down, then `simctl delete` or
+`avdmanager delete avd` runs. Answers `{"ok": true, "device": {…}}` with
+the deleted device.
 
 ### `POST /v1/devices/{id}/attach`
 

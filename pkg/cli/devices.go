@@ -86,6 +86,7 @@ func collectDevices(platform string, includeShutdown bool) []DeviceEntry {
 
 	if platform == "" || platform == "android" {
 		entries = append(entries, androidEntries()...)
+		entries = avdEntries(entries, includeShutdown) // maestro-d: AVD names, shut-down AVDs as avd:<name>
 	}
 	if (platform == "" || platform == "ios") && runtime.GOOS == "darwin" {
 		entries = append(entries, simulatorEntries(includeShutdown)...)

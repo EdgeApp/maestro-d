@@ -196,6 +196,8 @@ export interface DeviceInfo {
   busy?: boolean
   /** Name of the other daemon holding the device, when listing conflicts. */
   owner?: string
+  /** 'maestro-d' for a simulator or AVD `createDevice()` made; only those delete without `force`. */
+  createdBy?: string
 }
 
 /** Options for opening a driver on a device (`maestro-d attach`). */
@@ -241,12 +243,76 @@ export interface AttachOptions {
 }
 
 export interface BootOptions {
-  /** ios | android */
-  platform: string
-  /** Simulator / AVD name, e.g. 'iPhone 16'. */
+  /**
+   * ios | android. May be left out: an `avd:<name>` id means android, and a
+   * name or UDID the daemon lists picks that device's platform.
+   */
+  platform?: string
+  /** Simulator name or UDID, AVD name or `avd:<name>`, e.g. 'iPhone 16'. */
   name: string
   /** Seconds. */
   bootTimeout?: number
+}
+
+/** Options for `createDevice()`: a simulator (`type`, `runtime`) or an AVD (`image`, `profile`, …). */
+export interface CreateDeviceOptions {
+  platform: 'ios' | 'android' | string
+  /** Name of the new simulator or AVD. */
+  name: string
+  /** iOS device type name or id (default: the newest iPhone the runtime supports). */
+  type?: string
+  /** iOS runtime, e.g. 'iOS-26-5' or '26.5' (default: the newest installed). */
+  runtime?: string
+  /** Android system image package (default: the newest installed google_apis image for the host's ABI). */
+  image?: string
+  /** Android hardware profile (default 'pixel_8'). */
+  profile?: string
+  /** Android data partition size (default '6G', at most '10G'). */
+  dataSize?: string
+  /** Download a missing Android image with sdkmanager; needs `acceptLicenses`. */
+  installImage?: boolean
+  acceptLicenses?: boolean
+  /** Boot it once created (default true). */
+  boot?: boolean
+  /** Seconds. */
+  bootTimeout?: number
+}
+
+/** One iOS simulator runtime in the catalog. */
+export interface CatalogRuntime {
+  id: string
+  name: string
+  version: string
+  build?: string
+  available: boolean
+  deviceTypes?: string[]
+}
+
+/** One iPhone or iPad simulator type in the catalog. */
+export interface CatalogDeviceType {
+  id: string
+  name: string
+  productFamily: string
+  minRuntimeVersion?: string
+}
+
+/** One Android system image in the catalog. */
+export interface CatalogImage {
+  /** e.g. 'system-images;android-35;google_apis;arm64-v8a' */
+  id: string
+  api: string
+  tag: string
+  abi: string
+  description?: string
+  installed: boolean
+}
+
+/** What `createDevice()` can make (`GET /v1/catalog`). */
+export interface CatalogResult extends Envelope {
+  ios?: { runtimes: CatalogRuntime[]; deviceTypes: CatalogDeviceType[] }
+  android?: { images: CatalogImage[]; profiles: string[] }
+  /** Why a platform's catalog is missing, when no platform was asked for. */
+  errors?: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------

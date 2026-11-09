@@ -33,11 +33,12 @@ never copies their code.
 | --- | --- | --- |
 | `pkg/cli/cli.go` | `app.Commands = append(app.Commands, daemonCommands()...)`; app name, usage text and version printer say `maestro-d` | ~15 |
 | `pkg/driver/mock/mock.go` | `takeScreenshot` returns the PNG bytes in `result.Data`, as real drivers do (lets the mock e2e test save a screenshot) | 6 |
-| `Makefile` | `BINARY_NAME=maestro-d`; `INSTALL_DIR=$(HOME)/.maestro-d` (its own home, so installing cannot disturb a maestro-runner install); `gen` / `gen-check` targets; `build` replaces the installed binary's inode (a running daemon plus an in-place `cp` gets the next exec SIGKILLed on macOS) | ~16 |
+| `Makefile` | `BINARY_NAME=maestro-d`; `INSTALL_DIR=$(HOME)/.maestro-d` (its own home, so installing cannot disturb a maestro-runner install); `gen` / `gen-check` targets; `build` replaces the installed binary's inode (a running daemon plus an in-place `cp` gets the next exec SIGKILLed on macOS); `cover-changed` (unit plus e2e-subprocess coverage of the branch's changed lines, through `tools/covchanged`) | ~25 |
 | `pkg/driver/wda/client.go` | `CreateSession` sends `bundleId` only when it has one, so the daemon's attach can open a session without launching an app | 4 |
 | `pkg/driver/browser/cdp/driver.go` | Downloaded browsers cache in `~/.maestro-d/browsers` rather than `~/.maestro-runner/browsers` (two hard-coded paths; upstream does not route this one through `config.GetHome()`, and it must not — under `go test` that resolves to the package directory) | 3 |
 | `README.md` | Replaced wholesale with the fork's own README; upstream's is kept at `docs/maestro-runner.md`. On a rebase, keep ours and re-read theirs for anything new worth carrying over | whole file |
-| `.gitignore` | Ignore the `maestro-d` binary and `npm/dist-maestro-d/` | 6 |
+| `.gitignore` | Ignore the `maestro-d` binary, `npm/dist-maestro-d/` and `cover-changed`'s `.cover/` | 7 |
+| `pkg/cli/devices.go` | One `// maestro-d` line in `collectDevices`: `entries = avdEntries(entries, includeShutdown)` after `androidEntries()`, so running emulators carry their AVD names and shut-down AVDs list as `avd:<name>` (`devices --all`, `device list`) | 1 |
 
 Everything else is new:
 
@@ -46,9 +47,13 @@ Everything else is new:
 | `pkg/flow/steptype_export.go` | Exported wrappers around the unexported step parser: `StepTypes`, `ParseStep`, `BuildStep` |
 | `pkg/cli/hierarchy_export.go` | `NormalizeHierarchy`, the `hierarchy` command's cross-driver tree, for `GET …/hierarchy` |
 | `pkg/executor/session.go` | `executor.Session` — a long-lived `FlowRunner` that executes one step at a time and keeps variables, report and artifacts between calls |
-| `pkg/daemon/` | Daemon server (REST over a unix socket / optional TCP), protocol types, client, spawn logic, device registry, generated `commands_gen.go` |
+| `pkg/daemon/` | Daemon server (REST over a unix socket / optional TCP), protocol types, client, spawn logic, device registry (with `created.json`), device catalog/create/delete (`catalog.go`), injected `Deps` (`deps.go`), generated `commands_gen.go` |
 | `pkg/daemon/gen/` | Generator: reflects over the step structs → `commands_gen.go`, `npm/maestro-d/src/generated/commands.ts`, `docs/daemon/commands.md` |
 | `pkg/cli/daemon.go`, `daemon_flags.go`, `daemon_wiring.go`, `oneshot.go` | CLI: `start`/`serve`/`stop`/`status`/`ps`/`device`/`attach`/`detach`/`run`/`get`/`set`/`eval`/`commands` and one command per YAML step type |
+| `pkg/cli/device_manage.go`, `devices_avd.go` | `device catalog`/`create`/`delete`; AVD names and `avd:<name>` entries in device listings |
+| `pkg/simulator/catalog.go` | The simctl runtime and device-type catalog and the default runtime and iPhone type |
+| `pkg/emulator/catalog.go`, `avdmanager.go`, `avd_serials.go` | The sdkmanager/avdmanager catalog, AVD create/delete, image install, data partition size, and `RunningAVDsBySerial` |
+| `tools/covchanged/` | `make cover-changed`'s changed-line coverage report |
 | `pkg/cli/daemon_e2e_test.go` | Binary-level test against the mock driver |
 | `npm/maestro-d/` | The JavaScript library |
 | `npm/build-maestro-d-npm.sh` | Cross-compiles the binary into per-platform npm packages and packs the library (`npm/build-npm.sh` is upstream's, for maestro-runner's own package) |
@@ -65,6 +70,7 @@ If an upstream change breaks the build, it is almost certainly one of these.
 | `executor.FlowRunner` internals: `executeNestedStep`, `executeRepeat`/`executeRetry`/`executeRunFlow`/`executeSubFlow`, `executeTakeScreenshot`, `captureArtifacts`; `ScriptEngine` | `pkg/executor/session.go` | Executing a single parsed step with the runner's normal retry/optional/gate handling; variable store; `ImportSystemEnv` |
 | `cli.RunConfig`, `cli.CreateDriver` | `pkg/cli/daemon_wiring.go` (`attachToRunConfig`) | Opening a driver exactly as `maestro-runner test` does |
 | `cli.parseHierarchy`, `cli.formatHierarchy` (unexported) | `pkg/cli/hierarchy_export.go`, `get hierarchy` | The normalized tree and the `--compact`/`--find` renderers of the `hierarchy` command |
+| `emulator.FindAVDManagerBinary`, `emulator.ListAVDs`, `emulator.IsEmulator`, `simulator.CreateSimulator`, `simulator.DeleteSimulator`, `simulator.FindSimctlBinary` | `pkg/cli/daemon_wiring.go`, `devices_avd.go`, `pkg/emulator/*` (fork files) | Tool lookup, AVD listing and simulator create/delete for `device create`/`delete` |
 | `cli.collectDevices`, `cli.buildDeviceReport`, `cli.buildAppReport`, `cli.resolveDriverName`, `cli.parseArtifactMode`, `cli.loadCapabilities` | `pkg/cli/daemon_wiring.go` | Device listing and report metadata |
 | `cli.GlobalFlags` | `pkg/cli/daemon.go` (`inheritedArgs`) | Honouring `--device`/`--platform` given before the command name |
 | `logger.Init/Close` | `pkg/cli/daemon.go` (`serve`) | The daemon's log file |

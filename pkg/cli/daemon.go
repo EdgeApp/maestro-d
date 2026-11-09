@@ -714,7 +714,7 @@ var (
 
 var daemonDeviceCommand = &cli.Command{
 	Name:  "device",
-	Usage: "List, boot and shut down devices, simulators and emulators",
+	Usage: "List, create, boot, shut down and delete devices, simulators and emulators",
 	Subcommands: []*cli.Command{
 		{
 			Name:            "list",
@@ -742,21 +742,21 @@ var daemonDeviceCommand = &cli.Command{
 		},
 		{
 			Name:      "start",
-			Usage:     "Boot a simulator (by name or UDID) or emulator (by AVD name) through the daemon",
+			Usage:     "Boot a simulator (by name or UDID) or emulator (by AVD name or avd:<name>) through the daemon",
 			ArgsUsage: "<name-or-udid>",
 			Description: flagsDoc(`The daemon remembers what it booted and shuts it down again when it
 stops (or on 'device stop'). Devices that were already running are
 never shut down without --force.
 
+--platform may be left out: avd:<name> means android, and a name or
+UDID that 'device list' shows picks that device's platform.
+
   maestro-d device start "iPhone 15 Pro" --platform ios
-  maestro-d device start Pixel_7_API_33 --platform android`, deviceStartFlags),
+  maestro-d device start avd:Pixel_7_API_33`, deviceStartFlags),
 			SkipFlagParsing: true,
 			Action: withArgs(deviceStartFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 				if len(args) != 1 {
-					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device start <name-or-udid> --platform ios|android")
-				}
-				if o.Attach.Platform == "" {
-					return daemon.Errorf(daemon.CodeUsage, "--platform ios|android is required to boot a device")
+					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device start <name-or-udid> [--platform ios|android]")
 				}
 				client, err := connectDaemon(ctx, o, true)
 				if err != nil {
@@ -821,6 +821,9 @@ daemons that are no longer alive.`, deviceStopFlags),
 				return nil
 			}),
 		},
+		deviceCatalogCommand,
+		deviceCreateCommand,
+		deviceDeleteCommand,
 	},
 }
 

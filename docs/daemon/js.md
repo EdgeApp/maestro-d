@@ -24,6 +24,13 @@ reference: installation, the `MaestroD` / `MaestroDevice` API, result
 and error shapes, `CallOptions` (`signal`, `wait`, `cwd`), events and
 recipes. This page covers how it fits with the rest of the fork.
 
+Device management maps one to one onto the REST routes: `catalog()` is
+`GET /v1/catalog`, `createDevice()` is `POST /v1/devices` with `create`,
+`startDevice()` (whose `platform` may be left out for `avd:<name>` and for
+a listed name or UDID) is `POST /v1/devices`, and `deleteDevice()` is
+`DELETE /v1/devices/{id}?delete=true`. `e2e/deviceManagement.e2e.ts` runs
+the whole lifecycle on a real simulator and emulator.
+
 ## How the package is built
 
 `npm/maestro-d/` holds the library (TypeScript, no runtime

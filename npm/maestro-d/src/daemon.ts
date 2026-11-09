@@ -7,7 +7,17 @@ import { MaestroDevice, anySignal } from './device.js'
 import { ENV_DEVICE, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
 import { Transport } from './transport.js'
-import type { AttachOptions, BootOptions, DaemonEvent, DaemonInfo, DeviceInfo, Envelope, StatusResult } from './types.js'
+import type {
+  AttachOptions,
+  BootOptions,
+  CatalogResult,
+  CreateDeviceOptions,
+  DaemonEvent,
+  DaemonInfo,
+  DeviceInfo,
+  Envelope,
+  StatusResult,
+} from './types.js'
 
 export interface ConnectOptions extends SpawnOptions {
   /** Daemon name (default `$MAESTRO_D`, else 'default'). One daemon per name. */
@@ -140,11 +150,59 @@ export class MaestroD {
   }
 
   /**
+   * What `createDevice()` can make: iOS runtimes and device types, Android
+   * system images and hardware profiles. `available` adds the Android
+   * images sdkmanager can download.
+   */
+  async catalog(opts: { platform?: string; available?: boolean; signal?: AbortSignal } = {}): Promise<CatalogResult> {
+    const q = new URLSearchParams()
+    if (opts.platform) q.set('platform', opts.platform)
+    if (opts.available) q.set('available', 'true')
+    const qs = q.toString()
+    return this.transport.json<CatalogResult>('/v1/catalog' + (qs ? `?${qs}` : ''), { signal: this.sig(opts.signal) })
+  }
+
+  /**
+   * Create a simulator or AVD and, unless `boot: false`, boot it. It is
+   * recorded as created by maestro-d, so `deleteDevice()` accepts it.
+   * Resolves with the booted device, or the shut-down one (an AVD as
+   * `avd:<name>`).
+   */
+  async createDevice(opts: CreateDeviceOptions & { signal?: AbortSignal }): Promise<DeviceInfo> {
+    if (!opts.platform || !opts.name) throw new TypeError('createDevice() needs platform and name')
+    const { signal, platform, name, boot, bootTimeout, ...create } = opts
+    const body: Record<string, unknown> = { platform, name, create: { name, ...create } }
+    if (boot !== undefined) body.boot = boot
+    if (bootTimeout !== undefined) body.bootTimeout = bootTimeout
+    const res = await this.transport.json<Envelope & { device: DeviceInfo }>('/v1/devices', {
+      method: 'POST',
+      body,
+      signal: this.sig(signal),
+    })
+    return res.device
+  }
+
+  /**
+   * Delete a simulator or AVD by id, name or `avd:<name>`, detaching and
+   * stopping it first. Devices maestro-d did not create are refused with
+   * DEVICE_EXTERNAL unless `force`.
+   */
+  async deleteDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<DeviceInfo> {
+    if (!id) throw new TypeError('deleteDevice() needs an id')
+    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(
+      `/v1/devices/${encodeURIComponent(id)}?delete=true` + (opts.force ? '&force=true' : ''),
+      { method: 'DELETE', signal: this.sig(opts.signal) },
+    )
+    return res.device
+  }
+
+  /**
    * Boot a simulator or emulator by name (or return it if already booted).
-   * Anything booted here is shut down when the daemon exits.
+   * Anything booted here is shut down when the daemon exits. `platform` may
+   * be left out for `avd:<name>` and for a name or UDID the daemon lists.
    */
   async startDevice(opts: BootOptions & { signal?: AbortSignal }): Promise<DeviceInfo> {
-    if (!opts.platform || !opts.name) throw new TypeError('startDevice() needs platform and name')
+    if (!opts.name) throw new TypeError('startDevice() needs a name')
     const { signal, ...body } = opts
     const res = await this.transport.json<Envelope & { device: DeviceInfo }>('/v1/devices', {
       method: 'POST',

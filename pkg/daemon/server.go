@@ -82,6 +82,7 @@ func New(cfg Config, deps Deps) *Server {
 		attaching: map[string]chan struct{}{},
 		done:      make(chan struct{}),
 	}
+	s.registry.deps = deps
 	s.idle = newIdleTimer(cfg.IdleTimeout, func() {
 		logger.Info("Idle for %v, shutting down", cfg.IdleTimeout)
 		s.Shutdown("idle")
@@ -249,6 +250,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/events", s.events.ServeSSE)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
+	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
 	mux.HandleFunc("DELETE /v1/devices/{id}", s.handleStopDevice)
@@ -335,7 +337,10 @@ func decodeBody(r *http.Request, v any) *Error {
 // Daemon handlers
 
 func (s *Server) statusResult() StatusResult {
-	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.List("")}
+	// The devices this daemon holds, from its records: no live discovery,
+	// which shells out to adb, simctl and emulator and can take seconds,
+	// while clients use status as their liveness ping.
+	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.Held()}
 	if dl := s.idle.Deadline(); !dl.IsZero() {
 		res.IdleShutdownAt = dl.Format(time.RFC3339)
 	}
@@ -384,6 +389,10 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
+	if req.Create != nil {
+		s.handleCreateDevice(w, r, req)
+		return
+	}
 	s.idle.Hold()
 	defer s.idle.Release()
 	info, err := s.registry.Boot(r.Context(), req)
@@ -405,18 +414,31 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("force") == "true" {
 		req.Force = true
 	}
-	// Detach first if we hold it.
-	if a := s.takeAttached(id); a != nil {
-		a.close()
-		s.registry.MarkDetached(id)
-		s.events.Publish(Event{Type: "device.detached", Device: id})
+	if r.URL.Query().Get("delete") == "true" {
+		req.Delete = true
 	}
+	if req.Delete {
+		s.handleDeleteDevice(w, id, req.Force)
+		return
+	}
+	// Detach first if we hold it.
+	s.detachForStop(id)
 	if err := s.registry.Stop(id, req.Force); err != nil {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	s.events.Publish(Event{Type: "device.stopped", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
+}
+
+// detachForStop closes the driver on a device about to be stopped or
+// deleted, if this daemon holds one.
+func (s *Server) detachForStop(id string) {
+	if a := s.takeAttached(id); a != nil {
+		a.close()
+		s.registry.MarkDetached(id)
+		s.events.Publish(Event{Type: "device.detached", Device: id})
+	}
 }
 
 func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {

@@ -103,6 +103,12 @@ can share one device session.
 - **Device lifecycle.** `device list`, `device start` to boot a simulator or
   emulator, `device stop`, `ps`, and automatic shutdown of anything the daemon
   booted.
+- **Device management.** `device catalog`, `device create` and `device delete`
+  make and remove iOS simulators and Android AVDs (with the AVD's data
+  partition size), from the CLI, REST (`GET /v1/catalog`, `POST /v1/devices`
+  with `create`, `DELETE …?delete=true`) and JavaScript (`catalog()`,
+  `createDevice()`, `deleteDevice()`). Only what maestro-d created is deleted
+  without `--force`.
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `DAEMON_UNAVAILABLE` 3/503,
   `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409, `INTERRUPTED` 130/499.

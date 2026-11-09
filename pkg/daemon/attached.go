@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -27,21 +26,6 @@ type DriverInfo struct {
 	Platform string
 	Kind     string
 	Name     string
-}
-
-// Deps are the pieces pkg/cli injects so this package never imports it.
-type Deps struct {
-	// NewDriver opens a driver on deviceID. cleanup tears it down (never
-	// nil on success). Log output goes to the daemon's stdout.
-	NewDriver func(ctx context.Context, deviceID string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error)
-	// ListDevices discovers live devices; platform "" means all.
-	ListDevices func(platform string) []DeviceInfo
-	// NormalizeHierarchy turns a driver's raw hierarchy (XML or JSON) into
-	// the cross-driver tree. Optional: without it the raw document is
-	// returned parsed (JSON) or as a string (XML).
-	NormalizeHierarchy func(raw []byte) (any, error)
-	// Version is the binary version for daemon.json and reports.
-	Version string
 }
 
 // attached is one device with a live driver: the executor.Session plus the

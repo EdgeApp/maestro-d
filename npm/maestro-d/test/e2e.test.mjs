@@ -146,7 +146,7 @@ describe('devices', () => {
     }
   })
 
-  test('startDevice without platform/name is a TypeError', async () => {
+  test('startDevice without a name is a TypeError', async () => {
     await assert.rejects(() => daemon.startDevice({ platform: 'ios' }), TypeError)
   })
 })

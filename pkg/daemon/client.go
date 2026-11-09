@@ -254,6 +254,49 @@ func (c *Client) StopDevice(ctx context.Context, id string, force bool) error {
 	return nil
 }
 
+// Catalog lists what `device create` can make; platform "" means both.
+func (c *Client) Catalog(ctx context.Context, platform string, available bool) (*CatalogResult, error) {
+	q := url.Values{}
+	if platform != "" {
+		q.Set("platform", platform)
+	}
+	if available {
+		q.Set("available", "true")
+	}
+	path := "/v1/catalog"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out CatalogResult
+	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// CreateDevice creates a simulator or AVD (req.Create) and, unless
+// req.Boot is false, boots it.
+func (c *Client) CreateDevice(ctx context.Context, req BootRequest) (*DeviceInfo, error) {
+	if req.Create == nil {
+		req.Create = &CreateSpec{}
+	}
+	return c.StartDevice(ctx, req)
+}
+
+// DeleteDevice deletes a simulator or AVD, stopping it first. Devices
+// maestro-d did not create need force (DEVICE_EXTERNAL).
+func (c *Client) DeleteDevice(ctx context.Context, id string, force bool) (*DeviceInfo, error) {
+	path := devPath(id, "?delete=true")
+	if force {
+		path += "&force=true"
+	}
+	var out DeviceResult
+	if e := c.call(ctx, http.MethodDelete, path, nil, &out); e != nil {
+		return nil, e
+	}
+	return &out.Device, nil
+}
+
 // Attach opens a driver on the device (no-op when already attached).
 func (c *Client) Attach(ctx context.Context, id string, cfg AttachConfig) (*DeviceInfo, error) {
 	var out DeviceResult

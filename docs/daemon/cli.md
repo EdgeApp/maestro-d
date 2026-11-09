@@ -139,9 +139,13 @@ maestro-d stop --all
 
 | command | |
 | --- | --- |
-| `device list` (`ls`) | connected devices, simulators and emulators (booted or not) with attach state |
-| `device start NAME --platform ios\|android [--boot-timeout N]` | boot a simulator (name or UDID) or emulator (AVD name); recorded as daemon-owned |
+| `device list` (`ls`) | connected devices, simulators (booted or not), running emulators under their AVD names, and shut-down AVDs as `avd:<name>`, with attach state |
+| `device catalog [--platform ios\|android] [--available]` | what `device create` can use: iOS runtimes and device types (simctl), Android system images (sdkmanager; `--available` adds downloadable ones) and hardware profiles (avdmanager) |
+| `device create --platform ios --name N [--type T] [--runtime R] [--no-boot]` | create a simulator; defaults are the newest installed runtime and the newest iPhone it supports |
+| `device create --platform android --name N [--image I] [--profile P] [--data-size S] [--install-image --accept-licenses] [--no-boot]` | create an AVD; defaults are the newest installed `google_apis` image for the host's ABI, `pixel_8` and a 6G data partition (at most 10G) |
+| `device start NAME [--platform ios\|android] [--boot-timeout N]` | boot a simulator (name or UDID) or emulator (AVD name or `avd:<name>`); recorded as daemon-owned. Without `--platform`, `avd:` means android and a listed name or UDID picks its platform |
 | `device stop [ID] [--force] [--orphans]` | shut a device down (detaching first); only daemon-booted ones without `--force`; `--orphans` cleans up after dead daemons |
+| `device delete ID\|NAME [--force]` | delete a simulator or AVD (by UDID, name, `avd:<name>` or a running emulator's serial), detaching and stopping it first; only ones `device create` made without `--force` (`DEVICE_EXTERNAL`) |
 | `attach --device ID [flags]` | open a driver on a device now rather than on the first command |
 | `detach [--device ID \| --all]` | close the driver; the device stays as it is |
 
@@ -155,7 +159,21 @@ Attach flags map one to one onto maestro-runner's `test` flags:
 `--headed`, `--browser`, `--window-size`, `--user-data-dir`,
 `--android-tcp-forward`.
 
+`device create` records what it makes in `<home>/created.json`
+(`$MAESTRO_D_HOME`, else `~/.maestro-d`), shared by every daemon of that
+home and kept across restarts; `device delete` checks it. A new AVD's
+`--data-size` is written to its `config.ini` as `disk.dataPartition.size`.
+`--install-image` downloads a missing system image with `sdkmanager --install`
+and needs `--accept-licenses`; without it, a missing image fails `USAGE` with
+the `sdkmanager` command to run. The Android tools are looked up under
+`ANDROID_HOME` / `ANDROID_SDK_ROOT`, then on `PATH`.
+
 ```sh
+maestro-d device catalog --platform ios
+udid=$(maestro-d device create --platform ios --name ci-phone --type "iPhone 16" --runtime iOS-26-5 --json | jq -r .device.id)
+maestro-d device create --platform android --name ci-pixel --data-size 8G --no-boot   # → avd:ci-pixel
+serial=$(maestro-d device start avd:ci-pixel --json | jq -r .device.id)
+maestro-d device delete "$serial"                     # stops the emulator, deletes the AVD
 udid=$(maestro-d device start "iPhone 16" --platform ios --json | jq -r .device.id)
 maestro-d attach --device "$udid" --app-file build/Edge.app
 maestro-d attach --device 29271FDH200ABP --app-file app-release.apk --app-id co.edgesecure.app

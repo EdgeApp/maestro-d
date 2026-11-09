@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,11 @@ const (
 	BootedByDaemon   = "daemon"
 	BootedByExternal = "external"
 	defaultBootSecs  = 120
+	// AVDPrefix marks a shut-down AVD's id in listings: avd:<name>.
+	AVDPrefix = "avd:"
+	// CreatedByMaestroD tags the devices `device create` made.
+	CreatedByMaestroD = "maestro-d"
+	createdFile       = "created.json"
 )
 
 // Registry tracks the devices a daemon booted or attached and persists them
@@ -34,12 +41,17 @@ type Registry struct {
 	list    func(platform string) []DeviceInfo
 	// booting guards concurrent boots of the same name.
 	booting map[string]bool
+	// deps holds the catalog, create and delete hooks.
+	deps Deps
+	// boot starts a simulator or emulator and returns its id (a seam over
+	// the simulator and emulator managers).
+	boot func(platform, name string, timeout time.Duration) (string, error)
 }
 
 // NewRegistry creates a registry for daemon name. list discovers live
 // devices (may be nil for tests).
 func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry {
-	return &Registry{
+	r := &Registry{
 		name:    name,
 		records: map[string]*DeviceInfo{},
 		sim:     simulator.NewManager(),
@@ -47,6 +59,19 @@ func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry
 		list:    list,
 		booting: map[string]bool{},
 	}
+	r.boot = r.startNative
+	return r
+}
+
+// startNative boots through upstream's simulator and emulator managers.
+func (r *Registry) startNative(platform, name string, timeout time.Duration) (string, error) {
+	if platform == "ios" {
+		if simulator.IsSimulator(name) {
+			return r.sim.Start(name, timeout)
+		}
+		return r.sim.StartByName(name, timeout)
+	}
+	return r.emu.Start(name, timeout)
 }
 
 // Live returns the devices currently visible to adb / simctl. Platform ""
@@ -63,12 +88,16 @@ func (r *Registry) Live(platform string) []DeviceInfo {
 // vanished are dropped.
 func (r *Registry) List(platform string) []DeviceInfo {
 	live := r.Live(platform)
+	created := loadCreated()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	seen := map[string]bool{}
 	out := make([]DeviceInfo, 0, len(live))
 	for _, d := range live {
 		seen[d.ID] = true
+		if created.has(d.Platform, createdKey(d)) {
+			d.CreatedBy = CreatedByMaestroD
+		}
 		if rec, ok := r.records[d.ID]; ok {
 			d.BootedBy = rec.BootedBy
 			d.BootedAt = rec.BootedAt
@@ -113,6 +142,18 @@ func (r *Registry) Lookup(id string) (DeviceInfo, bool) {
 		}
 	}
 	return DeviceInfo{}, false
+}
+
+// Held returns the records of the devices this daemon has attached or
+// booted, without asking adb or simctl.
+func (r *Registry) Held() []DeviceInfo {
+	var out []DeviceInfo
+	for _, rec := range r.Records() {
+		if rec.Attached || rec.BootedBy == BootedByDaemon {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // Records returns the persisted records (a copy).
@@ -214,18 +255,29 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 	}
 	platform := strings.ToLower(req.Platform)
 	if platform == "" {
-		platform = guessBootPlatform(req.Name)
+		p, e := r.inferBootPlatform(req.Name)
+		if e != nil {
+			return DeviceInfo{}, e
+		}
+		platform = p
+	}
+	if platform != "ios" && platform != "android" {
+		return DeviceInfo{}, Errorf(CodeUsage, "device start: platform must be ios or android (got %q)", req.Platform)
+	}
+	name := req.Name
+	if platform == "android" {
+		name = strings.TrimPrefix(name, AVDPrefix)
 	}
 
-	// Already running?
+	// Already running? A running emulator is listed under its AVD name.
 	for _, d := range r.Live(platform) {
-		if d.Ready && (d.ID == req.Name || strings.EqualFold(d.Name, req.Name)) {
+		if d.Ready && (d.ID == req.Name || strings.EqualFold(d.Name, name)) {
 			logger.Info("device start: %s already running as %s", req.Name, d.ID)
 			return d, nil
 		}
 	}
 
-	key := platform + ":" + req.Name
+	key := platform + ":" + name
 	r.mu.Lock()
 	if r.booting[key] {
 		r.mu.Unlock()
@@ -244,18 +296,7 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		switch platform {
-		case "ios":
-			if simulator.IsSimulator(req.Name) {
-				id, err = r.sim.Start(req.Name, timeout)
-			} else {
-				id, err = r.sim.StartByName(req.Name, timeout)
-			}
-		case "android":
-			id, err = r.emu.Start(req.Name, timeout)
-		default:
-			err = Errorf(CodeUsage, "device start: platform must be ios or android (got %q)", req.Platform)
-		}
+		id, err = r.boot(platform, name, timeout)
 	}()
 	select {
 	case <-done:
@@ -269,7 +310,7 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 		return DeviceInfo{}, WrapErr(CodeDeviceError, err)
 	}
 
-	info := DeviceInfo{ID: id, Platform: platform, Name: req.Name, State: "Booted", Ready: true,
+	info := DeviceInfo{ID: id, Platform: platform, Name: name, State: "Booted", Ready: true,
 		BootedBy: BootedByDaemon, BootedAt: nowRFC3339()}
 	if platform == "ios" {
 		info.Kind = "simulator"
@@ -301,17 +342,29 @@ func (r *Registry) findLive(platform, id string) (DeviceInfo, bool) {
 	return DeviceInfo{}, false
 }
 
-// guessBootPlatform picks ios for simulator UDIDs / names containing
-// "iPhone"/"iPad", android otherwise.
-func guessBootPlatform(name string) string {
-	if simulator.IsSimulator(name) {
-		return "ios"
+// inferBootPlatform picks the platform of a device start without
+// --platform: avd:<name> is android, and otherwise the id or name must match
+// a listed device (a simulator by name or UDID, an AVD by name, a running
+// emulator or device by serial).
+func (r *Registry) inferBootPlatform(name string) (string, *Error) {
+	if strings.HasPrefix(name, AVDPrefix) {
+		return "android", nil
 	}
-	lower := strings.ToLower(name)
-	if strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad") || strings.Contains(lower, "apple") {
-		return "ios"
+	found := map[string]bool{}
+	for _, d := range r.Live("") {
+		if d.ID == name || (d.Name != "" && strings.EqualFold(d.Name, name)) {
+			found[d.Platform] = true
+		}
 	}
-	return "android"
+	switch {
+	case len(found) == 1:
+		for p := range found {
+			return p, nil
+		}
+	case len(found) > 1:
+		return "", Errorf(CodeUsage, "device start: %q names both an iOS simulator and an Android device; pass --platform ios|android", name)
+	}
+	return "", Errorf(CodeUsage, "device start: no simulator, AVD or device is called %q; pass --platform ios|android, or avd:<name> for an AVD", name)
 }
 
 // Stop shuts a simulator/emulator down. External devices need force; a
@@ -321,6 +374,9 @@ func (r *Registry) Stop(id string, force bool) error {
 	info, ok := r.Lookup(id)
 	if !ok {
 		return Errorf(CodeDeviceNotFound, "device %s not found", id)
+	}
+	if strings.HasPrefix(info.ID, AVDPrefix) {
+		return nil // a shut-down AVD: nothing to stop
 	}
 	if info.Attached {
 		return Errorf(CodeBusy, "device %s is attached; detach it first", id)
@@ -415,4 +471,105 @@ func StopOrphans() ([]string, error) {
 		RemoveRunFiles(d.Name)
 	}
 	return stopped, errors.Join(errs...)
+}
+
+// ---------------------------------------------------------------------------
+// created.json: the simulators and AVDs `device create` made.
+
+// CreatedRecord is one entry of <home>/created.json. ID is the simulator's
+// UDID, or the AVD's name (an emulator's serial changes with every boot).
+type CreatedRecord struct {
+	Platform  string `json:"platform"`
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	CreatedBy string `json:"createdBy"`
+	CreatedAt string `json:"createdAt,omitempty"`
+	Daemon    string `json:"daemon,omitempty"`
+}
+
+type createdRecords []CreatedRecord
+
+// createdMu serialises this process's read-modify-write of created.json.
+var createdMu sync.Mutex
+
+// CreatedPath is created.json under Home(), shared by every daemon of that
+// home and kept across restarts.
+func CreatedPath() string { return filepath.Join(Home(), createdFile) }
+
+func loadCreated() createdRecords {
+	data, err := os.ReadFile(CreatedPath())
+	if err != nil {
+		return nil
+	}
+	var recs createdRecords
+	if err := json.Unmarshal(data, &recs); err != nil {
+		logger.Warn("created.json: %v", err)
+		return nil
+	}
+	return recs
+}
+
+func (c createdRecords) has(platform, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, rec := range c {
+		if rec.Platform == platform && rec.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// recordCreated adds a record, replacing any with the same platform and id.
+func recordCreated(rec CreatedRecord) error {
+	createdMu.Lock()
+	defer createdMu.Unlock()
+	recs := loadCreated()
+	out := createdRecords{}
+	for _, r := range recs {
+		if r.Platform != rec.Platform || r.ID != rec.ID {
+			out = append(out, r)
+		}
+	}
+	rec.CreatedBy = CreatedByMaestroD
+	if rec.CreatedAt == "" {
+		rec.CreatedAt = nowRFC3339()
+	}
+	out = append(out, rec)
+	if err := os.MkdirAll(Home(), 0o700); err != nil {
+		return err
+	}
+	return atomicWriteJSON(CreatedPath(), out)
+}
+
+// forgetCreated drops a record.
+func forgetCreated(platform, id string) error {
+	createdMu.Lock()
+	defer createdMu.Unlock()
+	recs := loadCreated()
+	if !recs.has(platform, id) {
+		return nil
+	}
+	out := createdRecords{}
+	for _, r := range recs {
+		if r.Platform != platform || r.ID != id {
+			out = append(out, r)
+		}
+	}
+	return atomicWriteJSON(CreatedPath(), out)
+}
+
+// createdKey is the created.json id of a listed device: a simulator's UDID,
+// or the AVD name behind avd:<name> and behind a running emulator.
+func createdKey(d DeviceInfo) string {
+	switch {
+	case d.Platform == "ios" && d.Kind == "simulator":
+		return d.ID
+	case d.Platform == "android" && strings.HasPrefix(d.ID, AVDPrefix):
+		return strings.TrimPrefix(d.ID, AVDPrefix)
+	case d.Platform == "android" && emulator.IsEmulator(d.ID):
+		return d.Name
+	}
+	return ""
 }
