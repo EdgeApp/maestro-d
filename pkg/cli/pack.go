@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,12 +199,16 @@ func uploadPath(ctx context.Context, c *daemon.Client, device, path string, quie
 }
 
 var packFlags = []dflag{
-	boolFlag("json", "Print the units as JSON", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
+	boolFlag("json", "Print the units (or the bundle) as JSON", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
+	boolFlag("flow", "Pack each PATH as a flow with its dependency closure, into one bundle", nil, func(o *daemonOpts, v bool) { o.pack.flow = v }),
+	strFlag("base", "With --flow: place the first flow as if it sat in DIR (its references resolve there)", nil, func(o *daemonOpts, v string) { o.pack.base = v }),
+	envFlag,
+	includeFlag,
 }
 
 var packCommand = &cli.Command{
 	Name:      "pack",
-	Usage:     "Hash local files into the units a client uploads to a hub",
+	Usage:     "Hash local files, or a flow and everything it uses, into the units a client uploads to a hub",
 	ArgsUsage: "PATH…",
 	Description: flagsDoc(`Each file is one unit; a directory (an iOS .app) is zipped first, with
 sorted entries and fixed timestamps, so the same tree always gives the same
@@ -211,11 +216,28 @@ sha256. A targeted client (--target-hub, or the JavaScript library on a hub)
 packs this way, uploads what the daemon lacks, and names each file
 blob:sha256:<hex>/<basename>.
 
-  maestro-d pack app.apk photo.png --json`, packFlags),
+With --flow, each PATH is a flow file (the first is the bundle's root), and
+the bundle holds its whole closure: runFlow files (and else), retry files,
+the onFlowStart/onFlowComplete hooks, runScript .js files, addMedia,
+assertScreenshot references, the other file inputs, and the root flow's
+config.yaml. ${VAR} in a path is expanded from -e; a path that still cannot
+be resolved, or an absolute one, stops the pack naming the step. The
+manifest {root, files: {relPath: sha256}} is relative to the files' common
+directory. 'maestro-d run --target-hub' and the JavaScript library pack
+flows this way.
+
+  maestro-d pack app.apk photo.png --json
+  maestro-d pack --flow login.yaml -e USER=alice --include 'data/*.json' --json`, packFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(packFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 		if len(args) == 0 {
-			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d pack PATH…")
+			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d pack [--flow] PATH…")
+		}
+		if o.pack.flow {
+			return printBundle(o, args)
+		}
+		if o.pack.base != "" || len(o.pack.include) > 0 || len(o.Attach.Env) > 0 {
+			return daemon.Errorf(daemon.CodeUsage, "pack: --base, --include and -e apply to --flow only")
 		}
 		units := make([]*PackUnit, 0, len(args))
 		for _, a := range args {
@@ -238,6 +260,28 @@ blob:sha256:<hex>/<basename>.
 		}
 		return nil
 	}),
+}
+
+// printBundle is pack --flow.
+func printBundle(o *daemonOpts, args []string) error {
+	b, err := packFlow(args, packFlowOpts{Base: o.pack.base, Env: o.Attach.Env, Include: o.pack.include})
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "bundle": b})
+		return nil
+	}
+	fmt.Printf("bundle %s  root %s  dir %s\n", b.SHA256, b.Manifest.Root, b.Dir)
+	keys := make([]string, 0, len(b.Manifest.Files))
+	for k := range b.Manifest.Files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("%s  %s\n", b.Manifest.Files[k], k)
+	}
+	return nil
 }
 
 // isBlobRef reports whether v already names an uploaded file.

@@ -751,8 +751,18 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	steps, e := resolveSteps(req)
-	if e != nil {
+	var steps []flow.Step
+	var e *Error
+	if req.Bundle != nil {
+		if len(req.Steps) > 0 || req.YAML != "" {
+			writeError(w, Errorf(CodeUsage, "steps: send bundle, steps or yaml, not more than one"))
+			return
+		}
+		if e = req.Bundle.Validate(); e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+	} else if steps, e = resolveSteps(req); e != nil {
 		writeError(w, e)
 		return
 	}
@@ -760,7 +770,23 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release(a)
-	ctx, cancel := s.runCtx(r, a)
+	bundleDir, flowDir := "", ""
+	if req.Bundle != nil {
+		dir, root, e := s.bundleCall(a, req.Bundle)
+		if e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		f, err := flow.ParseFile(root)
+		if err != nil {
+			writeError(w, WrapErr(CodeUsage, err))
+			return
+		}
+		// The root file's own directory, not the bundle's: its relative
+		// runFlow, runScript and addMedia resolve as beside the file.
+		steps, bundleDir, flowDir = f.Steps, dir, filepath.Dir(root)
+	}
+	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
 	outs := a.session.ExecuteAll(ctx, steps, req.ContinueOnError)
 	results := make([]StepResult, 0, len(outs))
@@ -795,7 +821,7 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 		case req.Cwd != "":
 			e = forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
 		case req.File != "":
-			e = forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (yaml)", req.File).WithDetails("field", "file")
+			e = forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (bundle or yaml)", req.File).WithDetails("field", "file")
 		}
 		if e != nil {
 			s.logForbidden(r, e)
@@ -805,7 +831,31 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	var f *flow.Flow
 	var err error
+	if req.Bundle != nil && (req.File != "" || req.YAML != "") {
+		writeError(w, Errorf(CodeUsage, "flows: send bundle, file or yaml, not more than one"))
+		return
+	}
+	bundleDir, flowDir := "", ""
 	switch {
+	case req.Bundle != nil:
+		if e := req.Bundle.Validate(); e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		if !s.acquire(w, r, a) {
+			return
+		}
+		defer s.release(a)
+		dir, root, e := s.bundleCall(a, req.Bundle)
+		if e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		// For the whole call, hooks included: upstream sets flowDir only
+		// inside executeSubFlow, so onFlowStart and onFlowComplete would
+		// otherwise resolve against the daemon's working directory.
+		bundleDir, flowDir = dir, filepath.Dir(root)
+		f, err = flow.ParseFile(root)
 	case req.File != "":
 		path := req.File
 		if !filepath.IsAbs(path) && req.Cwd != "" {
@@ -834,11 +884,13 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 			f.Config.Env[k] = v
 		}
 	}
-	if !s.acquire(w, r, a) {
-		return
+	if bundleDir == "" {
+		if !s.acquire(w, r, a) {
+			return
+		}
+		defer s.release(a)
 	}
-	defer s.release(a)
-	ctx, cancel := s.runCtx(r, a)
+	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
 	out := a.session.RunFlow(ctx, *f)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
@@ -855,7 +907,16 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 // runCtx is the context a step runs under: cancelled when the client goes
 // away or the daemon shuts down.
 func (s *Server) runCtx(r *http.Request, a *attached) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(executor.WithCallerPolicy(r.Context(), s.callerPolicy(r.Context(), a)))
+	return s.runCtxBundle(r, a, "", "")
+}
+
+// runCtxBundle is runCtx for a call that runs from a materialized bundle:
+// the bundle is one of the policy's roots, and flowDir is the script
+// engine's flow directory for the call.
+func (s *Server) runCtxBundle(r *http.Request, a *attached, bundleDir, flowDir string) (context.Context, context.CancelFunc) {
+	p := s.callerPolicy(r.Context(), a)
+	p.BundleDir, p.FlowDir = bundleDir, flowDir
+	ctx, cancel := context.WithCancel(executor.WithCallerPolicy(r.Context(), p))
 	stop := context.AfterFunc(a.baseCtx(), cancel)
 	return ctx, func() { stop(); cancel() }
 }
@@ -869,6 +930,14 @@ func (s *Server) stepStatus(r *http.Request, res *Error) int {
 		s.logForbidden(r, res)
 	}
 	return res.Code.HTTPStatus()
+}
+
+// writeBundleError answers a bad bundle, logging a FORBIDDEN one.
+func (s *Server) writeBundleError(w http.ResponseWriter, r *http.Request, e *Error) {
+	if e.Code == CodeForbidden {
+		s.logForbidden(r, e)
+	}
+	writeError(w, e)
 }
 
 func (s *Server) logForbidden(r *http.Request, e *Error) {

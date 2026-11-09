@@ -300,8 +300,12 @@ func (s *Session) withOutputs(out *StepOutcome, call *CallerPolicy) *StepOutcome
 
 // beginPolicy installs the caller policy carried by ctx (the daemon puts
 // one there per request) on the script engine for this call, under a
-// context the policy cancels when it denies a step. The returned func
-// clears it.
+// context the policy cancels when it denies a step. A policy with a
+// FlowDir (a bundle's root file's directory) sets the script engine's flow
+// directory for this call: upstream sets it only inside executeSubFlow, so
+// a bundled step list, and a bundled flow's hooks, would otherwise resolve
+// against the daemon's own working directory. The returned func clears the
+// policy and restores the session's flow directory.
 func (s *Session) beginPolicy(ctx context.Context) (context.Context, *CallerPolicy, func()) {
 	p := CallerPolicyFrom(ctx)
 	if p == nil || s.closed {
@@ -310,8 +314,13 @@ func (s *Session) beginPolicy(ctx context.Context) (context.Context, *CallerPoli
 	ctx, cancel := context.WithCancel(ctx)
 	call := p.beginCall(s.OutputDir(), cancel)
 	s.fr.script.policy = call
+	prevDir := s.fr.script.FlowDir()
+	if call.FlowDir != "" {
+		s.fr.script.SetFlowDir(call.FlowDir)
+	}
 	return ctx, call, func() {
 		s.fr.script.policy = nil
+		s.fr.script.SetFlowDir(prevDir)
 		cancel()
 	}
 }

@@ -4,11 +4,12 @@
 
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandParams } from './generated/commands.js'
-import { HubFiles, uploadPath } from './pack.js'
+import { type FlowBundle, HubFiles, fetchBundleOutputs, packFlow, uploadBundle, uploadPath } from './pack.js'
 import type { Transport } from './transport.js'
 import type {
   ArtifactInfo,
@@ -40,6 +41,11 @@ export interface CallOptions {
 export interface RunOptions extends CallOptions {
   /** Keep going after a failed step; the result still reports `ok: false`. */
   continueOnError?: boolean
+  /**
+   * On a hub: globs (relative to cwd) of files the steps open dynamically,
+   * packed with them.
+   */
+  include?: string[]
 }
 
 export interface FlowOptions extends CallOptions {
@@ -48,6 +54,23 @@ export interface FlowOptions extends CallOptions {
   /** Inline flow YAML, header and all. */
   yaml?: string
   env?: Record<string, string>
+  /**
+   * On a hub: globs (relative to the flow's directory) of files the flow
+   * opens dynamically, packed with it.
+   */
+  include?: string[]
+}
+
+/** Write `yaml` to a temporary root file, run `fn` on it, and remove the directory. */
+async function withTempRoot<T>(yaml: string, fn: (root: string) => Promise<T>): Promise<T> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-inline-'))
+  try {
+    const root = path.join(dir, '.maestro-d-inline.yaml')
+    fs.writeFileSync(root, yaml)
+    return await fn(root)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 /** The typed method for each command. */
@@ -236,10 +259,46 @@ export class MaestroDevice {
   }
 
   private async steps(req: { steps?: Step[]; yaml?: string }, opts: RunOptions): Promise<StepsResult> {
-    const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true }
-    if (!this.transport.hub) body.cwd = opts.cwd ?? process.cwd()
     const url = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
+    if (this.transport.hub) {
+      // The steps' relative references are on this machine: write them to
+      // a temporary root that stands in cwd, pack it with everything it
+      // uses, and post the bundle (a hub refuses host directories).
+      const cwd = opts.cwd ?? process.cwd()
+      const yaml = req.yaml ?? JSON.stringify(req.steps)
+      return withTempRoot(yaml, async (root) => {
+        const bundle = await packFlow([root], { base: cwd, include: opts.include, signal: this.sig(opts) })
+        const body = { bundle: bundle.manifest, continueOnError: opts.continueOnError === true }
+        return this.postBundle<StepsResult>(url, body, bundle, opts)
+      })
+    }
+    const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
     const res = await this.transport.json<StepsResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
+    return checkResult(res)
+  }
+
+  /**
+   * Upload a bundle's files, post the call, and fetch its outputs back into
+   * the bundle's directory, also after a failure.
+   */
+  private async postBundle<T extends StepResult | StepsResult>(
+    url: string,
+    body: Record<string, unknown>,
+    bundle: FlowBundle,
+    opts: CallOptions,
+  ): Promise<T> {
+    const signal = this.sig(opts)
+    await uploadBundle(this.transport, this.base, bundle, { signal })
+    let res: T
+    try {
+      res = await this.transport.json<T>(url, { method: 'POST', body, signal, requestId: this.requestId() })
+    } catch (err) {
+      if (err instanceof MaestroError && err.result && 'outputs' in err.result) {
+        await fetchBundleOutputs(this.transport, this.base, bundle.dir, err.result.outputs, signal)
+      }
+      throw err
+    }
+    await fetchBundleOutputs(this.transport, this.base, bundle.dir, res.outputs, signal)
     return checkResult(res)
   }
 
@@ -254,24 +313,19 @@ export class MaestroDevice {
    */
   async flow(opts: FlowOptions): Promise<StepResult> {
     if (!opts.file && !opts.yaml) throw new TypeError('flow() needs a file or yaml')
-    let body: Record<string, unknown>
-    if (this.transport.hub) {
-      // The file is on this machine, not the hub's: send its YAML, and no
-      // working directory (a hub refuses host paths).
-      let yaml = opts.yaml
-      if (yaml === undefined) {
-        const file = path.resolve(opts.cwd ?? process.cwd(), opts.file as string)
-        try {
-          yaml = fs.readFileSync(file, 'utf8')
-        } catch (err) {
-          throw MaestroError.of('USAGE', `flow(): ${(err as Error).message}`, { cause: err })
-        }
-      }
-      body = { yaml, env: opts.env }
-    } else {
-      body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
-    }
     const url = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
+    if (this.transport.hub) {
+      // The flow is on this machine, not the hub's: pack it with everything
+      // it uses and post the bundle; inline YAML stands in cwd.
+      const cwd = opts.cwd ?? process.cwd()
+      const run = async (root: string, base?: string): Promise<StepResult> => {
+        const bundle = await packFlow([root], { base, env: opts.env, include: opts.include, signal: this.sig(opts) })
+        return this.postBundle<StepResult>(url, { bundle: bundle.manifest, env: opts.env }, bundle, opts)
+      }
+      if (opts.yaml !== undefined) return withTempRoot(opts.yaml, (root) => run(root, cwd))
+      return run(path.resolve(cwd, opts.file as string))
+    }
+    const body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
     const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
   }

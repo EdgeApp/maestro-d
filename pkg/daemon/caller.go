@@ -90,7 +90,7 @@ func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.Caller
 	c := CallerFrom(ctx)
 	// Every caller's blob refs are mapped; only a remote one is confined.
 	p := &executor.CallerPolicy{Remote: c.Remote, ClientOutputs: c.ClientOutputs,
-		Blobs: sessionBlobs{store: s.blobs, dir: filepath.Join(a.reportDir, "blobs")}}
+		Blobs: sessionBlobs{store: s.blobs, dir: filepath.Join(a.reportDir, "blobs"), bundles: filepath.Join(a.reportDir, "bundles")}}
 	if c.Remote {
 		p.AllowShell = s.cfg.AllowRemoteShell
 	}

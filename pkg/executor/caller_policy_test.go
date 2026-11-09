@@ -376,8 +376,19 @@ func TestPolicy_Helpers(t *testing.T) {
 	if p.Denial().Reason != "r" {
 		t.Fatal("the first denial wins")
 	}
-	if underDir("/a/b", "/a/../c") {
-		t.Fatal("underDir")
+	if underAbsDir("/a/b", "/a/../c") || !underAbsDir("/a/b", "/a/c/..") {
+		t.Fatal("underAbsDir")
+	}
+	for _, c := range []struct {
+		path, dir string
+		want      bool
+	}{
+		{"/a", "/a", true}, {"/a/b", "/a", true}, {"/a/./b/", "/a/", true}, {"/a/..b", "/a", true},
+		{"/a/../b", "/a", false}, {"/ab", "/a", false}, {"/", "/a", false}, {"a/b", "a", true}, {"..", ".", false},
+	} {
+		if got := PathUnder(c.path, c.dir); got != c.want {
+			t.Errorf("PathUnder(%q, %q) = %v", c.path, c.dir, got)
+		}
 	}
 	var se ScriptEngine
 	se.policyStep(nil)

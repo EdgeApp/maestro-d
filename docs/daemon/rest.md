@@ -86,16 +86,21 @@ A remote caller drives devices but not the host. These are refused with
   ending in `.js`; other values are inline JavaScript and run), `uploadFile`
   path(s), `runWebViewScript`/`runBrowserScript` file, `loadAuthState`,
   and the `runFlow`/`retry` file — whether absolute, relative, or built
-  from a `${VAR}`. Nothing on the host is read. Upload the file instead
+  from a `${VAR}`, and whether in a one-shot or inside a bundled flow (a
+  `..` that leaves the bundle counts). Nothing on the host is read. Upload the file instead
   ([blobs](#blobs-uploaded-files)) and name it
   `blob:sha256:<hex>/<basename>`; the daemon gives the step its own copy,
   with that basename and extension. A ref whose hash is not 64 lowercase
   hex digits, or whose basename is not a plain file name, is `FORBIDDEN`
-  before any file is opened.
+  before any file is opened. A flow file goes as a
+  [flow bundle](#flow-bundles) instead: `bundle:sha256:<manifest>/<root>`
+  in `runFlow`'s `file` or `else`, or `retry`'s `file`.
 - An output path that is absolute or contains `..` (`takeScreenshot`,
   `saveAuthState`). A relative one is written under the session's report
   directory, in `outputs/<path>` (`takeScreenshot` adds `.png` when it has
-  no extension), and the result lists it in [`outputs`](#outputs).
+  no extension), and the result lists it in [`outputs`](#outputs). Inside a
+  bundle the path is taken relative to the bundle root from the step's own
+  flow directory: `takeScreenshot: x` in `sub/open.yaml` is `outputs/sub/x.png`.
   `startRecording`'s path is a device path on Android and passes through.
 - `assertScreenshot`'s reference: a `blob:` ref is compared; a relative
   path that names no uploaded file is a **baseline**, written to
@@ -106,7 +111,9 @@ A remote caller drives devices but not the host. These are refused with
   `blob:` ref — and listed in `outputs`; the failure message names that
   output, not a path on the daemon's host.
 - `?cwd=` on a command, `cwd` in a `/steps` or `/flows` body, and `file` in
-  a `/flows` body: send the flow's `yaml` instead.
+  a `/flows` body: send the flow as a `bundle` (or its `yaml`) instead.
+- A [flow bundle](#flow-bundles) manifest with a name or hash that could
+  leave its directory.
 - An attach with `platform: web` (or a browser driver), `outputDir`,
   `flowDir`, `extra.userDataDir` or `extra.browser`, or an `appFile` that
   is a host path rather than an uploaded `blob:` ref.
@@ -140,7 +147,9 @@ never send their own output path: they send
 `<first 8 hex of sha256(caller path)>/<basename>`, then fetch the result's
 `outputs` back to the caller's path (relative to their own working
 directory, or absolute). `takeScreenshot --path name` writes `name.png` on
-the client, as a local run would.
+the client, as a local run would. For a [bundle](#flow-bundles) they fetch
+each `outputs/<path>` to `<path>` under the bundle's directory on the
+client (its files' common directory), where a local run writes it.
 
 ## Request ids and retries
 
@@ -508,7 +517,9 @@ curl -s -H "$H" $D/v1/devices/29271FDH200ABP/steps -d '{
 }'
 ```
 
-`steps` is a JSON list of steps (or `yaml` a string holding the YAML list).
+`steps` is a JSON list of steps (or `yaml` a string holding the YAML list,
+or `bundle` an uploaded [flow bundle](#flow-bundles) whose root file is the
+step list).
 Each entry is `{"<command>": <body>}`, where `<body>` is what the single
 command route takes, so the same field checking applies; a bad field reports
 which step it was in (`step 2: tapOn has no field "txt"`).
@@ -528,6 +539,12 @@ failure and the status is its code's (`422` for `COMMAND_FAILED`):
 
 A batch's `outputs` collects every result's `outputs`.
 
+With `bundle`, the daemon builds the bundle (below) and runs its root file's
+steps with the session's flow directory set, for that call only, to the
+root file's own directory, so relative `runFlow`, `runScript` and
+`addMedia` resolve inside the bundle as they would beside the file; the
+session's flow directory is restored afterwards.
+
 Query `wait` and `cwd` as for commands.
 
 ### `POST /v1/devices/{id}/flows` — a flow file
@@ -539,13 +556,55 @@ curl -s -H "$H" $D/v1/devices/29271FDH200ABP/flows -d '{
 }'
 ```
 
-`file` (a path on the daemon's host; local callers only) or `yaml` (the
-file's text, with the `appId:` / `---` header). The flow runs as `maestro-runner test` would —
+`file` (a path on the daemon's host; local callers only), `yaml` (the
+file's text, with the `appId:` / `---` header) or `bundle` (an uploaded
+[flow bundle](#flow-bundles); its root file runs, with the flow directory
+set to the root's directory for the whole call, hooks included). The flow runs as `maestro-runner test` would —
 `onFlowStart`/`onFlowComplete` hooks, the flow's own `env`, `runFlow`
 relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.
 The response is one step result of type `runFlow` whose `subSteps` are the
 flow's steps.
+
+### Flow bundles
+
+A client that runs a flow on another machine's daemon packs it with its
+dependency closure (`maestro-d pack --flow FILE --json`): each file is
+uploaded as a [blob](#blobs-uploaded-files), and the **manifest** names
+them relative to their common directory:
+
+```json
+{ "root": "main.yaml",
+  "files": { "main.yaml": "<sha256>", "sub/open-general.yaml": "<sha256>",
+             "scripts/compute.js": "<sha256>", "photo.png": "<sha256>" } }
+```
+
+`POST …/flows {"bundle": <manifest>, "env": {…}}` and
+`POST …/steps {"bundle": <manifest>, "continueOnError": …}` take it inline.
+In a one-shot's flow field (`runFlow` `file`/`else`, `retry` `file`) it is
+`bundle:sha256:<manifest sha256>/<root>`, with the manifest's JSON uploaded
+as a blob too; `<root>` may be any file of the bundle. The daemon builds
+the directory `bundles/<manifest sha256>/` in the session's report
+directory, with hard links from the blob store, and runs from there; that
+directory is one of the call's allowed roots, so the flow's relative
+references, and its subflows', resolve inside it. A file not yet uploaded
+is `USAGE`, naming it.
+
+Before it creates anything the daemon checks every name and hash, and
+answers `FORBIDDEN` otherwise: each `files` key and `root` must be a
+relative, slash-separated path with no empty, `.` or `..` element (and no
+backslash); `root` must be a key of `files`; each hash, and a `bundle:`
+ref's manifest hash, must be 64 lowercase hex digits. A bundle's
+`runShell` and host paths are refused as for any [remote
+caller](#remote-callers).
+
+```sh
+B=$(maestro-d pack --flow main.yaml --json)
+echo "$B" | jq -r '.bundle.units[] | "\(.sha256) \(.file)"' | while read SUM F; do
+  curl -s -H "$H" -X PUT --data-binary @"$F" $D/v1/devices/$ID/blobs/$SUM >/dev/null
+done
+curl -s -H "$H" $D/v1/devices/$ID/flows -d "{\"bundle\": $(echo "$B" | jq -c .bundle.manifest)}"
+```
 
 ## Blobs (uploaded files)
 

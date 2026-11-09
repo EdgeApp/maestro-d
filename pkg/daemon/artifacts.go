@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 )
 
 // ArtifactInfo is one file of a session's report directory.
@@ -107,7 +109,7 @@ func artifactPath(reportDir, rel string) (string, *Error) {
 	if err != nil {
 		return "", WrapErr(CodeInternal, err)
 	}
-	if !underDir(real, root) {
+	if !executor.PathUnder(real, root) {
 		return "", forbidden("artifact path %q leads outside the report directory", rel).WithDetails("field", "path")
 	}
 	return real, nil

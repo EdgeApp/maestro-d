@@ -1424,7 +1424,7 @@ Nested steps (`commands:` / `steps:`) are given as a YAML list or JSON array; th
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `maxRetries` | `string` | String for variable support |
-| `file` | `string` |  |
+| `file` | `string` | A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `env` | `Record<string, string>` |  |
 | `commands` | `Step[]` | Steps to retry (alternative to file) |
 
@@ -1472,11 +1472,11 @@ Nested steps (`commands:` / `steps:`) are given as a YAML list or JSON array; th
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `file` | `string` |  |
+| `file` | `string` | A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `when` | `Condition` |  |
 | `env` | `Record<string, string>` |  |
 | `commands` | `Step[]` | Inline steps (alternative to file) |
-| `else` | `string | Step[]` | Fallback flow file or inline steps when `when` is false |
+| `else` | `string | Step[]` | Fallback flow file or inline steps when `when` is false A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `elseCommands` | `Step[]` | Inline fallback steps when `when` is false |
 
 ## `runScript`

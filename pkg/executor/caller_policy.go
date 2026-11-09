@@ -53,6 +53,10 @@ type CallerPolicy struct {
 	AllowShell bool
 	// BundleDir is the materialized flow bundle the call runs from, if any.
 	BundleDir string
+	// FlowDir, when set, is the script engine's flow directory for this
+	// call only (a bundle's root file's directory); the session's own is
+	// restored afterwards.
+	FlowDir string
 	// OutputsDir receives the files a remote call's output fields write
 	// (takeScreenshot.path, saveAuthState.path).
 	OutputsDir string
@@ -65,7 +69,11 @@ type CallerPolicy struct {
 	Blobs BlobResolver
 
 	// Per-call state, set by the Session that installs the policy.
-	roots     []string
+	roots []string
+	// bundles are the roots that are flow bundles (BundleDir, and every
+	// bundle: ref materialized during the call): an output path inside one
+	// is named relative to it.
+	bundles   []string
 	deniedDir string
 	cancel    context.CancelFunc
 	denial    *PolicyDenial
@@ -159,14 +167,14 @@ func (p *CallerPolicy) beginCall(sessionDir string, cancel context.CancelFunc) *
 		Remote:        p.Remote,
 		AllowShell:    p.AllowShell,
 		BundleDir:     p.BundleDir,
+		FlowDir:       p.FlowDir,
 		OutputsDir:    p.OutputsDir,
 		ClientOutputs: p.ClientOutputs,
 		Blobs:         p.Blobs,
 		cancel:        cancel,
 	}
-	for _, r := range []string{p.BundleDir, p.OutputsDir} {
-		c.AddRoot(r)
-	}
+	c.AddRoot(p.OutputsDir)
+	c.addBundle(p.BundleDir)
 	if p.Blobs != nil {
 		c.AddRoot(p.Blobs.Dir())
 	}
@@ -191,6 +199,48 @@ func (p *CallerPolicy) AddRoot(dir string) {
 		dir = abs
 	}
 	p.roots = append(p.roots, filepath.Clean(dir))
+}
+
+// addBundle adds a materialized bundle directory as a root and as a bundle
+// root.
+func (p *CallerPolicy) addBundle(dir string) {
+	if dir == "" {
+		return
+	}
+	p.AddRoot(dir)
+	p.bundles = append(p.bundles, p.roots[len(p.roots)-1])
+}
+
+// bundleOf returns the bundle root dir lies in (the deepest one), or "".
+func (p *CallerPolicy) bundleOf(dir string) string {
+	best := ""
+	for _, b := range p.bundles {
+		if underAbsDir(dir, b) && len(b) > len(best) {
+			best = b
+		}
+	}
+	return best
+}
+
+// outputName is the name an output path gets under OutputsDir: relative
+// to the bundle root when flowDir lies in a bundle (so a subflow's
+// `takeScreenshot: x` in sub/ becomes sub/x, where a local run writes it),
+// and the path as given otherwise (a one-shot).
+func (p *CallerPolicy) outputName(path, flowDir string) string {
+	path = filepath.Clean(path)
+	if flowDir == "" {
+		return path
+	}
+	dir := absolute(flowDir, "")
+	b := p.bundleOf(dir)
+	if b == "" {
+		return path
+	}
+	rel, err := filepath.Rel(b, filepath.Join(dir, path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path
+	}
+	return rel
 }
 
 // Denial returns the reason the call was stopped, or nil.
@@ -247,22 +297,23 @@ func (p *CallerPolicy) within(path string) bool {
 		return false
 	}
 	for _, root := range p.roots {
-		if !lexicallyUnder(clean, root) {
+		if !PathUnder(clean, root) {
 			continue
 		}
-		if realRoot, err := RealPath(root); err == nil && lexicallyUnder(real, realRoot) {
+		if realRoot, err := RealPath(root); err == nil && PathUnder(real, realRoot) {
 			return true
 		}
 	}
 	return false
 }
 
-// lexicallyUnder reports whether the cleaned path lies in (or is) dir.
-func lexicallyUnder(path, dir string) bool {
-	if path == dir {
-		return true
-	}
-	rel, err := filepath.Rel(dir, path)
+// PathUnder reports whether path lies in (or is) dir, lexically: both are
+// cleaned and no symlink is resolved (resolve them first where that
+// matters). It is the one containment check: the caller policy, the
+// daemon's blob and artifact paths and the client's bundle packing all
+// use it.
+func PathUnder(path, dir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
@@ -353,6 +404,16 @@ func (p *CallerPolicy) mapRef(d PolicyDenial) string {
 		d.Reason = fmt.Sprintf("%s: %v", d.Path, err)
 		return p.deny(d)
 	}
+	if _, root, err := ParseBundleRef(d.Path); err == nil {
+		// The materialized bundle is one of the call's roots, so the
+		// subflow's own relative references resolve inside it.
+		rel := filepath.FromSlash(root)
+		bundle := filepath.Clean(strings.TrimSuffix(filepath.Clean(local), rel))
+		if p.bundleOf(absolute(bundle, "")) != absolute(bundle, "") {
+			p.addBundle(bundle)
+		}
+		return local
+	}
 	if dir := filepath.Dir(local); !p.within(filepath.Clean(dir)) {
 		p.AddRoot(dir)
 	}
@@ -392,17 +453,19 @@ func (p *CallerPolicy) checkInput(d PolicyDenial, flowDir string) string {
 
 // checkOutput applies the rule to a path the executor or a driver writes:
 // a remote caller's path must be relative with no "..", and is rewritten
-// under OutputsDir. A path already there (the hook ran before) passes.
-func (p *CallerPolicy) checkOutput(d PolicyDenial) string {
+// under OutputsDir, named relative to the bundle root when flowDir lies in
+// a bundle (outputName). A path already there (the hook ran before)
+// passes.
+func (p *CallerPolicy) checkOutput(d PolicyDenial, flowDir string) string {
 	if !p.Remote {
-		return p.clientOutput(d.Path)
+		return p.clientOutput(d.Path, flowDir)
 	}
 	if p.isDenied(d.Path) {
 		p.denial.fill(d)
 		return d.Path
 	}
 	if filepath.IsAbs(d.Path) {
-		if p.OutputsDir != "" && underDir(filepath.Clean(d.Path), p.OutputsDir) {
+		if p.OutputsDir != "" && underAbsDir(filepath.Clean(d.Path), p.OutputsDir) {
 			p.recordOutput(d.Path)
 			return d.Path
 		}
@@ -423,19 +486,19 @@ func (p *CallerPolicy) checkOutput(d PolicyDenial) string {
 		d.Reason = fmt.Sprintf("%s: this call has no outputs directory", d.Path)
 		return p.deny(d)
 	}
-	out := filepath.Join(p.OutputsDir, filepath.Clean(d.Path))
+	out := filepath.Join(p.OutputsDir, p.outputName(d.Path, flowDir))
 	p.recordOutput(out)
 	return out
 }
 
 // clientOutput rewrites a ClientOutputs caller's relative output path
 // under OutputsDir; any other local path is left as it is.
-func (p *CallerPolicy) clientOutput(path string) string {
+func (p *CallerPolicy) clientOutput(path, flowDir string) string {
 	if !p.ClientOutputs || p.OutputsDir == "" || isRef(path) {
 		return path
 	}
 	if filepath.IsAbs(path) {
-		if underDir(filepath.Clean(path), p.OutputsDir) {
+		if underAbsDir(filepath.Clean(path), p.OutputsDir) {
 			p.recordOutput(path)
 		}
 		return path
@@ -445,7 +508,7 @@ func (p *CallerPolicy) clientOutput(path string) string {
 			return path
 		}
 	}
-	out := filepath.Join(p.OutputsDir, filepath.Clean(path))
+	out := filepath.Join(p.OutputsDir, p.outputName(path, flowDir))
 	p.recordOutput(out)
 	return out
 }
@@ -551,6 +614,53 @@ func ParseBlobRef(ref string) (hex, base string, err error) {
 	return hex, base, nil
 }
 
+// ParseBundleRef splits bundle:sha256:<manifest>/<root>, where <manifest>
+// is the hash of an uploaded bundle manifest and <root> a file in it (a
+// bundle-relative path, so it may hold "/"). Both are checked before any
+// file is opened.
+func ParseBundleRef(ref string) (hex, root string, err error) {
+	rest, ok := strings.CutPrefix(ref, "bundle:sha256:")
+	if !ok {
+		return "", "", fmt.Errorf("not a bundle ref (want bundle:sha256:<manifest>/<root>)")
+	}
+	hex, root, ok = strings.Cut(rest, "/")
+	if !ok {
+		return "", "", fmt.Errorf("bundle ref has no /<root>")
+	}
+	if !ValidBlobHash(hex) {
+		return "", "", fmt.Errorf("bundle manifest hash %q is not 64 lowercase hex digits", hex)
+	}
+	if err := ValidBundlePath(root); err != nil {
+		return "", "", err
+	}
+	return hex, root, nil
+}
+
+// ValidBundlePath checks a bundle-relative name a caller supplies (a
+// manifest key, its root, a bundle ref's root): slash-separated, relative,
+// not empty, and with no empty, "." or ".." element, so it can never name a
+// file outside the bundle directory.
+func ValidBundlePath(p string) error {
+	if p == "" {
+		return fmt.Errorf("bundle path is empty")
+	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return fmt.Errorf("bundle path %q holds a backslash or NUL", p)
+	}
+	if strings.HasPrefix(p, "/") || filepath.IsAbs(p) {
+		return fmt.Errorf("bundle path %q is absolute", p)
+	}
+	for _, el := range strings.Split(p, "/") {
+		switch el {
+		case "":
+			return fmt.Errorf("bundle path %q has an empty element", p)
+		case ".", "..":
+			return fmt.Errorf("bundle path %q has a %q element", p, el)
+		}
+	}
+	return nil
+}
+
 // withPNG appends ".png" to a path with no extension, as upstream's
 // executeAssertScreenshot does to a reference path.
 func withPNG(path string) string {
@@ -579,20 +689,20 @@ func (se *ScriptEngine) screenshotRef(d PolicyDenial, v *string) {
 	case !p.Remote:
 		// A ClientOutputs caller sends a blob ref for a reference it has,
 		// and its own output name for a baseline it lacks.
-		*v = p.clientOutput(*v)
+		*v = p.clientOutput(*v, se.flowDir)
 	case filepath.IsAbs(*v):
-		if p.OutputsDir != "" && underDir(filepath.Clean(*v), p.OutputsDir) {
-			*v = p.checkOutput(d)
+		if p.OutputsDir != "" && underAbsDir(filepath.Clean(*v), p.OutputsDir) {
+			*v = p.checkOutput(d, se.flowDir)
 			return
 		}
 		*v = p.checkInput(d, se.flowDir)
 	default:
 		abs := absolute(withPNG(*v), se.flowDir)
-		if p.within(rawAbsolute(withPNG(*v), se.flowDir)) && fileExists(abs) && (p.OutputsDir == "" || !underDir(abs, p.OutputsDir)) {
+		if p.within(rawAbsolute(withPNG(*v), se.flowDir)) && fileExists(abs) && (p.OutputsDir == "" || !underAbsDir(abs, p.OutputsDir)) {
 			*v = p.checkInput(d, se.flowDir)
 			return
 		}
-		*v = p.checkOutput(d)
+		*v = p.checkOutput(d, se.flowDir)
 	}
 }
 
@@ -623,10 +733,10 @@ func (se *ScriptEngine) DiffPath(referencePath string) string {
 		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(name))
 	case p.callerNames[strings.TrimSuffix(abs, ".png")] != "":
 		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(withPNG(p.callerNames[strings.TrimSuffix(abs, ".png")])))
-	case underDir(abs, p.OutputsDir):
+	case underAbsDir(abs, p.OutputsDir):
 		out = core.DiffScreenshotPath(abs)
-	case p.BundleDir != "" && underDir(abs, p.BundleDir):
-		rel, _ := filepath.Rel(p.BundleDir, abs)
+	case p.bundleOf(abs) != "":
+		rel, _ := filepath.Rel(p.bundleOf(abs), abs)
 		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(rel))
 	default:
 		out = filepath.Join(p.OutputsDir, core.DiffScreenshotPath(filepath.Base(abs)))
@@ -636,13 +746,10 @@ func (se *ScriptEngine) DiffPath(referencePath string) string {
 	return out
 }
 
-func underDir(path, dir string) bool {
+// underAbsDir is PathUnder with dir made absolute first.
+func underAbsDir(path, dir string) bool {
 	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(filepath.Clean(abs), path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return err == nil && PathUnder(path, abs)
 }
 
 // shellDenied reports (and records) whether a runShell may not run.
@@ -674,7 +781,7 @@ func (se *ScriptEngine) policyStep(step flow.Step) {
 	}
 	out := func(cmd, field string, v *string) {
 		if *v != "" {
-			*v = p.checkOutput(den(cmd, field, *v))
+			*v = p.checkOutput(den(cmd, field, *v), se.flowDir)
 		}
 	}
 	switch s := step.(type) {

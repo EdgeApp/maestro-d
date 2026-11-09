@@ -304,8 +304,12 @@ await dev.launchApp('com.apple.Preferences')
 Precedence: an explicit `hub` or `url` option, then `$MAESTRO_D_HUB`, then
 the local daemon — so a script that passes only `name`, such as
 `e2e/iosLandscape.e2e.ts`, follows `MAESTRO_D_HUB` unchanged. Against a
-hub, commands send no `?cwd=`, `run()`/`runYaml()` and `flow({yaml})`
-send no `cwd`, and `flow({file})` reads the file here and sends its YAML.
+hub, commands send no `?cwd=`, and flows run whole on the hub:
+`flow({file})` packs the file with everything it uses (`maestro-d pack
+--flow`) and posts the bundle, and `run()`/`runYaml()`/`flow({yaml})` pack
+their steps as if they sat in `cwd`. A flow's outputs come back beside it
+(for inline steps, into `cwd`); a `runFlow`/`retry` file in a command is
+sent as a `bundle:` ref the same way.
 The hub treats the script as a remote caller: `runShell` and host paths in
 steps are refused with `FORBIDDEN`.
 
@@ -318,8 +322,9 @@ count (`addMedia('photo.png')`). A hub attaches no Appium driver:
 `driver: 'appium'`, `appiumUrl` and `extra.capsFile` are `FORBIDDEN`. Output files — `takeScreenshot({path})`,
 an `assertScreenshot` baseline the hub writes because you have none yet, a
 mismatch's `_diff.png` — are fetched back to the path you gave, relative
-to `cwd` or absolute. `pack(paths)` and `upload(...)` are exported for
-callers of the REST API.
+to `cwd` or absolute. `pack(paths)`, `upload(...)`, `packFlow(roots)`,
+`uploadBundle(...)` and `fetchBundleOutputs(...)` are exported for callers
+of the REST API.
 
 Over TCP (`hub` or `url`) every command, batch and flow carries an
 `X-Maestro-Request-Id`; a dropped connection, `PEER_UNAVAILABLE` or a

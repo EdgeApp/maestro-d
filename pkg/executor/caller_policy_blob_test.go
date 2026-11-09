@@ -178,10 +178,10 @@ func TestPolicy_ClientOutputs(t *testing.T) {
 		t.Fatalf("absolute: %+v %v", out.Error, out.Outputs)
 	}
 	p := &CallerPolicy{ClientOutputs: true, OutputsDir: filepath.Join(dir, "outputs")}
-	if got := p.clientOutput("../up"); got != "../up" {
+	if got := p.clientOutput("../up", ""); got != "../up" {
 		t.Fatal(got)
 	}
-	if got := p.clientOutput(filepath.Join(dir, "outputs", "x.png")); len(p.outputs) != 1 || got == "" {
+	if got := p.clientOutput(filepath.Join(dir, "outputs", "x.png"), ""); len(p.outputs) != 1 || got == "" {
 		t.Fatal("an outputs path is recorded")
 	}
 }

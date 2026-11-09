@@ -520,6 +520,10 @@ type StepsRequest struct {
 	ContinueOnError bool   `json:"continueOnError,omitempty"`
 	// Cwd resolves relative paths inside the steps (runFlow file, …).
 	Cwd string `json:"cwd,omitempty"`
+	// Bundle, used instead of Steps or YAML, is an uploaded flow bundle
+	// whose root file is the step list; its relative references resolve
+	// inside the bundle.
+	Bundle *BundleManifest `json:"bundle,omitempty"`
 }
 
 // FlowRequest is the body of POST /v1/devices/{dev}/flows.
@@ -528,6 +532,9 @@ type FlowRequest struct {
 	YAML string            `json:"yaml,omitempty"`
 	Env  map[string]string `json:"env,omitempty"`
 	Cwd  string            `json:"cwd,omitempty"`
+	// Bundle, used instead of File or YAML, is an uploaded flow bundle;
+	// its root file runs as the flow.
+	Bundle *BundleManifest `json:"bundle,omitempty"`
 }
 
 // EvalRequest is the body of POST /v1/devices/{dev}/eval.

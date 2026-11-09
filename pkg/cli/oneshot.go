@@ -161,7 +161,7 @@ func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p 
 	if o.Target != "" {
 		// The daemon is another machine: upload the input files and name
 		// the outputs ourselves, then fetch those back.
-		files = newHubFiles(ctx, client, id, o.JSON)
+		files = newHubFiles(ctx, client, id, o.Attach.Env, o.JSON)
 		if value, err = files.rewrite(spec, value); err != nil {
 			return err
 		}

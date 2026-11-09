@@ -5,14 +5,20 @@ package cli
 // uploaded when the daemon lacks them, and sent as blob: refs; its output
 // fields (FieldSpec.Output) are sent as names of the client's own,
 // <first 8 hex of sha256(caller path)>/<basename>, and the files the result
-// lists in `outputs` are fetched back to the caller's paths.
+// lists in `outputs` are fetched back to the caller's paths. Its flow-file
+// fields (FieldSpec.Flow: runFlow's file and else, retry's file) are packed
+// with their whole closure into one bundle (pack --flow) and sent as
+// bundle:sha256:<manifest>/<root> refs; the outputs the subflow writes come
+// back relative to that bundle's common directory.
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -26,14 +32,20 @@ type hubFiles struct {
 	device string
 	cwd    string
 	quiet  bool
+	// env expands ${VAR} in a packed flow's paths (-e).
+	env map[string]string
+	// bundleDir is the common directory of the bundle the command's flow
+	// fields were packed into: outputs the command did not name itself
+	// are fetched there.
+	bundleDir string
 	// fetch maps an outputs entry the result may list (outputs/<name>) to
 	// the caller's path it is written to.
 	fetch map[string]string
 }
 
-func newHubFiles(ctx context.Context, c *daemon.Client, device string, quiet bool) *hubFiles {
+func newHubFiles(ctx context.Context, c *daemon.Client, device string, env map[string]string, quiet bool) *hubFiles {
 	cwd, _ := os.Getwd()
-	return &hubFiles{ctx: ctx, client: c, device: device, cwd: cwd, quiet: quiet, fetch: map[string]string{}}
+	return &hubFiles{ctx: ctx, client: c, device: device, cwd: cwd, env: env, quiet: quiet, fetch: map[string]string{}}
 }
 
 func (h *hubFiles) abs(p string) string {
@@ -127,6 +139,66 @@ func (h *hubFiles) applyAny(cmd string, f daemon.FieldSpec, v any) (any, error) 
 	return v, nil
 }
 
+// flows packs the command's flow-file fields (string values only: a
+// runFlow else may be inline steps) into one bundle, uploads it with its
+// manifest, and returns each field's bundle: ref.
+func (h *hubFiles) flows(spec daemon.CommandSpec, value any) (map[string]string, error) {
+	vals := map[string]string{}
+	env := h.env
+	switch v := value.(type) {
+	case map[string]any:
+		for _, f := range spec.Fields {
+			if s, ok := v[f.Key].(string); ok && f.Flow && s != "" && !isBlobRef(s) {
+				vals[f.Key] = s
+			}
+		}
+		if e, ok := v["env"].(map[string]any); ok {
+			extra := map[string]string{}
+			for k, x := range e {
+				extra[k] = fmt.Sprint(x)
+			}
+			env = mergeEnv(env, extra)
+		}
+	case string:
+		for _, f := range spec.Fields {
+			if f.Key == spec.BareField && f.Flow && v != "" && !isBlobRef(v) {
+				vals[f.Key] = v
+			}
+		}
+	}
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	// file first, so it is the manifest's root; then the rest (else).
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		if k != "file" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	if _, ok := vals["file"]; ok {
+		keys = append([]string{"file"}, keys...)
+	}
+	roots := make([]string, len(keys))
+	for i, k := range keys {
+		roots[i] = h.abs(vals[k])
+	}
+	b, err := packFlow(roots, packFlowOpts{Env: env})
+	if err != nil {
+		return nil, err
+	}
+	if err := uploadBundle(h.ctx, h.client, h.device, b, true, h.quiet); err != nil {
+		return nil, err
+	}
+	h.bundleDir = b.Dir
+	refs := make(map[string]string, len(keys))
+	for i, k := range keys {
+		refs[k] = b.Ref(roots[i])
+	}
+	return refs, nil
+}
+
 // rewrite returns the command's value with its file fields rewritten. A
 // bare value (a scalar, or a sequence) fills spec.BareField and gets that
 // field's mark.
@@ -136,6 +208,23 @@ func (h *hubFiles) rewrite(spec daemon.CommandSpec, value any) (any, error) {
 		if f.Path || f.Output {
 			fields[f.Key] = f
 		}
+	}
+	refs, err := h.flows(spec, value)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := value.(string); ok && refs[spec.BareField] != "" {
+		return refs[spec.BareField], nil
+	}
+	if m, ok := value.(map[string]any); ok && len(refs) > 0 {
+		out := make(map[string]any, len(m))
+		for k, v := range m {
+			out[k] = v
+		}
+		for k, r := range refs {
+			out[k] = r
+		}
+		value = out
 	}
 	if len(fields) == 0 || value == nil {
 		return value, nil
@@ -164,9 +253,11 @@ func (h *hubFiles) rewrite(spec daemon.CommandSpec, value any) (any, error) {
 // fetchOutputs writes each listed output this command named to the
 // caller's path.
 func (h *hubFiles) fetchOutputs(outputs []string) error {
+	var rest []string
 	for _, entry := range outputs {
 		target, ok := h.fetch[entry]
 		if !ok {
+			rest = append(rest, entry)
 			continue
 		}
 		if err := fetchArtifact(h.ctx, h.client, h.device, entry, target); err != nil {
@@ -175,6 +266,10 @@ func (h *hubFiles) fetchOutputs(outputs []string) error {
 		if !h.quiet {
 			progress("Fetched %s → %s", entry, target)
 		}
+	}
+	if h.bundleDir != "" && len(rest) > 0 {
+		// A packed subflow's outputs, named relative to its bundle root.
+		return fetchBundleOutputs(h.ctx, h.client, h.device, h.bundleDir, rest, h.quiet)
 	}
 	return nil
 }

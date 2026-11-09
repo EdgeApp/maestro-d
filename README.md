@@ -123,6 +123,12 @@ can share one device session.
   gave. `install FILE` and `uninstall APP_ID` manage apps without attaching,
   `get artifacts` fetches the session's report files, and `pack` shows the
   upload units.
+- **Whole flows on the device's host.** `run flow.yaml --target-hub=…` packs
+  the flow with everything it uses (`pack --flow`: subflows, scripts, media,
+  hooks), uploads what the host lacks, and runs it there in one request;
+  its screenshots come back beside the flow. `runFlow sub/x.yaml` and the
+  JavaScript `flow()`, `run(steps)` and `runYaml()` ship their closure the
+  same way.
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
   `DAEMON_UNAVAILABLE` 3/503, `DEVICE_ERROR` 4/502, `DEVICE_IN_USE` 5/409,

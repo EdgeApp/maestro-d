@@ -1,0 +1,8 @@
+appId: com.apple.Preferences
+---
+- launchApp
+- runFlow: sub/open-general.yaml
+- runScript: scripts/compute.js
+- assertTrue: ${output.ok}
+- addMedia: [photo.png]
+- takeScreenshot: done

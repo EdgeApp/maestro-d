@@ -67,6 +67,14 @@ type daemonOpts struct {
 	compact bool             // get hierarchy --compact
 	find    string           // get hierarchy --find
 	manage  deviceManageOpts // device catalog / create
+	pack    packOpts         // pack --flow, and a targeted run
+}
+
+// packOpts are pack's flow-bundle switches.
+type packOpts struct {
+	flow    bool
+	base    string
+	include []string
 }
 
 func (o *daemonOpts) markAttach(name string) { o.AttachSet = append(o.AttachSet, name) }
@@ -104,6 +112,20 @@ func (o *daemonOpts) finish() error {
 	}
 	return nil
 }
+
+// envFlag is -e/--env KEY=VALUE, collected into Attach.Env by finish.
+var envFlag = dflag{name: "env", aliases: []string{"e"}, kind: kindSlice, usage: "Session variable KEY=VALUE (repeatable); available to every step as ${KEY}",
+	apply: func(o *daemonOpts, v string) error {
+		if !strings.Contains(v, "=") {
+			return daemon.Errorf(daemon.CodeUsage, "--env expects KEY=VALUE, got %q", v)
+		}
+		o.envPairs = append(o.envPairs, v)
+		return nil
+	}}
+
+// includeFlag is --include GLOB, for pack --flow and a targeted run.
+var includeFlag = dflag{name: "include", kind: kindSlice, usage: "Also pack files matching GLOB (relative to the flow's directory) that flows open dynamically (repeatable)",
+	apply: func(o *daemonOpts, v string) error { o.pack.include = append(o.pack.include, v); return nil }}
 
 type flagKind int
 
@@ -257,14 +279,7 @@ var (
 			func(a *daemon.AttachConfig, v string) { a.AppiumURL = v }),
 		attachStr("caps", "Path to Appium capabilities JSON file", []string{"APPIUM_CAPS"},
 			func(a *daemon.AttachConfig, v string) { extra(a, "capsFile", v) }),
-		dflag{name: "env", aliases: []string{"e"}, kind: kindSlice, usage: "Session variable KEY=VALUE (repeatable); available to every step as ${KEY}",
-			apply: func(o *daemonOpts, v string) error {
-				if !strings.Contains(v, "=") {
-					return daemon.Errorf(daemon.CodeUsage, "--env expects KEY=VALUE, got %q", v)
-				}
-				o.envPairs = append(o.envPairs, v)
-				return nil
-			}},
+		envFlag,
 		strFlag("env-file", "File of KEY=VALUE lines to load as session variables", nil,
 			func(o *daemonOpts, v string) { o.envFile = v }),
 		attachStr("artifacts", "Artifact mode: all, none, on-failure (default)", []string{"MAESTRO_ARTIFACTS"},

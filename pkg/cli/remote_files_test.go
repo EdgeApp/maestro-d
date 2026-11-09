@@ -52,7 +52,7 @@ func newHubEnv(t *testing.T) *hubEnv {
 
 // files is newHubFiles working in the env's directory.
 func (e *hubEnv) files(ctx context.Context, quiet bool) *hubFiles {
-	h := newHubFiles(ctx, e.c, "mock-1", quiet)
+	h := newHubFiles(ctx, e.c, "mock-1", nil, quiet)
 	h.cwd = e.cwd
 	return h
 }

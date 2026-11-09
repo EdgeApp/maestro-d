@@ -76,6 +76,9 @@ type fileMark struct {
 	// Output: a file the command writes on the device's host, which the
 	// client names itself and fetches back from a hub.
 	Output bool
+	// Flow: a flow file, packed with its own references (`pack --flow`)
+	// and sent to a hub as a bundle: ref.
+	Flow bool
 }
 
 // fileFields are the fields that name files, by command and yaml key. The
@@ -89,6 +92,8 @@ var fileFields = map[string]map[string]fileMark{
 	"runWebViewScript": {"file": {Path: true}},
 	"uploadFile":       {"path": {Path: true}, "paths": {Path: true}},
 	"loadAuthState":    {"path": {Path: true}},
+	"runFlow":          {"file": {Flow: true}, "else": {Flow: true}},
+	"retry":            {"file": {Flow: true}},
 	"takeScreenshot":   {"path": {Output: true}},
 	"saveAuthState":    {"path": {Output: true}},
 }
@@ -109,7 +114,7 @@ func markFiles(c *Command) error {
 	found := 0
 	for i := range c.Fields {
 		if m, ok := marks[c.Fields[i].Key]; ok {
-			c.Fields[i].Path, c.Fields[i].Output, c.Fields[i].PathSuffix = m.Path, m.Output, m.Suffix
+			c.Fields[i].Path, c.Fields[i].Output, c.Fields[i].Flow, c.Fields[i].PathSuffix = m.Path, m.Output, m.Flow, m.Suffix
 			found++
 		}
 	}
@@ -135,9 +140,10 @@ type Field struct {
 	Doc    string
 	// Inline is the embedded struct this field came from ("" for own).
 	Inline string
-	// Path, Output and PathSuffix come from fileFields.
+	// Path, Output, Flow and PathSuffix come from fileFields.
 	Path       bool
 	Output     bool
+	Flow       bool
 	PathSuffix string
 }
 
@@ -638,8 +644,8 @@ func renderGoSource(cmds []Command) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// %s\n\npackage daemon\n\n", header)
 	b.WriteString("// CommandSpec describes one YAML command's shape for the CLI and docs.\n")
-	b.WriteString("type CommandSpec struct {\n\tName string\n\t// Scalar is the yaml key a bare scalar value maps to (\"\" = none).\n\tScalar string\n\t// BareField is the field a bare value fills: Scalar when set, and\n\t// files for addMedia (\"\" = none). Clients apply that field's Path or\n\t// Output mark to a bare value, element by element for a sequence.\n\tBareField string\n\t// ValueLess commands ignore their value (`- back`).\n\tValueLess bool\n\t// Compound commands carry nested steps (repeat, retry, runFlow).\n\tCompound bool\n\t// FreeForm commands take arbitrary keys rather than the fields below\n\t// (defineVariables: NAME -> value), so their keys are not validated.\n\tFreeForm bool\n\t// Doc is the one-line description from the Go struct comment.\n\tDoc string\n\t// Fields are the yaml keys of the map form.\n\tFields []FieldSpec\n}\n\n")
-	b.WriteString("// FieldSpec is one yaml key of a command's map form.\ntype FieldSpec struct {\n\tKey  string\n\tType string // Go type\n\tDoc  string\n\t// Path marks an input file on the caller's machine: a client that\n\t// targets a hub uploads it and sends a blob: ref instead. PathSuffix,\n\t// when set, limits that to values ending in it.\n\tPath       bool\n\tPathSuffix string\n\t// Output marks a file the command writes on the device's host: a\n\t// client that targets a hub sends a name of its own and fetches the\n\t// file back.\n\tOutput bool\n}\n\n")
+	b.WriteString("type CommandSpec struct {\n\tName string\n\t// Scalar is the yaml key a bare scalar value maps to (\"\" = none).\n\tScalar string\n\t// BareField is the field a bare value fills: Scalar when set, and\n\t// files for addMedia (\"\" = none). Clients apply that field's Path,\n\t// Flow or Output mark to a bare value, element by element for a sequence.\n\tBareField string\n\t// ValueLess commands ignore their value (`- back`).\n\tValueLess bool\n\t// Compound commands carry nested steps (repeat, retry, runFlow).\n\tCompound bool\n\t// FreeForm commands take arbitrary keys rather than the fields below\n\t// (defineVariables: NAME -> value), so their keys are not validated.\n\tFreeForm bool\n\t// Doc is the one-line description from the Go struct comment.\n\tDoc string\n\t// Fields are the yaml keys of the map form.\n\tFields []FieldSpec\n}\n\n")
+	b.WriteString("// FieldSpec is one yaml key of a command's map form.\ntype FieldSpec struct {\n\tKey  string\n\tType string // Go type\n\tDoc  string\n\t// Path marks an input file on the caller's machine: a client that\n\t// targets a hub uploads it and sends a blob: ref instead. PathSuffix,\n\t// when set, limits that to values ending in it.\n\tPath       bool\n\tPathSuffix string\n\t// Output marks a file the command writes on the device's host: a\n\t// client that targets a hub sends a name of its own and fetches the\n\t// file back.\n\tOutput bool\n\t// Flow marks a flow file on the caller's machine: a client that\n\t// targets a hub packs it with its own references (pack --flow) and\n\t// sends a bundle: ref instead.\n\tFlow bool\n}\n\n")
 	b.WriteString("// CommandSpecs indexes every command by name.\nvar CommandSpecs = map[string]CommandSpec{\n")
 	for _, c := range cmds {
 		bare := ""
@@ -657,6 +663,9 @@ func renderGoSource(cmds []Command) []byte {
 			}
 			if f.Output {
 				marks += ", Output: true"
+			}
+			if f.Flow {
+				marks += ", Flow: true"
 			}
 			fmt.Fprintf(&b, "\t\t{Key: %q, Type: %q, Doc: %q%s},\n", f.Key, f.GoType, f.Doc, marks)
 		}
@@ -690,8 +699,8 @@ func renderTS(cmds []Command) []byte {
 		b.WriteString("}\n\n")
 	}
 	b.WriteString("/** Shape of every command: scalar shorthand key, value-less, compound. */\n")
-	b.WriteString("/** How a field names a file: an input the client uploads to a hub, or an output it fetches back. */\n")
-	b.WriteString("export interface FileMark {\n  kind: 'path' | 'output'\n  /** The field is a path only when its value ends in this. */\n  suffix?: string\n}\n\n")
+	b.WriteString("/** How a field names a file: an input the client uploads to a hub, a flow it packs as a bundle, or an output it fetches back. */\n")
+	b.WriteString("export interface FileMark {\n  kind: 'path' | 'output' | 'flow'\n  /** The field is a path only when its value ends in this. */\n  suffix?: string\n}\n\n")
 	b.WriteString("export interface CommandSpec {\n  name: string\n  scalar: string | null\n  /** The field a bare value fills: scalar, or files for addMedia. */\n  bareField: string | null\n  valueLess: boolean\n  compound: boolean\n  doc: string\n  /** The fields that name files, by key. */\n  files?: Record<string, FileMark>\n}\n\n")
 	b.WriteString("export const COMMANDS = {\n")
 	for _, c := range cmds {
@@ -705,12 +714,15 @@ func renderTS(cmds []Command) []byte {
 		}
 		files := ""
 		for _, f := range c.Fields {
-			if !f.Path && !f.Output {
+			if !f.Path && !f.Output && !f.Flow {
 				continue
 			}
 			kind := "path"
-			if f.Output {
+			switch {
+			case f.Output:
 				kind = "output"
+			case f.Flow:
+				kind = "flow"
 			}
 			suffix := ""
 			if f.PathSuffix != "" {
@@ -803,6 +815,8 @@ func renderMD(cmds []Command) []byte {
 					doc = strings.TrimSpace(doc + " A file on the caller's machine: uploaded to a hub.")
 				case f.Output:
 					doc = strings.TrimSpace(doc + " Written on the device's host: fetched back from a hub.")
+				case f.Flow:
+					doc = strings.TrimSpace(doc + " A flow file on the caller's machine: packed with its references and sent to a hub as a bundle.")
 				}
 				fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", f.Key, f.TSType, doc)
 			}

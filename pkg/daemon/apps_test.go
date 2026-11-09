@@ -358,7 +358,8 @@ func TestStepResult_ForRemote(t *testing.T) {
 }
 
 // Every field the generated registry marks Path or Output is one the caller
-// policy walks (the full equality test arrives with the Flow mark).
+// policy walks (TestPolicyFields_EqualCommandSpecMarks checks the whole set),
+// and the bare fields and suffixes are as the clients expect.
 func TestPolicyFields_CoverPathAndOutputFields(t *testing.T) {
 	policy := executor.PolicyFields()
 	n := 0

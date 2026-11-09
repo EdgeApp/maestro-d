@@ -8,8 +8,8 @@ type CommandSpec struct {
 	// Scalar is the yaml key a bare scalar value maps to ("" = none).
 	Scalar string
 	// BareField is the field a bare value fills: Scalar when set, and
-	// files for addMedia ("" = none). Clients apply that field's Path or
-	// Output mark to a bare value, element by element for a sequence.
+	// files for addMedia ("" = none). Clients apply that field's Path,
+	// Flow or Output mark to a bare value, element by element for a sequence.
 	BareField string
 	// ValueLess commands ignore their value (`- back`).
 	ValueLess bool
@@ -38,6 +38,10 @@ type FieldSpec struct {
 	// client that targets a hub sends a name of its own and fetches the
 	// file back.
 	Output bool
+	// Flow marks a flow file on the caller's machine: a client that
+	// targets a hub packs it with its own references (pack --flow) and
+	// sends a bundle: ref instead.
+	Flow bool
 }
 
 // CommandSpecs indexes every command by name.
@@ -658,7 +662,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "maxRetries", Type: "string", Doc: "String for variable support"},
-		{Key: "file", Type: "string", Doc: ""},
+		{Key: "file", Type: "string", Doc: "", Flow: true},
 		{Key: "env", Type: "map[string]string", Doc: ""},
 		{Key: "commands", Type: "[]Step", Doc: "Steps to retry (alternative to file)"},
 	}},
@@ -676,11 +680,11 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "file", Type: "string", Doc: ""},
+		{Key: "file", Type: "string", Doc: "", Flow: true},
 		{Key: "when", Type: "*Condition", Doc: ""},
 		{Key: "env", Type: "map[string]string", Doc: ""},
 		{Key: "commands", Type: "[]Step", Doc: "Inline steps (alternative to file)"},
-		{Key: "else", Type: "string|[]Step", Doc: "Fallback flow file or inline steps when `when` is false"},
+		{Key: "else", Type: "string|[]Step", Doc: "Fallback flow file or inline steps when `when` is false", Flow: true},
 		{Key: "elseCommands", Type: "[]Step", Doc: "Inline fallback steps when `when` is false"},
 	}},
 	"runScript": {Name: "runScript", Scalar: "script", BareField: "script", ValueLess: false, Compound: false, FreeForm: false, Doc: "Runs a script.", Fields: []FieldSpec{

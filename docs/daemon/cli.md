@@ -146,8 +146,26 @@ maestro-d get screenshot --target-hub=192.168.64.1 --device "$UDID" --out shot.p
 
 A targeted command never starts a daemon; an unreachable one exits 3
 (`DAEMON_UNAVAILABLE`), and a missing or wrong token exits 2 (`USAGE`).
-It sends no working directory, and `run FILE` sends the file's YAML rather
-than its path, because the daemon is on another machine.
+It sends no working directory, because the daemon is on another machine.
+
+**Whole flows run on the device's host.** `run FILE --target-hub…` packs the
+file with everything it uses (`maestro-d pack --flow`, below), uploads the
+files the daemon lacks, and posts the bundle: a file with a config header
+runs as a flow (`POST …/flows {bundle, env}`), a step list step by step
+(`POST …/steps {bundle, continueOnError}`, so `--continue-on-error` keeps
+its meaning). The flow's `runFlow`, `retry`, hooks, JavaScript and
+subflows all run on the daemon, with one request for the run. Its output
+files come back beside the flow, where a local run writes them:
+`takeScreenshot: x` in `sub/open.yaml` lands in `sub/x.png`. `run -` packs
+stdin as a step list or flow sitting in the working directory. `--include
+GLOB` adds files a flow opens dynamically. A path that cannot be packed — a
+`${VAR}` no `-e` resolves, a missing file, an absolute path, an output path
+that leaves the flow's directory — stops the run before any upload, naming
+the step and field.
+
+```sh
+maestro-d run e2e/testdata/hub/main.yaml --target-hub=192.168.64.1 --device "$UDID"
+```
 
 **Files travel with the command.** A one-shot's input files — `addMedia`
 files, a `runScript` ending in `.js`, an `assertScreenshot` reference,
@@ -159,8 +177,11 @@ uploaded only when the daemon lacks them (stderr says which), and sent as
 are written on the daemon and fetched back to the path you gave
 (`takeScreenshot --path name` writes `name.png`). An `assertScreenshot`
 reference you do not have yet is a baseline the run writes and fetches
-back; a mismatch fetches `<ref>_diff.png` beside your reference. `runFlow`
-and `retry` files are not shipped yet. That daemon treats
+back; a mismatch fetches `<ref>_diff.png` beside your reference. A flow
+file in `runFlow` (and its `else`) or `retry` is packed with its whole
+closure into one bundle and sent as a `bundle:` ref, and the outputs its
+subflow writes come back relative to that bundle's directory:
+`runFlow sub/open.yaml` fetches `takeScreenshot: x` to `sub/x.png`. That daemon treats
 a caller from beyond loopback as **remote**: `runShell` and host paths in
 steps are refused with `FORBIDDEN` (exit 2) — see
 [remote callers](rest.md#remote-callers). For the same reason a targeted
@@ -265,11 +286,13 @@ maestro-d eval 'maestro.copiedText'
 | `install FILE [--reinstall] [--platform P]` | install an `.apk`, `.app` or `.ipa` on `--device` without attaching, and print its app id when it can be read (an `.apk`'s needs `aapt2`); with `--target-hub` the file is uploaded first, unless the daemon has it |
 | `uninstall APP_ID` | remove an app by bundle id or package name |
 | `pack PATH… [--json]` | print each file's upload unit: sha256, size and `blob:` ref. A directory (an iOS `.app`) is zipped with sorted entries and fixed timestamps, so it always hashes the same |
+| `pack --flow FILE… [--base DIR] [-e K=V] [--include GLOB] [--json]` | pack flow files (the first is the root) with their dependency closure into one bundle: `runFlow` files and `else`, `retry` files, the `onFlowStart`/`onFlowComplete` hooks, `runScript` `.js` files, `addMedia`, existing `assertScreenshot` references, the other file inputs, and the root flow's `config.yaml`. `${VAR}` in a path is expanded from `-e`; an unresolvable or absolute path, or an output path with `..`, is `USAGE` naming the step. Prints the manifest `{root, files: {relPath: sha256}}`, relative to the files' common directory, and its sha256. `--base DIR` places the first file as if it sat in `DIR` (the JS library's inline steps) |
 
 ```sh
 maestro-d install drivers/android/settings_apk-debug.apk --device emulator-5554
 maestro-d install build/My.app --device "$UDID" --target-hub=192.168.64.1
 maestro-d uninstall io.appium.settings --device emulator-5554
+maestro-d pack --flow e2e/testdata/hub/main.yaml --json
 maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 ```
 

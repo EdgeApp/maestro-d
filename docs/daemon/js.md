@@ -49,6 +49,21 @@ screenshot and reads it back runs unchanged. `device.installApp(file)`,
 `device.uninstallApp(appId)`, `device.artifacts()` and
 `device.artifact(path)` are `POST/DELETE …/apps` and `GET …/artifacts`.
 
+Whole flows and step lists run on the hub as
+[flow bundles](rest.md#flow-bundles). `device.flow({file})` packs the file
+with its dependency closure (`maestro-d pack --flow`), uploads what the hub
+lacks and posts `/flows {bundle, env}`. `run(steps)`, `runYaml(yaml)` and
+`flow({yaml})` write the steps or YAML to a temporary root file, pack it
+with `--base <cwd>` so its relative references resolve here as they would
+locally, and post `/steps {bundle, continueOnError}` or `/flows {bundle}`.
+A flow field of a command — `runFlow`'s file or `else`, `retry`'s file —
+goes as a `bundle:` ref. Afterwards every file the result lists in
+`outputs` is fetched to the same place relative to the bundle's directory:
+the flow file's (common) directory, or `cwd` for inline steps. `include`
+adds files a flow opens dynamically; a path that cannot be packed rejects
+with `USAGE` naming the step, before anything is sent. `packFlow()`,
+`uploadBundle()` and `fetchBundleOutputs()` are exported for REST callers.
+
 Device management maps one to one onto the REST routes: `catalog()` is
 `GET /v1/catalog`, `createDevice()` is `POST /v1/devices` with `create`,
 `startDevice()` (whose `platform` may be left out for `avd:<name>` and for

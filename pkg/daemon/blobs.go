@@ -296,7 +296,7 @@ func unzipDir(src, dest string) error {
 	sep := string(filepath.Separator)
 	inside := func(p string) (string, bool) {
 		real, err := executor.RealPath(p)
-		return real, err == nil && underDir(real, realDest)
+		return real, err == nil && executor.PathUnder(real, realDest)
 	}
 	for _, f := range zr.File {
 		name := filepath.FromSlash(f.Name)
@@ -392,12 +392,6 @@ func hasDotDot(name string) bool {
 	return false
 }
 
-// underDir reports whether path lies in (or is) dir.
-func underDir(path, dir string) bool {
-	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 func copyFile(src, dest string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -415,18 +409,20 @@ func copyFile(src, dest string) error {
 	return out.Close()
 }
 
-// sessionBlobs is the executor's view of the store for one session: refs
-// are materialized under the session's blob-copy directory.
+// sessionBlobs is the executor's view of the store for one session: blob
+// refs are materialized under the session's blob-copy directory, and
+// bundle refs under its bundles/ directory.
 type sessionBlobs struct {
-	store *BlobStore
-	dir   string
+	store   *BlobStore
+	dir     string
+	bundles string
 }
 
 func (s sessionBlobs) Dir() string { return s.dir }
 
 func (s sessionBlobs) Resolve(ref string) (string, error) {
 	if strings.HasPrefix(ref, "bundle:") {
-		return "", fmt.Errorf("flow bundles are not supported by this daemon yet")
+		return s.store.resolveBundleRef(ref, s.bundles)
 	}
 	return s.store.Materialize(ref, s.dir)
 }

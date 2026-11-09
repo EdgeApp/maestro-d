@@ -1496,9 +1496,9 @@ export interface WaitForRequestParams {
 }
 
 /** Shape of every command: scalar shorthand key, value-less, compound. */
-/** How a field names a file: an input the client uploads to a hub, or an output it fetches back. */
+/** How a field names a file: an input the client uploads to a hub, a flow it packs as a bundle, or an output it fetches back. */
 export interface FileMark {
-  kind: 'path' | 'output'
+  kind: 'path' | 'output' | 'flow'
   /** The field is a path only when its value ends in this. */
   suffix?: string
 }
@@ -1570,9 +1570,9 @@ export const COMMANDS = {
   removeMedia: { name: 'removeMedia', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },
-  retry: { name: 'retry', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Retries steps on failure.' },
+  retry: { name: 'retry', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Retries steps on failure.', files: { file: { kind: 'flow' } } },
   runBrowserScript: { name: 'runBrowserScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in the browser page context.', files: { file: { kind: 'path' } } },
-  runFlow: { name: 'runFlow', scalar: 'file', bareField: 'file', valueLess: false, compound: true, doc: 'Runs another flow.' },
+  runFlow: { name: 'runFlow', scalar: 'file', bareField: 'file', valueLess: false, compound: true, doc: 'Runs another flow.', files: { file: { kind: 'flow' }, else: { kind: 'flow' } } },
   runScript: { name: 'runScript', scalar: 'script', bareField: 'script', valueLess: false, compound: false, doc: 'Runs a script.', files: { script: { kind: 'path', suffix: '.js' }, file: { kind: 'path', suffix: '.js' } } },
   runShell: { name: 'runShell', scalar: 'command', bareField: 'command', valueLess: false, compound: false, doc: 'Runs a command on the machine driving the test — the host, not the device. That is what makes it useful: it is the escape hatch for adb, simctl, xcrun and the rest of the platform tooling a flow occasionally needs and the runner deliberately does not wrap.' },
   runWebViewScript: { name: 'runWebViewScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in a mobile WebView via CDP.', files: { file: { kind: 'path' } } },

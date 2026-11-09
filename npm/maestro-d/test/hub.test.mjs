@@ -10,6 +10,7 @@ import * as https from 'node:https'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, before, beforeEach, describe, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { EXIT_CODES, HTTP_STATUS, MaestroD, codeFromStatus, hubURL, isMaestroError } from '../dist/esm/index.js'
 import { isRetryableError, isRetryableResponse } from '../dist/esm/transport.js'
@@ -53,8 +54,13 @@ function handler(req, res) {
 let server
 let addr = ''
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-hub-'))
+// On a hub, inline steps and flows are packed by the binary (pack --flow).
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
+process.env.MAESTRO_D_BIN = bin
 
 before(async () => {
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
   server = http.createServer(handler)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   addr = `127.0.0.1:${server.address().port}`
@@ -93,8 +99,16 @@ describe('connect({hub})', () => {
     assert.equal(steps.length, 5)
     assert.ok(!steps[0].url.includes('cwd='), steps[0].url)
     for (const r of steps.slice(1)) assert.equal(r.body.cwd, undefined)
+    // From M5 on, inline steps, YAML and flow files go as bundles: no yaml,
+    // file or cwd, only the manifest.
     assert.equal(steps[4].body.file, undefined)
-    assert.match(steps[4].body.yaml, /tapOn: D/)
+    assert.equal(steps[4].body.yaml, undefined)
+    assert.equal(steps[4].body.bundle.root, 'flow.yaml')
+    for (const r of steps.slice(1, 4)) {
+      assert.equal(r.body.yaml, undefined)
+      assert.equal(r.body.steps, undefined)
+      assert.equal(r.body.bundle.root, '.maestro-d-inline.yaml')
+    }
     const ids = steps.map((r) => r.headers['x-maestro-request-id'])
     assert.equal(new Set(ids).size, 5)
     for (const id of ids) assert.match(id, /^[0-9a-f-]{36}$/)

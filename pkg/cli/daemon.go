@@ -951,6 +951,7 @@ var daemonDetachCommand = &cli.Command{
 
 var runFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags, []dflag{
 	boolFlag("continue-on-error", "Keep running remaining steps after a failure (step lists only)", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	includeFlag,
 })
 
 var daemonRunCommand = &cli.Command{
@@ -962,6 +963,12 @@ var daemonRunCommand = &cli.Command{
 and flow-scoped env. A bare YAML list of steps runs step by step in the
 session; with --continue-on-error every step runs and the exit code
 reflects the first failure. '-' reads stdin.
+
+With --target-hub the file runs whole on the device's host: it is packed
+with everything it uses (as 'maestro-d pack --flow', plus --include), the
+files the hub lacks are uploaded, and the files its output fields write
+(takeScreenshot, …) are fetched back beside the flow, where a local run
+writes them.
 
   maestro-d run login.yaml -e USER=alice
   printf -- '- launchApp\n- tapOn: Login\n' | maestro-d run -`, runFlags),
@@ -987,14 +994,7 @@ reflects the first failure. '-' reads stdin.
 			return err
 		}
 		if o.Target != "" {
-			// The file is on this machine, not the target's: send its YAML,
-			// with no working directory (a remote caller may not name one).
-			if isStepList(data) {
-				res, err := client.Steps(ctx, id, daemon.StepsRequest{YAML: string(data), ContinueOnError: o.force}, !o.NoWait)
-				return emitSteps(o, res, err)
-			}
-			res, err := client.Flow(ctx, id, daemon.FlowRequest{YAML: string(data), Env: o.Attach.Env}, !o.NoWait)
-			return emitStep(o, res, err)
+			return runBundle(ctx, o, client, id, src, data, cwd)
 		}
 		if isStepList(data) {
 			res, err := client.Steps(ctx, id, daemon.StepsRequest{YAML: string(data), ContinueOnError: o.force, Cwd: cwd}, !o.NoWait)
@@ -1009,6 +1009,50 @@ reflects the first failure. '-' reads stdin.
 		res, err := client.Flow(ctx, id, req, !o.NoWait)
 		return emitStep(o, res, err)
 	}),
+}
+
+// runBundle runs a flow file or step list on a targeted daemon: the file is
+// on this machine, not the target's, so it is packed with its closure and
+// uploaded, and posted as a bundle (with no working directory: a remote
+// caller may not name one). stdin is packed as a root that sits in cwd.
+func runBundle(ctx context.Context, o *daemonOpts, client *daemon.Client, id, src string, data []byte, cwd string) error {
+	opts := packFlowOpts{Env: o.Attach.Env, Include: o.pack.include}
+	root := src
+	if src == "-" {
+		tmp, err := os.MkdirTemp("", "maestro-d-stdin-")
+		if err != nil {
+			return daemon.WrapErr(daemon.CodeUsage, err)
+		}
+		defer os.RemoveAll(tmp)
+		root = filepath.Join(tmp, "stdin.yaml")
+		if err := os.WriteFile(root, data, 0o644); err != nil {
+			return daemon.WrapErr(daemon.CodeUsage, err)
+		}
+		opts.Base = cwd
+	}
+	b, err := packFlow([]string{root}, opts)
+	if err != nil {
+		return err
+	}
+	if err := uploadBundle(ctx, client, id, b, false, o.JSON); err != nil {
+		return err
+	}
+	if isStepList(data) {
+		res, err := client.Steps(ctx, id, daemon.StepsRequest{Bundle: &b.Manifest, ContinueOnError: o.force}, !o.NoWait)
+		if res != nil {
+			if ferr := fetchBundleOutputs(ctx, client, id, b.Dir, res.Outputs, o.JSON); ferr != nil && err == nil {
+				err = ferr
+			}
+		}
+		return emitSteps(o, res, err)
+	}
+	res, err := client.Flow(ctx, id, daemon.FlowRequest{Bundle: &b.Manifest, Env: o.Attach.Env}, !o.NoWait)
+	if res != nil {
+		if ferr := fetchBundleOutputs(ctx, client, id, b.Dir, res.Outputs, o.JSON); ferr != nil && err == nil {
+			err = ferr
+		}
+	}
+	return emitStep(o, res, err)
 }
 
 // isStepList reports whether YAML is a bare list of steps (no config
