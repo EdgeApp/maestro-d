@@ -93,8 +93,18 @@ at the same instant can lose one update. Cross-process safety is the
 CLI's: when several processes share a home and lease at once, lease from
 the shell.
 
-On a hub each `DeviceInfo` also carries `maxSec`, the device's longest
-lease window.
+On a hub each `DeviceInfo` also carries `maxSec`, and `machine` and
+`addresses`: the owning machine's host name, and its hub's advertised
+address plus its non-loopback IPs, so a script can find the devices
+attached to its own machine.
+
+Hubs form a mesh ([hub.md](hub.md)): connect to any hub and every hub's
+devices are there, with qualified ids (`id` is `<localId>@<hub>`, and
+`DeviceInfo` carries `hub` and `localId`; lease ids are `<uuid>@<hub>`).
+`md.lease({device: '<udid>@hub-a'})` through hub-b leases hub-a's device and
+every call on the handle runs there; an unqualified id resolves to the one
+hub that has it. `md.hubStatus()` returns `GET /v1/hub`: the hub's name and
+version, and each peer's address, link state, RTT and device count.
 
 Device management maps one to one onto the REST routes: `catalog()` is
 `GET /v1/catalog`, `createDevice()` is `POST /v1/devices` with `create`,

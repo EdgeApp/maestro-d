@@ -85,6 +85,7 @@ overrides the root):
 | --- | --- |
 | `daemon.sock` | unix socket the CLI and library use |
 | `daemon.json` | pid, version, socket path, TCP address, start time — removed on clean exit |
+| `daemon.lock` | locked by the running daemon from before it binds the socket; a second start of the same name fails `DAEMON_UNAVAILABLE` instead of taking the socket (a hub writes `daemon.json` only once its mesh has started) |
 | `devices.json` | devices this daemon booted (ownership survives a crash so `--orphans` can clean up) |
 | `startup.log` | the spawned process's stdout/stderr until it was ready (shown when spawning fails) |
 | `daemon.log` | the daemon's log |

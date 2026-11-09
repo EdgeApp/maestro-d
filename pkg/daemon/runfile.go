@@ -92,6 +92,9 @@ func SocketPath(name string) string {
 // InfoPath is the daemon.json path.
 func InfoPath(name string) string { return filepath.Join(RunDir(name), infoFile) }
 
+// LockPath is the file a running daemon holds locked (daemon.lock).
+func LockPath(name string) string { return filepath.Join(RunDir(name), "daemon.lock") }
+
 // DevicesPath is the devices.json path.
 func DevicesPath(name string) string { return filepath.Join(RunDir(name), devicesFile) }
 

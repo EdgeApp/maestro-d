@@ -198,7 +198,12 @@ export interface HierarchyNode {
 }
 
 export interface DeviceInfo {
+  /** On a hub, qualified: `<localId>@<hub>`. */
   id: string
+  /** On a hub: the hub that owns the device. */
+  hub?: string
+  /** On a hub: the device's id on its own hub's machine. */
+  localId?: string
   /** android | ios | web | mock */
   platform: string
   /** device | emulator | simulator */
@@ -226,6 +231,39 @@ export interface DeviceInfo {
   available?: boolean
   /** On a hub: the longest lease window the device takes, in seconds. */
   maxSec?: number
+  /** On a hub: the host name of the machine the device is attached to. */
+  machine?: string
+  /** On a hub: the owning hub's advertised address, then that machine's non-loopback IPs. */
+  addresses?: string[]
+}
+
+/** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
+export interface HubStatus {
+  name: string
+  version: string
+  apiVersion: string
+  /** The --advertise address, when set. */
+  addr?: string
+  listen?: string
+  tls?: boolean
+  /** False with --no-mdns. */
+  mdns: boolean
+  peers: HubPeer[]
+}
+
+/** One peer of a hub. */
+export interface HubPeer {
+  name?: string
+  addr?: string
+  /** linked | down | stopped | connecting | refused */
+  state: string
+  /** outbound (this hub dialed) | inbound */
+  direction?: string
+  rttMs?: number
+  /** How many devices a linked peer shares. */
+  devices?: number
+  since?: string
+  error?: string
 }
 
 /** The lease state a hub's device listings carry. */

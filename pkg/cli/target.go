@@ -8,45 +8,25 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 )
 
-// DefaultHubPort is the port a --target-hub without one uses.
-const DefaultHubPort = 7433
-
 // parseTarget turns HOST, HOST:PORT, http://HOST[:PORT] or
-// https://HOST[:PORT] into a base URL, adding the default port.
+// https://HOST[:PORT] into a base URL, adding the default port. It reads
+// the address as --peer does (hub.ParseAddr).
 func parseTarget(v string) (base string, useTLS bool, err error) {
-	v = strings.TrimSpace(v)
-	scheme := "http"
-	if i := strings.Index(v, "://"); i >= 0 {
-		scheme = strings.ToLower(v[:i])
-		v = v[i+3:]
+	addr, err := hub.ParseAddr(v, hub.DefaultPort)
+	if err != nil {
+		return "", false, daemon.Errorf(daemon.CodeUsage, "--target-hub: %v", err)
 	}
-	if scheme != "http" && scheme != "https" {
-		return "", false, daemon.Errorf(daemon.CodeUsage, "--target-hub: unsupported scheme %q (use http:// or https://)", scheme)
+	if rest, ok := strings.CutPrefix(addr, "https://"); ok {
+		return "https://" + rest, true, nil
 	}
-	v = strings.TrimRight(v, "/")
-	if v == "" || strings.ContainsAny(v, "/?#@ ") {
-		return "", false, daemon.Errorf(daemon.CodeUsage, "--target-hub: expected HOST[:PORT], got %q", v)
-	}
-	host, port := v, strconv.Itoa(DefaultHubPort)
-	if h, p, err := net.SplitHostPort(v); err == nil {
-		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
-			return "", false, daemon.Errorf(daemon.CodeUsage, "--target-hub: bad port %q", p)
-		}
-		host, port = h, p
-	} else if strings.Count(v, ":") > 1 && !strings.HasPrefix(v, "[") {
-		host = v // a bare IPv6 address
-	}
-	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(strings.Trim(host, "[]"), port)}
-	return u.String(), scheme == "https", nil
+	return "http://" + addr, false, nil
 }
 
 // targetTLSConfig returns the TLS settings for a targeted https:// hub:

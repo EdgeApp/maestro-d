@@ -500,8 +500,12 @@ func (c *Client) StopDevice(ctx context.Context, id string, force bool) error {
 }
 
 // Catalog lists what `device create` can make; platform "" means both.
-func (c *Client) Catalog(ctx context.Context, platform string, available bool) (*CatalogResult, error) {
+// On a hub, hub names the hub whose machine is asked ("" for this one).
+func (c *Client) Catalog(ctx context.Context, platform string, available bool, hub string) (*CatalogResult, error) {
 	q := url.Values{}
+	if hub != "" {
+		q.Set("hub", hub)
+	}
 	if platform != "" {
 		q.Set("platform", platform)
 	}

@@ -74,12 +74,21 @@ type daemonOpts struct {
 
 // hubOpts are hub start's switches.
 type hubOpts struct {
+	name      string
 	tokenFile string
 	share     []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
-	leaseMax    []string
-	remoteShell bool
-	foreground  bool
+	leaseMax      []string
+	remoteShell   bool
+	foreground    bool
+	advertise     string
+	peers         []string
+	noMDNS        bool
+	peerToken     string
+	peerTokenFile string
+	peerCA        string
+	// purge: hub service uninstall --purge.
+	purge bool
 }
 
 // leaseOpts are lease's switches.

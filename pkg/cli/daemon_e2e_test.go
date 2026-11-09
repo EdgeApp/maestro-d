@@ -567,8 +567,11 @@ func TestE2E_Leases(t *testing.T) {
 		t.Fatalf("readable token file: exit %d\n%s", r.code, r.stderr)
 	}
 	_ = os.Chmod(tokenFile, 0o600)
-	limits := []string{"--lease-max", "1h", "--lease-max", "mock-2=8s"}
-	r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, limits...)...)
+	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "needs --peer-token") {
+		t.Fatalf("no peer token: exit %d\n%s", r.code, r.stderr)
+	}
+	mesh := []string{"--name", "lh-hub", "--no-mdns", "--peer-token", "lease-peer", "--lease-max", "1h", "--lease-max", "mock-2=8s"}
+	r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, mesh...)...)
 	if r.code != 0 {
 		t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
@@ -584,7 +587,7 @@ func TestE2E_Leases(t *testing.T) {
 			t.Fatalf("the token reached the hub's command line: %v", started.Daemon.StartArgs)
 		}
 	}
-	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token", "lease-token"); r.code != 0 || !strings.Contains(r.stdout, "already running") {
+	if r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--token", "lease-token"}, mesh...)...); r.code != 0 || !strings.Contains(r.stdout, "already running") {
 		t.Fatalf("second hub start: exit %d\n%s", r.code, r.stdout)
 	}
 	hub := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=lease-token"}
@@ -633,12 +636,12 @@ func TestE2E_Leases(t *testing.T) {
 		t.Fatalf("over the maximum: exit %d\n%s", r.code, r.stderr)
 	}
 	// An explicit lease, by default the device's maximum window, recorded
-	// with the id the hub returns.
+	// with the qualified id the hub returns.
 	onFile := leaseOf(e.runEnv(hub, "lease", "--device", "mock-1", "--json").stdout)
-	if onFile.Device != "mock-1" || onFile.TTLSec != 3600 || onFile.MaxSec != 3600 {
+	if onFile.Device != "mock-1@lh-hub" || onFile.TTLSec != 3600 || onFile.MaxSec != 3600 {
 		t.Fatalf("lease: %+v", onFile)
 	}
-	if f := leaseFile(e.home); !strings.Contains(f, `"device": "mock-1"`) || !strings.Contains(f, addr) {
+	if f := leaseFile(e.home); !strings.Contains(f, `"device": "mock-1@lh-hub"`) || !strings.Contains(f, addr) {
 		t.Fatalf("leases.json: %s", f)
 	}
 	// Commands use it, and never move its end.
@@ -650,7 +653,7 @@ func TestE2E_Leases(t *testing.T) {
 		t.Fatalf("use moved the window, or lease printed a new one: %+v vs %+v", again, onFile)
 	}
 	r = e.runEnv(hub, "device", "list", "--platform", "mock")
-	if !regexpMatch(`mock-1 .* yes .*\(\d+m\d+s\)`, r.stdout) {
+	if !regexpMatch(`mock-1@lh-hub .* yes .*\(\d+m\d+s\)`, r.stdout) {
 		t.Fatalf("device list shows the holder and the time left:\n%s", r.stdout)
 	}
 	// Only renew moves it; over the maximum it is refused.
@@ -661,7 +664,7 @@ func TestE2E_Leases(t *testing.T) {
 	if r = e.runEnv(hub, "renew", "--device", "mock-1", "--ttl", "2h"); r.code != 2 || !strings.Contains(r.stderr, "maximum") {
 		t.Fatalf("renew over the maximum: exit %d\n%s", r.code, r.stderr)
 	}
-	if r = e.runEnv(hub, "renew"); r.code != 0 || !strings.Contains(r.stdout, "mock-1 renewed") {
+	if r = e.runEnv(hub, "renew"); r.code != 0 || !strings.Contains(r.stdout, "mock-1@lh-hub renewed") {
 		t.Fatalf("renew every lease: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
 	// Another client home: DEVICE_IN_USE for a lease, LEASE_REQUIRED for a
@@ -688,13 +691,13 @@ func TestE2E_Leases(t *testing.T) {
 	// A selector lease with a short window attaches mock-1; --no-attach
 	// only reserves mock-2, for its 8 s maximum.
 	sel := leaseOf(e.runEnv(hub, "lease", "--platform", "mock", "--ttl", "6", "--json").stdout)
-	if sel.Device != "mock-1" || sel.TTLSec != 6 {
+	if sel.Device != "mock-1@lh-hub" || sel.TTLSec != 6 || !strings.HasSuffix(sel.ID, "@lh-hub") {
 		t.Fatalf("selector lease: %+v", sel)
 	}
 	r = e.runEnv(hub, "lease", "--platform", "mock", "--no-attach", "--json")
 	var reserved daemon.LeaseResult
 	_ = json.Unmarshal([]byte(r.stdout), &reserved)
-	if reserved.Lease.Device != "mock-2" || reserved.Lease.TTLSec != 8 || (reserved.Device != nil && reserved.Device.Attached) {
+	if reserved.Lease.Device != "mock-2@lh-hub" || reserved.Lease.TTLSec != 8 || (reserved.Device != nil && reserved.Device.Attached) {
 		t.Fatalf("--no-attach: %s", r.stdout)
 	}
 	if r = e.runEnv(hub, "lease", "--platform", "mock"); r.code != 5 {
