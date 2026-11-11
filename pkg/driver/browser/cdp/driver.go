@@ -28,6 +28,10 @@ const (
 	defaultViewportH           = 800
 )
 
+// How long a tap's native click may wait for its element to be interactable
+// before the tap falls back to a JS click.
+const defaultClickTimeout = 5 * time.Second
+
 // Config holds browser driver configuration.
 type Config struct {
 	Headless    bool

@@ -65,7 +65,10 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return d.tapOnCrossRoot(elem, info, step)
 	}
 
-	if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	// Rod's Click waits, with no deadline of its own, for the element to be
+	// interactable: one covered by something that never moves would hold the
+	// command forever. Bounded, it falls back to the JS click below.
+	if err := elem.Timeout(defaultClickTimeout).Click(proto.InputMouseButtonLeft, 1); err != nil {
 		// Fallback: use JS click (handles elements that can't receive CDP input events)
 		if _, jsErr := elem.Eval(`() => this.click()`); jsErr != nil {
 			return errorResult(err, "Failed to tap on element")
