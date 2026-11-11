@@ -67,14 +67,112 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return d.tapOnCrossRoot(elem, info, step)
 	}
 
-	if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	// Rod's Click waits, with no deadline of its own, for the element to be
+	// interactable: one covered by something that never moves would hold the
+	// command forever. Bounded, the wait retries until an overlay that is
+	// leaving (a closing dialog, a toast) has gone, whatever selector found
+	// the element. A wait that gave up is checked for what Rod was waiting
+	// on: an element something still covers fails as the iframe path's
+	// pre-flight does, since a user could not click it either; one in the
+	// clear (Rod's wait simply ran long), and any other error before the
+	// press, fall back to the JS click below. A press or release that failed
+	// may already have reached the page, so it fails the tap rather than
+	// clicking a second time.
+	desc := step.Selector.DescribeQuoted()
+	if err := nativeClick(elem, defaultClickTimeout); err != nil {
+		var dispatchErr *clickDispatchError
+		if errors.As(err, &dispatchErr) {
+			return errorResult(err, fmt.Sprintf("Failed to tap on %s: %v", desc, err))
+		}
+		if clickWaitGaveUp(err) {
+			if blocker := coveringElement(elem); blocker != "" {
+				return errorResult(
+					fmt.Errorf("hit-target check: %s blocks %s", blocker, desc),
+					fmt.Sprintf("Click on %s blocked by overlay (%s)", desc, blocker))
+			}
+		}
 		// Fallback: use JS click (handles elements that can't receive CDP input events)
 		if _, jsErr := elem.Eval(`() => this.click()`); jsErr != nil {
 			return errorResult(err, "Failed to tap on element")
 		}
+		return successResult(fmt.Sprintf("Tapped on %s with a JS click (native click: %v)", desc, err), info)
 	}
 
-	return successResult(fmt.Sprintf("Tapped on %s", step.Selector.DescribeQuoted()), info)
+	return successResult(fmt.Sprintf("Tapped on %s", desc), info)
+}
+
+// clickWaitGaveUp reports whether a native click's error is its wait giving
+// up: the bound's timeout, or the not-found of a sleeper that does not retry
+// (nativeClick gives its wait one that does, but a stand-in may not). The
+// not-found is matched by type, since Rod's ElementNotFoundError has no Is
+// method.
+func clickWaitGaveUp(err error) bool {
+	var notFound *rod.ElementNotFoundError
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &notFound)
+}
+
+// clickDispatchError is a native click's press or release that failed. The
+// event may have reached the page before the error, so the click may have
+// happened, and a fallback click could activate the element twice.
+type clickDispatchError struct{ err error }
+
+func (e *clickDispatchError) Error() string {
+	return fmt.Sprintf("the click was sent but did not complete: %v", e.err)
+}
+
+func (e *clickDispatchError) Unwrap() error { return e.err }
+
+// nativeClick is a tap's native click: Rod's Click, with its waits bounded by
+// timeout. Only the waits are bounded (until the element is interactable and
+// enabled, then the move onto it): the deadline never ends inside the press
+// and release, which Chrome may have received before the call returned. An
+// error from those comes back as a *clickDispatchError. A variable so a test
+// can stand in a click that hangs.
+//
+// The waits retry with Rod's default sleeper, not the element's own: the
+// finders of id: and css: selectors return elements whose sleeper gives up
+// on its first call, which would fail a click on an overlay that is still
+// leaving rather than wait for it to go, as a text: selector's element does.
+var nativeClick = func(elem *rod.Element, timeout time.Duration) error {
+	bounded := elem.Sleeper(rod.DefaultSleeper).Timeout(timeout)
+	pt, err := bounded.WaitInteractable()
+	if err != nil {
+		return err
+	}
+	if err := bounded.WaitEnabled(); err != nil {
+		return err
+	}
+	mouse := elem.Page().Mouse
+	if err := mouse.MoveTo(*pt); err != nil {
+		return err
+	}
+	if err := pressAndRelease(mouse); err != nil {
+		return &clickDispatchError{err}
+	}
+	return nil
+}
+
+// pressAndRelease is a native click's press and release of the left button
+// where the mouse is. A variable so a test can stand in one that fails.
+var pressAndRelease = func(mouse *rod.Mouse) error {
+	return mouse.Click(proto.InputMouseButtonLeft, 1)
+}
+
+// coveringElement describes what lies over elem's centre, or returns "" when
+// the centre reaches elem (or a descendant), lies outside the viewport, or
+// cannot be checked. It is the iframe path's hit-target check at one point.
+func coveringElement(elem *rod.Element) string {
+	res, err := elem.Eval(`() => {
+		var r = this.getBoundingClientRect();
+		var x = r.left + r.width / 2, y = r.top + r.height / 2;
+		if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return '';
+		var hit = window.__maestro.expectHitTarget({x: x, y: y}, this);
+		return hit === 'done' ? '' : (hit.hitTargetDescription || '');
+	}`)
+	if err != nil {
+		return ""
+	}
+	return res.Value.Str()
 }
 
 // tapOnCrossRoot dispatches a tap against an element nested inside an iframe
