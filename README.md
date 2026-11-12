@@ -177,3 +177,5 @@ Apache License 2.0 — see [LICENSE](LICENSE). A fork of
 [devicelab-dev/maestro-runner](https://github.com/devicelab-dev/maestro-runner);
 the Go module path is deliberately unchanged so rebasing stays a plain
 `git rebase`.
+
+For native iOS background recovery tests, see [screen lock and unlock](docs/ios-screen-lock.md).
