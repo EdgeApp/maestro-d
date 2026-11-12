@@ -18,7 +18,24 @@ maestro-d pressKey LOCK --daemon ios-test
 maestro-d pressKey UNLOCK --daemon ios-test
 ```
 
-The same commands are available through the daemon API and TypeScript client:
+The REST API accepts the same key values on an already attached device:
+
+```sh
+curl --unix-socket "$HOME/.maestro-d/run/ios-test/daemon.sock" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"LOCK"}' \
+  http://localhost/v1/devices/DEVICE_ID/commands/pressKey
+curl --unix-socket "$HOME/.maestro-d/run/ios-test/daemon.sock" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"UNLOCK"}' \
+  http://localhost/v1/devices/DEVICE_ID/commands/pressKey
+```
+
+Replace `DEVICE_ID` with the attached device ID (URL-encoded if needed).
+A command that cannot reach and verify the requested state fails with HTTP 422
+(`COMMAND_FAILED`). The TypeScript client rejects with the same error code.
+
+The TypeScript interface exposes these through `pressKey`:
 
 ```ts
 await device.pressKey({ key: 'LOCK' })

@@ -961,7 +961,8 @@ type RemoveMediaStep struct {
 // Other Steps
 // ============================================
 
-// PressKeyStep presses a key.
+// PressKeyStep presses a key. Native iOS supports LOCK and UNLOCK to set and verify
+// screen lock state; UNLOCK does not bypass a passcode.
 type PressKeyStep struct {
 	BaseStep `yaml:",inline"`
 	Key      string `yaml:"key"`

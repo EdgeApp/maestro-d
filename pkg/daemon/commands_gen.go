@@ -611,7 +611,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"pressKey": {Name: "pressKey", Scalar: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key.", Fields: []FieldSpec{
+	"pressKey": {Name: "pressKey", Scalar: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},

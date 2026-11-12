@@ -61,7 +61,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`openNotifications`](#opennotifications) | _none_ | Pulls down the Android notification shade. Android-only (no-op on iOS). |
 | [`openTab`](#opentab) | `url` | Opens a new browser tab. |
 | [`pasteText`](#pastetext) | _none_ | Pastes text. |
-| [`pressKey`](#presskey) | `key` | Presses a key. |
+| [`pressKey`](#presskey) | `key` | Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. |
 | [`removeMedia`](#removemedia) | _none_ | Clears media added by addMedia (Android: MediaStore index). |
 | [`repeat`](#repeat) | — | Repeats steps. |
 | [`resetPermissions`](#resetpermissions) | _none_ | Resets all browser permissions. |
@@ -1326,7 +1326,7 @@ await m.pasteText()
 
 ## `pressKey`
 
-Presses a key.
+Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.
 
 ```sh
 maestro-d pressKey <key>
