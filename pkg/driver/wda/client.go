@@ -44,8 +44,8 @@ func NewClientURL(baseURL string) *Client {
 // in the session capabilities, enabling WDA's auto alert handling for permission dialogs.
 func (c *Client) CreateSession(bundleID string, alertAction string) error {
 	alwaysMatch := map[string]interface{}{
-		"shouldWaitForQuiescence": false,
-		"waitForIdleTimeout":      0,
+		"shouldWaitForQuiescence":                    false,
+		"waitForIdleTimeout":                         0,
 		"shouldUseTestManagerForVisibilityDetection": false,
 	}
 	// maestro-d: a bundleId makes WDA launch that app, so a session that
@@ -346,6 +346,19 @@ func (c *Client) Lock() error {
 func (c *Client) Unlock() error {
 	_, err := c.post(c.sessionPath("/wda/unlock"), nil)
 	return err
+}
+
+// IsLocked reports the actual screen lock state, not whether a button was sent.
+func (c *Client) IsLocked() (bool, error) {
+	resp, err := c.get(c.sessionPath("/wda/locked"))
+	if err != nil {
+		return false, err
+	}
+	locked, ok := resp["value"].(bool)
+	if !ok {
+		return false, fmt.Errorf("invalid screen lock state: %T", resp["value"])
+	}
+	return locked, nil
 }
 
 // addMediaTimeout bounds one /wda/addMedia call: the handler may wait 15 s

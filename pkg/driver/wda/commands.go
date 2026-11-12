@@ -860,6 +860,28 @@ func (d *Driver) back(step *flow.BackStep) *core.CommandResult {
 }
 
 func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
+	if key := strings.ToLower(step.Key); key == "lock" || key == "unlock" {
+		if d.isTV {
+			return errorResult(fmt.Errorf("%s is not supported on tvOS", key), "Screen lock is only supported on iOS")
+		}
+		var err error
+		if key == "lock" {
+			err = d.client.Lock()
+		} else {
+			err = d.client.Unlock()
+		}
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Screen %s failed", key))
+		}
+		locked, err := d.client.IsLocked()
+		if err != nil {
+			return errorResult(err, "Could not verify screen lock state")
+		}
+		if locked != (key == "lock") {
+			return errorResult(fmt.Errorf("screen lock state did not change to %s; unlock does not bypass a passcode", key), "Unexpected screen lock state")
+		}
+		return successResult(fmt.Sprintf("Screen %sed (verified)", key), nil)
+	}
 	if d.isTV {
 		if button := tvRemoteButton(step.Key); button != "" {
 			if err := d.pressTVButton(button); err != nil {
