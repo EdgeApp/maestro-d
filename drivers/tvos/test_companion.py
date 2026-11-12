@@ -48,7 +48,9 @@ class CompanionTests(unittest.TestCase):
         tv.close.assert_called_once()
 
     def test_button(self):
-        tv, _ = self.run_command(['press', 'select'])
+        with patch.object(companion.asyncio, 'sleep', new_callable=AsyncMock) as settle:
+            tv, _ = self.run_command(['press', 'select'])
+        settle.assert_awaited_once_with(0.5)
         tv.remote_control.select.assert_awaited_once()
         tv.touch.action.assert_not_awaited()
         tv.close.assert_called_once()

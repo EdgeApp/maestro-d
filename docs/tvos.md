@@ -58,6 +58,8 @@ install it, then run `tests/tvos-swipes.ts` with the task's Maestro daemon and
 `TV_DEVICE_UDID`. Physical builds require your signing team; pass the built app's
 bundle identifier in `TV_PROBE_APP_ID` if overriding it. The test checks four
 directions and a coordinate swipe through the same API on both kinds of target.
+Set `TV_COLD_START=1` to restart the named test daemon and verify the first gesture
+on a fresh paired connection. Use a task-owned daemon name for this option.
 
 Physical gestures are centered on Companion's virtual pad and use half the
 requested displacement to keep the complete gesture within that pad. Coordinates

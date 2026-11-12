@@ -61,6 +61,9 @@ async def main():
     try:
         # Complete lazy Companion setup before generating touch timestamps.
         await asyncio.wait_for(tv.apps.app_list(), 20)
+        # tvOS acknowledges setup before its new touch session accepts input.
+        # Settle once per connection; subsequent gestures reuse the ready session.
+        await asyncio.sleep(0.5)
         if raw != ["serve"]:
             await asyncio.wait_for(command(tv, raw), 20)
             return

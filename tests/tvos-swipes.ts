@@ -5,7 +5,13 @@ const { MaestroD } = createRequire(import.meta.url)('../npm/maestro-d/dist/cjs/i
 const device = process.env.TV_DEVICE_UDID
 if (!device) throw new Error('Set TV_DEVICE_UDID to your test TV or simulator')
 const appId = process.env.TV_PROBE_APP_ID ?? 'com.example.maestro.SwipeProbe'
-const daemon = await MaestroD.connect({ name: process.env.TV_DAEMON ?? 'tv-swipes' })
+const name = process.env.TV_DAEMON ?? 'tv-swipes'
+let daemon = await MaestroD.connect({ name })
+if (process.env.TV_COLD_START === '1') {
+  await daemon.shutdown()
+  await daemon.close()
+  daemon = await MaestroD.connect({ name })
+}
 let tv
 try {
   tv = await daemon.attach({
