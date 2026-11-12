@@ -731,6 +731,9 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 }
 
 func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
+	if d.isTV {
+		return d.swipeTV(step)
+	}
 	width, height, err := d.screenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
@@ -857,6 +860,14 @@ func (d *Driver) back(step *flow.BackStep) *core.CommandResult {
 }
 
 func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
+	if d.isTV {
+		if button := tvRemoteButton(step.Key); button != "" {
+			if err := d.pressTVButton(button); err != nil {
+				return errorResult(err, "Press TV remote button failed")
+			}
+			return successResult(fmt.Sprintf("Pressed %s", step.Key), nil)
+		}
+	}
 	switch strings.ToLower(step.Key) {
 	case "home":
 		if err := d.client.Home(); err != nil {
