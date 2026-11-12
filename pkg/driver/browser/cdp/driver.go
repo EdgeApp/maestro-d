@@ -32,6 +32,10 @@ const (
 // before the tap falls back to a JS click.
 const defaultClickTimeout = 5 * time.Second
 
+// finePointerSettings are the Blink settings of a mouse: a fine primary
+// pointer and hover (pointer type 4 is fine, hover type 2 is hover).
+const finePointerSettings = "primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2"
+
 // Config holds browser driver configuration.
 type Config struct {
 	Headless    bool
@@ -114,6 +118,13 @@ func New(cfg Config) (*Driver, error) {
 	// Disable the sandbox only under CI or when explicitly requested.
 	if os.Getenv("CI") != "" || os.Getenv("MAESTRO_NO_SANDBOX") != "" {
 		l = l.Set("no-sandbox")
+	}
+	// Headless Chrome on Linux, with no input device, reports no fine
+	// pointer and no hover, so a page takes it for a touch screen: Enter in
+	// a composer stops sending and menus open their touch forms. A Mac's
+	// headless Chrome reports a mouse; this makes Linux's do the same.
+	if cfg.Headless && runtime.GOOS == "linux" {
+		l = l.Set("blink-settings", finePointerSettings)
 	}
 	if cfg.UserDataDir != "" {
 		// Persistent profile: cookies / localStorage / extensions survive
