@@ -840,6 +840,28 @@ func TestEvalBrowserScript(t *testing.T) {
 	}
 }
 
+// TestHeadlessFinePointer verifies a headless page takes the browser for one
+// with a mouse — a fine pointer that hovers — on Linux as on a Mac, so a page
+// does not switch to its touch forms.
+func TestHeadlessFinePointer(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.Execute(&flow.EvalBrowserScriptStep{
+		BaseStep: flow.BaseStep{StepType: flow.StepEvalBrowserScript},
+		Script:   "return String(matchMedia('(any-pointer: fine)').matches && matchMedia('(hover: hover)').matches)",
+	})
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if result.Data != "true" {
+		t.Errorf("expected a fine pointer that hovers, got %v", result.Data)
+	}
+}
+
 func TestEvalBrowserScriptAsync(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
