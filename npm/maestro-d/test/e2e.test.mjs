@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as http from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, before, describe, test } from 'node:test'
@@ -151,6 +152,44 @@ describe('devices', () => {
 })
 
 describe('commands', () => {
+  // These tests exercise serialization and daemon routing. Physical lock-state
+  // verification belongs to the WDA driver tests, not the mock driver.
+  for (const key of ['LOCK', 'UNLOCK']) {
+    test(`TypeScript client routes ${key} through pressKey`, async () => {
+      const result = await dev.pressKey({ key })
+      assert.equal(result.ok, true)
+      assert.equal(result.type, 'pressKey')
+      assert.ok(result.step.includes(key))
+    })
+
+    test(`REST routes ${key} through pressKey`, async () => {
+      const response = await new Promise((resolve, reject) => {
+        const req = http.request({
+          socketPath: daemon.info.socketPath,
+          path: '/v1/devices/mock-1/commands/pressKey',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        }, (res) => {
+          let body = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => { body += chunk })
+          res.on('error', reject)
+          res.on('end', () => {
+            try { resolve({ status: res.statusCode, body: JSON.parse(body) }) }
+            catch (error) { reject(error) }
+          })
+        })
+        req.on('error', reject)
+        req.setTimeout(10000, () => req.destroy(new Error('REST command timed out')))
+        req.end(JSON.stringify({ key }))
+      })
+      assert.equal(response.status, 200)
+      assert.equal(response.body.ok, true)
+      assert.equal(response.body.type, 'pressKey')
+      assert.ok(response.body.step.includes(key))
+    })
+  }
+
   test('every generated command has a method', () => {
     for (const name of Object.keys(COMMANDS)) {
       assert.equal(typeof dev[name], 'function', name)

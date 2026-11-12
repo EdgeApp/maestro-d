@@ -907,7 +907,7 @@ export interface PasteTextParams {
   platform?: string
 }
 
-/** Presses a key. */
+/** Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. */
 export interface PressKeyParams {
   optional?: boolean
   label?: string
@@ -1555,7 +1555,7 @@ export const COMMANDS = {
   openNotifications: { name: 'openNotifications', scalar: null, valueLess: true, compound: false, doc: 'Pulls down the Android notification shade. Android-only (no-op on iOS).' },
   openTab: { name: 'openTab', scalar: 'url', valueLess: false, compound: false, doc: 'Opens a new browser tab.' },
   pasteText: { name: 'pasteText', scalar: null, valueLess: true, compound: false, doc: 'Pastes text.' },
-  pressKey: { name: 'pressKey', scalar: 'key', valueLess: false, compound: false, doc: 'Presses a key.' },
+  pressKey: { name: 'pressKey', scalar: 'key', valueLess: false, compound: false, doc: 'Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.' },
   removeMedia: { name: 'removeMedia', scalar: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },
