@@ -58,6 +58,7 @@ func (r *fixtureTVRunner) Cleanup()                        { r.cleaned = true }
 func (r *fixtureTVRunner) Port() uint16                    { return 0 }
 func (r *fixtureTVRunner) BaseURL() string                 { return r.url }
 func (r *fixtureTVRunner) Devicectl() *wda.DevicectlLookup { return nil }
+func (r *fixtureTVRunner) BuildDir() string                { return "/fixture/wda" }
 func (r *fixtureTVRunner) IsTV() bool                      { return true }
 
 func TestCreateTVDriverPropagatesRuntime(t *testing.T) {

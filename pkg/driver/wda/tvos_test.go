@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 )
 
 func TestTVSimulatorDestination(t *testing.T) {
+	t.Setenv("MAESTRO_TV_REMOTE_CONFIG", "")
 	dir := t.TempDir()
 	data := `{"devices":{"com.apple.CoreSimulator.SimRuntime.tvOS-27-2":[{"udid":"fixture-tv","name":"Fixture TV","state":"Booted","isAvailable":true}]}}`
 	if err := os.WriteFile(filepath.Join(dir, "xcrun"), []byte("#!/bin/sh\ncat <<'JSON'\n"+data+"\nJSON\n"), 0755); err != nil {
@@ -38,6 +40,7 @@ func TestTVSimulatorDestination(t *testing.T) {
 }
 
 func TestTVRuntimeSelection(t *testing.T) {
+	t.Setenv("MAESTRO_TV_REMOTE_CONFIG", "")
 	for _, platform := range []string{"iOS", "tvOS", "watchOS", "xrOS"} {
 		t.Run(platform, func(t *testing.T) {
 			r := NewRunner("fixture", "", "fixture.bundle")
@@ -98,6 +101,7 @@ func TestTVRuntimeSelection(t *testing.T) {
 }
 
 func TestTVRemoteKeys(t *testing.T) {
+	t.Setenv("MAESTRO_TV_REMOTE_CONFIG", "")
 	var got string
 	fail := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,5 +136,59 @@ func TestTVRemoteKeys(t *testing.T) {
 	d.SetTVMode(false)
 	if d.pressKey(&flow.PressKeyStep{Key: "up"}).Success {
 		t.Fatal("TV key leaked into iOS")
+	}
+}
+
+func TestTVAndIOSBuildInvokeCorrectTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Apple builds require macOS")
+	}
+	t.Setenv("MAESTRO_TV_REMOTE_CONFIG", "")
+	for _, platform := range []string{"iOS", "tvOS"} {
+		t.Run(platform, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("MAESTRO_RUNNER_HOME", root)
+			config.ResetHome()
+			t.Cleanup(config.ResetHome)
+			bin := filepath.Join(root, "bin")
+			if err := os.Mkdir(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			write := func(name, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("xcrun", "#!/bin/sh\nprintf '%s\\n' '{\"devices\":{\"fixture\":[{\"udid\":\"fixture-tv\"}]}}'\n")
+			write("xcodebuild", "#!/bin/sh\nif [ \"$1\" = -version ]; then printf 'Xcode 27.2\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > \"$TV_BUILD_ARGUMENTS\"\nprevious=''\nfor argument do\n if [ \"$previous\" = -derivedDataPath ]; then directory=\"$argument\"; fi\n previous=\"$argument\"\ndone\nmkdir -p \"$directory/Build/Products\"\ntouch \"$directory/Build/Products/Fixture.xctestrun\"\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			arguments := filepath.Join(root, "args")
+			t.Setenv("TV_BUILD_ARGUMENTS", arguments)
+			r := NewRunner("fixture-tv", "FIXTURETEAM", "example.fixture.wda")
+			r.listSimulators = func() ([]simulator.SimulatorDevice, error) {
+				return []simulator.SimulatorDevice{{UDID: "fixture-tv", Platform: platform, OSVersion: "27.2", IsAvailable: true}}, nil
+			}
+			if err := r.Build(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scheme := "WebDriverAgentRunner"
+			if platform == "tvOS" {
+				scheme += "_tvOS"
+			}
+			if !strings.Contains(string(data), "-scheme\n"+scheme+"\n") {
+				t.Fatalf("wrong scheme: %s", data)
+			}
+			if strings.Contains(string(data), "IPHONEOS_DEPLOYMENT_TARGET=") != (platform == "iOS") {
+				t.Fatalf("wrong deployment target: %s", data)
+			}
+			if strings.Contains(string(data), "TVOS_DEPLOYMENT_TARGET=15.1") != (platform == "tvOS") {
+				t.Fatalf("wrong TV deployment target: %s", data)
+			}
+		})
 	}
 }
