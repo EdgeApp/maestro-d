@@ -1086,6 +1086,9 @@ func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
 // ============================================================================
 
 func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
+	// The launched app may come up in another orientation.
+	defer d.invalidateScreenSize()
+
 	appID := step.AppID
 	if appID == "" {
 		return errorResult(fmt.Errorf("no appId specified"), "launchApp: no appId specified in flow")
@@ -1622,6 +1625,9 @@ func (d *Driver) setClipboard(step *flow.SetClipboardStep) *core.CommandResult {
 // ============================================================================
 
 func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResult {
+	// Whatever the device answers, the screen may have started to turn.
+	defer d.invalidateScreenSize()
+
 	orientation := strings.ToUpper(strings.ReplaceAll(step.Orientation, "_", ""))
 
 	// PORTRAIT and LANDSCAPE: use UIAutomator2 API

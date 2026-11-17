@@ -51,8 +51,14 @@ type MockUIA2Client struct {
 	hideKeyboardCalls   int
 	setClipboardCalls   []string
 	setOrientationCalls []string
+	orientationCalls    int
+	deviceInfoCalls     int
 
 	// Return values
+	// deviceInfoSize is the realDisplaySize GetDeviceInfo answers, 1080x2400
+	// when empty.
+	deviceInfoSize    string
+	deviceInfoErr     error
 	screenshotData    []byte
 	screenshotErr     error
 	sourceData        string
@@ -167,6 +173,7 @@ func (m *MockUIA2Client) Source() (string, error) {
 }
 
 func (m *MockUIA2Client) GetOrientation() (string, error) {
+	m.orientationCalls++
 	return m.orientationData, m.orientationErr
 }
 
@@ -192,9 +199,15 @@ func (m *MockUIA2Client) SetImplicitWait(timeout time.Duration) error {
 }
 
 func (m *MockUIA2Client) GetDeviceInfo() (*uiautomator2.DeviceInfo, error) {
-	return &uiautomator2.DeviceInfo{
-		RealDisplaySize: "1080x2400",
-	}, nil
+	m.deviceInfoCalls++
+	if m.deviceInfoErr != nil {
+		return nil, m.deviceInfoErr
+	}
+	size := m.deviceInfoSize
+	if size == "" {
+		size = "1080x2400"
+	}
+	return &uiautomator2.DeviceInfo{RealDisplaySize: size}, nil
 }
 
 func (m *MockUIA2Client) LaunchApp(appID string, arguments map[string]interface{}) error {

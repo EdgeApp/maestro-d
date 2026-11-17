@@ -574,3 +574,22 @@ func TestTakeScreenshotCropOnFailures(t *testing.T) {
 		t.Errorf("empty bounds: %+v", r)
 	}
 }
+
+func TestGetPlatformInfoReportsTheLandscapeViewport(t *testing.T) {
+	f := newLandscapeWDA()
+	d := startLandscapeWDA(t, f)
+
+	// No step has read the viewport yet; PlatformInfo still holds the
+	// portrait size from attach until GetPlatformInfo reads it.
+	info := d.GetPlatformInfo()
+	if info.ScreenWidth != 852 || info.ScreenHeight != 393 {
+		t.Errorf("PlatformInfo = %dx%d, want the live 852x393", info.ScreenWidth, info.ScreenHeight)
+	}
+
+	// With WDA unable to say, the stored size is reported as it is.
+	f.set(func() { f.sizeFails = true })
+	d.invalidateViewport()
+	if info := d.GetPlatformInfo(); info.ScreenWidth != 852 || info.ScreenHeight != 393 {
+		t.Errorf("PlatformInfo = %dx%d, want the stored 852x393", info.ScreenWidth, info.ScreenHeight)
+	}
+}

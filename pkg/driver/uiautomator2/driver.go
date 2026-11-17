@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -95,7 +97,26 @@ type Driver struct {
 
 	// Selector validation dedup
 	warnedFields map[string]bool
+
+	// Last screen size read from the device; see orientedSize.
+	screen screenCache
 }
+
+// screenCache holds the screen size in the orientation it was read in.
+type screenCache struct {
+	mu          sync.Mutex
+	width       int
+	height      int
+	orientation string
+	at          time.Time
+}
+
+// screenCacheTTL is how long a screen size is reused before the orientation
+// is checked again. Short enough that a rotation the flow did not cause (an
+// app that locks itself to landscape, a user turning the device) is seen
+// within one polling round; long enough that a find loop does not double its
+// requests.
+const screenCacheTTL = 500 * time.Millisecond
 
 // New creates a new UIAutomator2 driver.
 func New(client UIA2Client, info *core.PlatformInfo, device ShellExecutor) *Driver {
@@ -107,12 +128,86 @@ func New(client UIA2Client, info *core.PlatformInfo, device ShellExecutor) *Driv
 	}
 }
 
-// screenSize returns cached screen dimensions from PlatformInfo.
+// screenSize returns the screen size in the current orientation: width and
+// height swap while the device is in landscape. It is read live (see
+// orientedSize); when the device cannot answer, the size last stored in
+// PlatformInfo is used.
 func (d *Driver) screenSize() (int, int, error) {
+	if w, h, ok := d.orientedSize(); ok {
+		return w, h, nil
+	}
 	if d.info != nil && d.info.ScreenWidth > 0 && d.info.ScreenHeight > 0 {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
 	return 0, 0, fmt.Errorf("screen dimensions not available")
+}
+
+// orientedSize returns the screen size in the current orientation, cached
+// for screenCacheTTL. Past that it asks for the orientation, and reads the
+// size again only when the orientation is not the one the cached size was
+// read in: the real display size, which follows the rotation, as attach
+// reads it. A steady screen therefore costs one small request per TTL. A
+// fresh size is written back to PlatformInfo, which `get info` reports. It
+// reports false when the device does not give a usable size.
+func (d *Driver) orientedSize() (int, int, bool) {
+	if d.client == nil {
+		return 0, 0, false
+	}
+	d.screen.mu.Lock()
+	defer d.screen.mu.Unlock()
+
+	if d.screen.width > 0 && time.Since(d.screen.at) < screenCacheTTL {
+		return d.screen.width, d.screen.height, true
+	}
+
+	orientation, err := d.client.GetOrientation()
+	if err != nil || orientation == "" {
+		return 0, 0, false
+	}
+	if d.screen.width > 0 && strings.EqualFold(orientation, d.screen.orientation) {
+		d.screen.at = time.Now()
+		return d.screen.width, d.screen.height, true
+	}
+
+	info, err := d.client.GetDeviceInfo()
+	if err != nil || info == nil {
+		return 0, 0, false
+	}
+	w, h, ok := parseDisplaySize(info.RealDisplaySize)
+	if !ok {
+		return 0, 0, false
+	}
+	d.screen.width, d.screen.height = w, h
+	d.screen.orientation = orientation
+	d.screen.at = time.Now()
+	if d.info != nil {
+		d.info.ScreenWidth, d.info.ScreenHeight = w, h
+	}
+	return w, h, true
+}
+
+// invalidateScreenSize makes the next screenSize check the orientation. Called
+// after anything that can rotate the screen: setOrientation, and launchApp (a
+// newly launched app may support only landscape).
+func (d *Driver) invalidateScreenSize() {
+	d.screen.mu.Lock()
+	d.screen.at = time.Time{}
+	d.screen.mu.Unlock()
+}
+
+// parseDisplaySize reads a size such as "1080x2400". It reports false for
+// anything else, a zero side included.
+func parseDisplaySize(s string) (int, int, bool) {
+	parts := strings.Split(strings.TrimSpace(s), "x")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	w, errW := strconv.Atoi(strings.TrimSpace(parts[0]))
+	h, errH := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if errW != nil || errH != nil || w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // SetContext sets the parent context for element-finding operations.
@@ -322,8 +417,10 @@ func (d *Driver) GetState() *core.StateSnapshot {
 	return state
 }
 
-// GetPlatformInfo returns device/platform information.
+// GetPlatformInfo returns device/platform information, with the screen size
+// in the current orientation.
 func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
+	d.orientedSize()
 	return d.info
 }
 

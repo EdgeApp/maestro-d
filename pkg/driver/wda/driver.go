@@ -523,6 +523,9 @@ func (d *Driver) GetState() *core.StateSnapshot {
 
 // GetPlatformInfo returns device/platform information.
 func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
+	// Read the viewport first, so `get info` reports the size in the current
+	// orientation rather than the one at attach.
+	d.orientedSize()
 	return d.info
 }
 
