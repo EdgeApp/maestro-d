@@ -54,9 +54,11 @@ type SetupOptions struct {
 type RunnerHandle struct {
 	// resultBundle is this run's -resultBundlePath; Stop deletes it.
 	resultBundle string
-	cmd          *exec.Cmd
-	port         int
-	host         string
+	// releaseUse removes the runner's in-use stamp from its build cache.
+	releaseUse func()
+	cmd        *exec.Cmd
+	port       int
+	host       string
 	// waitDone closes once the subprocess exits; waitErr holds cmd.Wait's
 	// result (written before the close). The watch goroutine in startOnce
 	// is the single Wait owner — Stop must select on waitDone instead of
@@ -103,7 +105,33 @@ func (h *RunnerHandle) Stop() error {
 	if h.resultBundle != "" {
 		xcodecache.RemoveResultBundles([]string{h.resultBundle})
 	}
+	if h.releaseUse != nil {
+		h.releaseUse()
+		h.releaseUse = nil
+	}
 	return nil
+}
+
+// prepareRunnerCache readies the runner's build cache for a run: it
+// removes the result bundles of runs that ended without Stop and the
+// default DerivedData folders that test runs without -derivedDataPath
+// left, stamps the cache as in use, and prunes sibling builds unused for
+// DefaultMaxAge. It returns this runner's sequence number and the func
+// that removes its in-use stamp.
+func prepareRunnerCache(artifactsDir string) (int64, func()) {
+	xcodecache.RemoveOrphanResults(artifactsDir)
+	// The test run's log store (-derivedDataPath <artifactsDir>) is left
+	// over from earlier runs, unless another live runner holds this build.
+	if !xcodecache.HeldByLiveRunner(artifactsDir) {
+		_ = os.RemoveAll(filepath.Join(artifactsDir, "Logs", "Test"))
+	}
+	xcodecache.RemoveStaleDerivedData("DevicelabIOSRunner-", 24*time.Hour)
+	seq := xcodecache.NextRunnerSeq()
+	release := xcodecache.StampUse(artifactsDir, seq)
+	if parent := filepath.Dir(artifactsDir); filepath.Base(parent) == runnerBuildsDirName {
+		xcodecache.PruneBuildCache(parent, artifactsDir, xcodecache.DefaultMaxAge, false)
+	}
+	return seq, release
 }
 
 // testArgs is the xcodebuild test-without-building command line that runs
@@ -205,13 +233,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		return nil, nil, fmt.Errorf("install host app: %w", err)
 	}
 
-	// Result bundles of runs that ended without Stop, and the default
-	// DerivedData folders that test runs without -derivedDataPath left, are
-	// never read again.
-	xcodecache.RemoveOrphanResults(opts.ArtifactsDir)
-	xcodecache.RemoveStaleDerivedData("DevicelabIOSRunner-", 24*time.Hour)
-
-	seq := xcodecache.NextRunnerSeq()
+	seq, releaseUse := prepareRunnerCache(opts.ArtifactsDir)
 	var lastErr error
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
 		if attempt > 1 {
@@ -248,16 +270,19 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 			if attempt > 1 {
 				fmt.Fprintf(os.Stderr, "  ✓ Runner started on attempt %d/%d\n", attempt, maxStartupAttempts)
 			}
+			handle.releaseUse = releaseUse
 			return client, handle, nil
 		}
 		// Deterministic configuration failures won't be fixed by retrying —
 		// report the real error immediately (#118).
 		var perm *permanentStartupError
 		if errors.As(err, &perm) {
+			releaseUse()
 			return nil, nil, fmt.Errorf("runner failed to start: %w", err)
 		}
 		lastErr = err
 	}
+	releaseUse()
 	return nil, nil, fmt.Errorf(
 		"runner not ready after %d attempts: %w",
 		maxStartupAttempts, lastErr,

@@ -79,6 +79,7 @@ type Runner struct {
 	devicectl           *DevicectlLookup // What devicectl said while Start reached WDA
 	seq                 int64            // This runner's number in the process (result bundle names)
 	resultBundles       []string         // Result bundles this runner's test runs wrote
+	releaseUse          func()           // Removes this runner's in-use stamp
 }
 
 // NewRunner creates a new WDA runner.
@@ -217,6 +218,7 @@ func (r *Runner) Build(ctx context.Context) error {
 		return err
 	}
 
+	xcodecache.MarkBuiltHere(r.buildDir)
 	fmt.Println("WebDriverAgent build complete")
 	return nil
 }
@@ -256,11 +258,7 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	logPath := filepath.Join(r.buildDir, "logs", "runner.log")
 
-	// Result bundles of earlier runs that died without Stop, and the
-	// DerivedData/Logs/Test of runs that predate -resultBundlePath, are
-	// never read again.
-	xcodecache.RemoveOrphanResults(r.buildDir)
-	_ = os.RemoveAll(filepath.Join(r.derivedDataPath(), "Logs", "Test"))
+	r.prepareRun()
 
 	var lastErr error
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
@@ -376,7 +374,9 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 	go func() { exitCh <- cmd.Wait() }()
 
 	if err := r.waitForStartup(logPath, exitCh); err != nil {
-		r.Stop()
+		// This attempt ends; the run (and its in-use stamp) goes on to the
+		// next attempt.
+		r.stopProcess()
 		return err
 	}
 	return nil
@@ -481,6 +481,17 @@ func setPortEnv(target interface{}, portStr string) {
 
 // Stop terminates the running WDA.
 func (r *Runner) Stop() {
+	r.stopProcess()
+	if r.releaseUse != nil {
+		r.releaseUse()
+		r.releaseUse = nil
+	}
+}
+
+// stopProcess ends WDA's port forward, xcodebuild and its result bundles,
+// keeping the build's in-use stamp: a failed start attempt calls it before
+// the next attempt, Stop calls it and then releases the stamp.
+func (r *Runner) stopProcess() {
 	// Stop port forwarding if running (for physical devices)
 	if r.portForwardListener != nil {
 		if err := r.portForwardListener.Close(); err != nil {
@@ -502,6 +513,25 @@ func (r *Runner) Stop() {
 	}
 	xcodecache.RemoveResultBundles(r.resultBundles)
 	r.resultBundles = nil
+}
+
+// prepareRun readies the build directory for a run: it removes the result
+// bundles of earlier runs that died without Stop and the
+// DerivedData/Logs/Test of runs that predate -resultBundlePath (neither is
+// read again), stamps the build as in use, and prunes sibling builds
+// unused for DefaultMaxAge.
+func (r *Runner) prepareRun() {
+	xcodecache.RemoveOrphanResults(r.buildDir)
+	// Another runner on this build (a second device of the same iOS
+	// version) may be running xcodebuild, which keeps a log store in
+	// Logs/Test; only an unheld build's is left over.
+	if r.releaseUse == nil && !xcodecache.HeldByLiveRunner(r.buildDir) {
+		_ = os.RemoveAll(filepath.Join(r.derivedDataPath(), "Logs", "Test"))
+	}
+	if r.releaseUse == nil {
+		r.releaseUse = xcodecache.StampUse(r.buildDir, r.seq)
+	}
+	xcodecache.PruneBuildCache(filepath.Dir(r.buildDir), r.buildDir, xcodecache.DefaultMaxAge, false)
 }
 
 // wdaTestArgs is the xcodebuild test-without-building command line that

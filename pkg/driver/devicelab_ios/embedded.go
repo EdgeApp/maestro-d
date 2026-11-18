@@ -11,6 +11,14 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/drivers"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
+)
+
+// Cache directories under config.GetCacheDir(); PruneBuildCache keeps them
+// to what recent runs used.
+const (
+	runnerBuildsDirName = "devicelab-ios-runner-builds"
+	embeddedSrcDirName  = "embedded-runner-src"
 )
 
 // embeddedRunnerRoot is the runner project's path inside drivers.IOSRunnerSource.
@@ -27,9 +35,13 @@ func extractEmbeddedRunnerSource() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	slot := filepath.Join(config.GetCacheDir(), "embedded-runner-src", hash)
+	slot := filepath.Join(config.GetCacheDir(), embeddedSrcDirName, hash)
 	target := filepath.Join(slot, "DevicelabIOSRunner")
+	// Slots of runner sources this binary no longer embeds are pruned once
+	// nothing has used them for DefaultMaxAge.
+	defer xcodecache.PruneBuildCache(filepath.Dir(slot), slot, xcodecache.DefaultMaxAge, false)
 	if _, err := os.Stat(filepath.Join(target, "DevicelabIOSRunner.xcodeproj")); err == nil {
+		xcodecache.Touch(slot)
 		return target, nil
 	}
 
@@ -50,10 +62,12 @@ func extractEmbeddedRunnerSource() (string, error) {
 	if err := os.Rename(tmp, slot); err != nil {
 		// A concurrent extraction may have won the rename — trust its result.
 		if _, statErr := os.Stat(filepath.Join(target, "DevicelabIOSRunner.xcodeproj")); statErr == nil {
+			xcodecache.Touch(slot)
 			return target, nil
 		}
 		return "", fmt.Errorf("finalize extraction: %w", err)
 	}
+	xcodecache.Touch(slot)
 	return target, nil
 }
 

@@ -135,3 +135,73 @@ func TestRunnerBuildArgumentsSkipIndexStore(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepareRunCleansStampsAndPrunes(t *testing.T) {
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "sim-ios27.2-iphone")
+	logsTest := filepath.Join(buildDir, "DerivedData", "Logs", "Test", "old.xcresult")
+	orphan := filepath.Join(buildDir, "results", "999999999-1-1.xcresult")
+	stale := filepath.Join(root, "sim-ios25.0-iphone")
+	for _, d := range []string{logsTest, orphan, filepath.Join(stale, "Build")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	_ = filepath.Walk(stale, func(p string, _ os.FileInfo, _ error) error { return os.Chtimes(p, old, old) })
+
+	r := NewRunner("SIM", "", "")
+	r.buildDir = buildDir
+	r.prepareRun()
+
+	for _, gone := range []string{filepath.Dir(logsTest), orphan, stale} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s survived prepareRun", gone)
+		}
+	}
+	stamps, _ := filepath.Glob(filepath.Join(buildDir, ".in-use.*"))
+	if len(stamps) != 1 {
+		t.Fatalf("in-use stamps = %v, want 1", stamps)
+	}
+	r.Stop()
+	if stamps, _ := filepath.Glob(filepath.Join(buildDir, ".in-use.*")); len(stamps) != 0 {
+		t.Errorf("Stop left in-use stamps %v", stamps)
+	}
+}
+
+func TestPrepareRunKeepsLogsTestOfAnotherLiveRunner(t *testing.T) {
+	buildDir := t.TempDir()
+	logsTest := filepath.Join(buildDir, "DerivedData", "Logs", "Test")
+	if err := os.MkdirAll(logsTest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := NewRunner("SIM-A", "", "")
+	other.buildDir = buildDir
+	other.prepareRun() // holds the build now
+	defer other.Stop()
+
+	second := NewRunner("SIM-B", "", "")
+	second.buildDir = buildDir
+	if err := os.MkdirAll(logsTest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	second.prepareRun()
+	defer second.Stop()
+	if _, err := os.Stat(logsTest); err != nil {
+		t.Error("a second runner's start removed Logs/Test while the first runs")
+	}
+}
+
+func TestFailedAttemptKeepsTheInUseStamp(t *testing.T) {
+	r := NewRunner("SIM", "", "")
+	r.buildDir = t.TempDir()
+	r.prepareRun()
+	r.stopProcess() // a failed start attempt
+	if stamps, _ := filepath.Glob(filepath.Join(r.buildDir, ".in-use.*")); len(stamps) != 1 {
+		t.Fatalf("after a failed attempt in-use stamps = %v, want 1", stamps)
+	}
+	r.Stop()
+	if stamps, _ := filepath.Glob(filepath.Join(r.buildDir, ".in-use.*")); len(stamps) != 0 {
+		t.Errorf("Stop left %v", stamps)
+	}
+}
