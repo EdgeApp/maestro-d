@@ -769,3 +769,66 @@ func TestE2E_Leases(t *testing.T) {
 func regexpMatch(pattern, s string) bool {
 	return regexp.MustCompile(pattern).MatchString(s)
 }
+
+// reportDirs lists the report directories a mock-1 session made under the
+// default daemon's home.
+func (e *e2e) reportDirs() []string {
+	e.t.Helper()
+	dirs, _ := filepath.Glob(filepath.Join(e.home, "run", "default", "reports", "mock-1", "*"))
+	return dirs
+}
+
+func TestE2E_ReportLifecycle(t *testing.T) {
+	e := newE2E(t)
+
+	// A failing step captures its failure artifacts; the daemon writes
+	// report.json and junit-report.xml, never report.html or Allure.
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock")
+	e.fails(1, "assertTrue", "false", "--device", "mock-1")
+	dirs := e.reportDirs()
+	if len(dirs) != 1 {
+		t.Fatalf("report dirs = %v, want 1", dirs)
+	}
+	kept := dirs[0]
+	for _, name := range []string{"report.json", "junit-report.xml", "flows"} {
+		if _, err := os.Stat(filepath.Join(kept, name)); err != nil {
+			t.Errorf("attached session lacks %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"report.html", "allure-results"} {
+		if _, err := os.Stat(filepath.Join(kept, name)); err == nil {
+			t.Errorf("daemon session wrote %s", name)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(kept, "bundles", "abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: the report stays after detach, without its inputs.
+	e.ok("detach", "--device", "mock-1")
+	if _, err := os.Stat(filepath.Join(kept, "report.json")); err != nil {
+		t.Fatalf("detach removed the kept report: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(kept, "bundles")); err == nil {
+		t.Error("detach left bundles/")
+	}
+
+	// --discard-reports removes the session's own report directory.
+	time.Sleep(1100 * time.Millisecond) // a new second, so a new report dir
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock", "--discard-reports")
+	if got := e.reportDirs(); len(got) != 2 {
+		t.Fatalf("report dirs while discarding session attached = %v, want 2", got)
+	}
+	e.ok("detach", "--device", "mock-1")
+	if got := e.reportDirs(); len(got) != 1 || got[0] != kept {
+		t.Errorf("after a discarding detach report dirs = %v, want only %s", got, kept)
+	}
+
+	// A caller's outputDir is never deleted.
+	out := filepath.Join(t.TempDir(), "out")
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock", "--output-dir", out, "--discard-reports")
+	e.ok("detach", "--device", "mock-1")
+	if _, err := os.Stat(filepath.Join(out, "report.json")); err != nil {
+		t.Errorf("a caller's outputDir lost report.json: %v", err)
+	}
+}

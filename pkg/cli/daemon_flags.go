@@ -318,6 +318,8 @@ var (
 			func(a *daemon.AttachConfig, v string) { a.Artifacts = v }),
 		attachStr("output-dir", "Report/artifact directory (default ~/.maestro-d/run/<name>/reports/<device>/<ts>)", []string{"MAESTRO_OUTPUT"},
 			func(a *daemon.AttachConfig, v string) { a.OutputDir = v }),
+		attachBool("discard-reports", "Delete the session's report directory at detach (default: kept, then swept after 3 days)", nil,
+			func(a *daemon.AttachConfig, v bool) { a.DiscardReports = v }),
 		attachBool("no-app-install", "Skip app installation even if --app-file is given", []string{"MAESTRO_NO_APP_INSTALL"},
 			func(a *daemon.AttachConfig, v bool) { a.NoAppInstall = v }),
 		attachBool("no-driver-install", "Skip driver installation (UIAutomator2, WDA)", []string{"MAESTRO_NO_DRIVER_INSTALL"},

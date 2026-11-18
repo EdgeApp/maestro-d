@@ -110,6 +110,11 @@ type Server struct {
 
 	mu       sync.Mutex
 	attached map[string]*attached
+	// reportUsers counts attached sessions per report directory, so detach
+	// keeps a shared outputDir's blobs/ and bundles/ while another session
+	// in it is attached. Guarded by reportMu.
+	reportMu    sync.Mutex
+	reportUsers map[string]*reportUse
 	// attaching serialises concurrent attach calls for the same device.
 	attaching map[string]chan struct{}
 

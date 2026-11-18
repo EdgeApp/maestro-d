@@ -264,6 +264,12 @@ func getBaseStep(step flow.Step) *flow.BaseStep {
 // WriteSkeleton writes the initial skeleton to disk.
 // Creates report.json, all flow detail files, and report.html with pending status.
 func WriteSkeleton(outputDir string, index *Index, flowDetails []FlowDetail) error {
+	return WriteSkeletonFormats(outputDir, index, flowDetails, AllFormats)
+}
+
+// WriteSkeletonFormats is WriteSkeleton writing report.html only when
+// formats includes FormatHTML.
+func WriteSkeletonFormats(outputDir string, index *Index, flowDetails []FlowDetail, formats Formats) error {
 	// Ensure directories exist
 	if err := ensureDir(filepath.Join(outputDir, "flows")); err != nil {
 		return fmt.Errorf("create flows dir: %w", err)
@@ -293,6 +299,9 @@ func WriteSkeleton(outputDir string, index *Index, flowDetails []FlowDetail) err
 	}
 
 	// Generate HTML report (for live viewing)
+	if !formats.Has(FormatHTML) {
+		return nil
+	}
 	if err := GenerateHTML(outputDir, HTMLConfig{
 		Title:     "Test Report",
 		ReportDir: outputDir,

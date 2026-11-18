@@ -86,3 +86,15 @@ func TestAttachToRunConfigOptions(t *testing.T) {
 		t.Errorf("extra options not applied: %+v", rc)
 	}
 }
+
+func TestDriverOutputDirFallsBackToReportDir(t *testing.T) {
+	if got := driverOutputDir(daemon.AttachConfig{ReportDir: "/r"}); got != "/r" {
+		t.Errorf("no outputDir: %q, want /r", got)
+	}
+	if got := driverOutputDir(daemon.AttachConfig{OutputDir: "/o", ReportDir: "/r"}); got != "/o" {
+		t.Errorf("caller outputDir: %q, want /o", got)
+	}
+	if got := attachToRunConfig("mock-1", daemon.AttachConfig{ReportDir: "/r"}).OutputDir; got != "/r" {
+		t.Errorf("attachToRunConfig OutputDir = %q, want /r", got)
+	}
+}
