@@ -16,6 +16,7 @@ import (
 
 	goios "github.com/danielpaulus/go-ios/ios"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
@@ -76,6 +77,8 @@ type Runner struct {
 	baseURL             string    // Where WDA answers; "" means localhost:port
 	reach               *reachDeps
 	devicectl           *DevicectlLookup // What devicectl said while Start reached WDA
+	seq                 int64            // This runner's number in the process (result bundle names)
+	resultBundles       []string         // Result bundles this runner's test runs wrote
 }
 
 // NewRunner creates a new WDA runner.
@@ -87,6 +90,7 @@ func NewRunner(deviceUDID, teamID, wdaBundleID string) *Runner {
 		teamID:      teamID,
 		wdaBundleID: wdaBundleID,
 		port:        PortFromUDID(deviceUDID),
+		seq:         xcodecache.NextRunnerSeq(),
 	}
 }
 
@@ -226,6 +230,7 @@ func (r *Runner) buildArguments(projectPath string) []string {
 		"-derivedDataPath", r.derivedDataPath(),
 		"-allowProvisioningUpdates",
 		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
+		xcodecache.NoIndexStoreSetting,
 	}
 	if r.wdaBundleID != "" {
 		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
@@ -250,6 +255,12 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.isSimulatorCache, _ = r.isSimulator()
 
 	logPath := filepath.Join(r.buildDir, "logs", "runner.log")
+
+	// Result bundles of earlier runs that died without Stop, and the
+	// DerivedData/Logs/Test of runs that predate -resultBundlePath, are
+	// never read again.
+	xcodecache.RemoveOrphanResults(r.buildDir)
+	_ = os.RemoveAll(filepath.Join(r.derivedDataPath(), "Logs", "Test"))
 
 	var lastErr error
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
@@ -337,12 +348,14 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 	}
 	r.logFile = logFile
 
-	r.cmd = exec.CommandContext(ctx, "xcodebuild",
-		"test-without-building",
-		"-xctestrun", xctestrun,
-		"-destination", r.destination(),
-		"-derivedDataPath", r.derivedDataPath(),
-	)
+	bundle := xcodecache.ResultBundlePath(r.buildDir, r.seq, attempt)
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		return fmt.Errorf("failed to create results directory: %w", err)
+	}
+	_ = os.RemoveAll(bundle) // xcodebuild refuses an existing path
+	r.resultBundles = append(r.resultBundles, bundle)
+	r.cmd = execCommandContext(ctx, "xcodebuild",
+		wdaTestArgs(xctestrun, r.destination(), r.derivedDataPath(), bundle)...)
 	r.cmd.Stdout = r.logFile
 	r.cmd.Stderr = r.logFile
 
@@ -487,6 +500,21 @@ func (r *Runner) Stop() {
 		}
 		r.logFile = nil
 	}
+	xcodecache.RemoveResultBundles(r.resultBundles)
+	r.resultBundles = nil
+}
+
+// wdaTestArgs is the xcodebuild test-without-building command line that
+// runs WebDriverAgent, writing its result bundle (and the session log that
+// grows for as long as WDA runs) to resultBundle.
+func wdaTestArgs(xctestrun, destination, derivedData, resultBundle string) []string {
+	return []string{
+		"test-without-building",
+		"-xctestrun", xctestrun,
+		"-destination", destination,
+		"-derivedDataPath", derivedData,
+		"-resultBundlePath", resultBundle,
+	}
 }
 
 // Cleanup stops WDA runner.
@@ -544,6 +572,7 @@ func wdaBuildArgs(projectPath, destination, derivedData, teamID, wdaBundleID str
 		"-derivedDataPath", derivedData,
 		"-allowProvisioningUpdates",
 		fmt.Sprintf("DEVELOPMENT_TEAM=%s", teamID),
+		xcodecache.NoIndexStoreSetting,
 	}
 	if wdaBundleID != "" {
 		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", wdaBundleID))

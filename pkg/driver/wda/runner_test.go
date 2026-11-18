@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -357,6 +358,7 @@ func TestWDABuildArgs(t *testing.T) {
 		"-derivedDataPath", "/cache/DerivedData",
 		"-allowProvisioningUpdates",
 		"DEVELOPMENT_TEAM=TEAM000001",
+		"COMPILER_INDEX_STORE_ENABLE=NO",
 	}
 	args := func(bundle string, xcode int) []string {
 		return wdaBuildArgs("/wda/WebDriverAgent.xcodeproj", "id=UDID", "/cache/DerivedData", "TEAM000001", bundle, xcode)
@@ -378,8 +380,8 @@ func TestWDABuildArgs(t *testing.T) {
 	if got := args("com.example.wda", 27); !reflect.DeepEqual(got, want) {
 		t.Errorf("bundle args = %q, want %q", got, want)
 	}
-	if got := wdaBuildArgs("p", "d", "dd", "", "", 26); got[len(got)-1] != "DEVELOPMENT_TEAM=" {
-		t.Errorf("no team: last arg %q, want DEVELOPMENT_TEAM=", got[len(got)-1])
+	if got := wdaBuildArgs("p", "d", "dd", "", "", 26); !slices.Contains(got, "DEVELOPMENT_TEAM=") {
+		t.Errorf("no team: args %q lack DEVELOPMENT_TEAM=", got)
 	}
 }
 
