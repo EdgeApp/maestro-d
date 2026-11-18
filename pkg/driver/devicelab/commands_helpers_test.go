@@ -693,45 +693,6 @@ func TestRemoveMedia(t *testing.T) {
 	}
 }
 
-func TestStartStopRecording(t *testing.T) {
-	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
-
-	res := driver.startRecording(&flow.StartRecordingStep{})
-	if !res.Success {
-		t.Fatalf("startRecording default path failed: %v", res.Error)
-	}
-	if !strings.Contains(shell.commands[0], "screenrecord /sdcard/recording.mp4") {
-		t.Errorf("expected default path, got %s", shell.commands[0])
-	}
-
-	shell.commands = nil
-	_ = driver.startRecording(&flow.StartRecordingStep{Path: "/sdcard/my.mp4"})
-	if !strings.Contains(shell.commands[0], "/sdcard/my.mp4") {
-		t.Errorf("expected custom path, got %s", shell.commands[0])
-	}
-
-	// stop
-	shell.commands = nil
-	res = driver.stopRecording(&flow.StopRecordingStep{})
-	if !res.Success {
-		t.Fatalf("stopRecording failed: %v", res.Error)
-	}
-	if !strings.Contains(shell.commands[0], "pkill -INT screenrecord") {
-		t.Errorf("expected pkill, got %s", shell.commands[0])
-	}
-
-	// no device
-	res = New(newTrackingClient(), &core.PlatformInfo{}, nil).startRecording(&flow.StartRecordingStep{})
-	if res.Success {
-		t.Error("startRecording without device should fail")
-	}
-	res = New(newTrackingClient(), &core.PlatformInfo{}, nil).stopRecording(&flow.StopRecordingStep{})
-	if res.Success {
-		t.Error("stopRecording without device should fail")
-	}
-}
-
 // =============================================================================
 // getAPILevel — shell + caching paths
 // =============================================================================

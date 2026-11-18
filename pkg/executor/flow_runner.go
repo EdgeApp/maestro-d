@@ -173,8 +173,7 @@ func (fr *FlowRunner) Run() FlowResult {
 			} else {
 				defer func() {
 					target := fr.flowWriter.RecordingTarget()
-					if err := recorder.StopScreenRecording(target); err != nil {
-						logger.Warn("--record: failed to save recording: %v", err)
+					if !recordingSaved("--record", recorder.StopScreenRecording(target)) { // maestro-d: a recording that ended early is still saved
 						return
 					}
 					// A recording can only be made while the flow runs, so

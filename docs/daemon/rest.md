@@ -104,7 +104,9 @@ A remote caller drives devices but not the host. These are refused with
   no extension), and the result lists it in [`outputs`](#outputs). Inside a
   bundle the path is taken relative to the bundle root from the step's own
   flow directory: `takeScreenshot: x` in `sub/open.yaml` is `outputs/sub/x.png`.
-  `startRecording`'s path is a device path on Android and passes through.
+  `startRecording`'s path is a recording name and passes through: on a
+  device with screen capture its directory is dropped and the file is
+  written to `recordings/` in the report ([streaming.md](streaming.md#recording)).
 - `assertScreenshot`'s reference: a `blob:` ref is compared; a relative
   path that names no uploaded file is a **baseline**, written to
   `outputs/<path>` (`.png` added) as a local first run writes it beside the
@@ -711,7 +713,7 @@ The response is a **step result**:
 | `skipped` | the step's `platform` did not match the device |
 | `optional`, `error` | the step failed but was optional: `ok` stays true |
 | `element` | the element a selector resolved to, when there was one |
-| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the file path for `startRecording` |
+| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`) |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
 | `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |

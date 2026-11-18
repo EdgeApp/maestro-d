@@ -78,6 +78,7 @@ type Session struct {
 	cancel    context.CancelFunc
 	done      chan struct{} // closed when the latest Run returned
 	opts      Options       // the running source's options
+	runAudio  bool          // the running source carries audio (AudioPlanner)
 	emitted   bool          // the running source has emitted a packet
 	lingerID  uint64
 	lingerOff func() bool
@@ -237,11 +238,12 @@ func (s *Session) subscribe(opts Options, buffer int) (*Subscriber, error) {
 		s.startLocked(opts)
 	}
 	s.stopLingerLocked()
-	cached := s.cache.packets(opts.Audio, s.liveEdgeLocked())
+	audio := opts.Audio && s.runAudio
+	cached := s.cache.packets(audio, s.liveEdgeLocked())
 	sub := &Subscriber{
 		s:    s,
 		ch:   make(chan Packet, buffer+len(cached)),
-		opts: Options{FPS: s.opts.FPS, Audio: opts.Audio},
+		opts: Options{FPS: s.opts.FPS, Audio: audio},
 	}
 	for _, p := range cached {
 		sub.deliver(p)
@@ -283,6 +285,10 @@ func (s *Session) startLocked(opts Options) {
 	prev := s.done
 	done := make(chan struct{})
 	s.running, s.cancel, s.done, s.opts, s.emitted = true, cancel, done, opts, false
+	s.runAudio = true
+	if p, ok := s.src.(AudioPlanner); ok {
+		s.runAudio = p.PlansAudio(opts)
+	}
 	s.setStateLocked(StateCapturing, "")
 	go func() {
 		defer close(done)
@@ -482,7 +488,8 @@ type Subscriber struct {
 // ends; Err then says why.
 func (sub *Subscriber) Packets() <-chan Packet { return sub.ch }
 
-// Options are the subscriber's options: FPS is the running source's rate.
+// Options are the subscriber's options: FPS is the running source's rate,
+// and Audio is false when the running source carries none.
 func (sub *Subscriber) Options() Options { return sub.opts }
 
 // Err is why the subscriber ended (ErrLagged, ErrClosed or the source's

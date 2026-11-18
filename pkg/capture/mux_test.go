@@ -191,6 +191,21 @@ func TestMux_Errors(t *testing.T) {
 	}
 }
 
+// An AudioConfig without a format (the device has no audio after all)
+// starts the stream video-only at once.
+func TestMux_AudioConfigWithoutFormat(t *testing.T) {
+	format, frames := fixture(t, fake.Clip())
+	x := capture.NewMux(capture.Options{FPS: 15, Audio: true})
+	push(t, x, capture.Packet{Kind: capture.VideoConfig, Video: format})
+	if got := push(t, x, capture.Packet{Kind: capture.Video, Key: true, Data: frames[0].Data}); len(got) != 0 {
+		t.Fatal("started before the audio config")
+	}
+	got := push(t, x, capture.Packet{Kind: capture.AudioConfig})
+	if len(got) != 2 || !got[0].Init || x.HasAudio() {
+		t.Fatalf("got %d chunks, audio %v; want init + 1 frame, no audio", len(got), x.HasAudio())
+	}
+}
+
 // Flush starts a Mux still waiting for its audio config, video-only, with
 // what it holds; it gives nothing once started or without a video config.
 func TestMux_Flush(t *testing.T) {

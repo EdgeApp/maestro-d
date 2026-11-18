@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture" // maestro-d: screen capture
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/uiautomator2"
@@ -80,6 +81,10 @@ type Driver struct {
 
 	// Keyboard auto-dismiss: set after inputText/inputRandom, checked on next tap/assert
 	lastStepWasInput bool
+
+	// maestro-d: the device's screen capture session and the --record
+	// recording on it (recording.go)
+	screen capture.DriverCapture
 
 	// currentAppID is the package launched by the last launchApp, used to
 	// detect a mid-flow crash/termination so a failing step reports "app
@@ -259,10 +264,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.takeScreenshot(s)
 	case *flow.AssertScreenshotStep:
 		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
-	case *flow.StartRecordingStep:
-		result = d.startRecording(s)
-	case *flow.StopRecordingStep:
-		result = d.stopRecording(s)
+	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: the executor records through Capture()
+		result = d.recordingStep(step)
 	case *flow.RemoveMediaStep:
 		result = d.removeMedia(s)
 	case *flow.AddMediaStep:

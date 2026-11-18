@@ -11,6 +11,7 @@ samples (and its audio) are re-wrapped by a pure-Go muxer.
 - [Recording](#recording): `startRecording` / `stopRecording`, `--record`
 - [Errors](#errors): `CAPTURE_UNAVAILABLE` and its reasons
 - [Platforms](#platforms)
+- [Android](#android): scrcpy-server, audio, limits
 
 ## The stream API
 
@@ -142,10 +143,22 @@ capture session, and the file lands with the report:
 - `stopRecording` finalizes the file; its `path` is ignored. A recording
   left running is finalized when the flow ends, the session ends or the
   device is detached.
+- A recording that ended before its stop (it fell behind the stream, or
+  the capture failed) is still saved, up to where it ended:
+  `stopRecording` succeeds with a warning in its message ("Saved
+  recording <path> (warning: capture: the recording ended early: …)"),
+  and `--record` links the file in the report and logs the warning.
 - In a daemon session `GET /v1/devices/{id}/artifacts/recordings/<name>.mp4`
   serves the file, to remote and hub callers too.
 - `--record` / `--video` record through the same capture session into the
   flow's `recording.mp4`.
+- **Android changed.** `startRecording` used to run `screenrecord` on the
+  device and leave the file there (`/sdcard/recording.mp4`, or the step's
+  `path`), and `--record` stopped at screenrecord's three-minute cap.
+  Both now record on the host, as above, for as long as the flow runs,
+  with the device's audio where it has any. A flow that pulled
+  `/sdcard/recording.mp4` afterwards should read the step's `data`
+  instead.
 - The files are fragmented MP4 finalized with the recording's duration
   (`mehd`) and a keyframe index (`mfra`), so the HTML report's `<video>`
   knows its length and can seek. Unlike a live stream, each sample is
@@ -182,7 +195,7 @@ tells it from `DAEMON_UNAVAILABLE`'s 503.
 | `ambiguous-device-name` | two devices share a name | rename one |
 | `helper-failed` | the capture helper did not start | see the daemon log |
 | `android-too-old` | Android below SDK 21 | — |
-| `scrcpy-failed` | the Android capture server failed | see the daemon log |
+| `scrcpy-failed` | the Android capture server failed (its last log line is in the message) | see the daemon log's `[scrcpy <serial>]` lines |
 | `capture-lost` | the capture stopped while the device was attached | detach and attach again |
 | `no-frames` | no frames arrived within 10 s (a screen that is off, a capture that never started) | wake the device, then retry |
 
@@ -200,5 +213,62 @@ on-demand capture stopping because nobody watches is not published.
 
 | driver | capture |
 | --- | --- |
+| `uiautomator2`, `devicelab` (Android devices and emulators) | [scrcpy-server](#android), on demand: H.264 at up to the requested `fps`, AAC audio on Android 11 and later |
 | `mock` | an embedded 640×360 H.264 clip with AAC audio, looped at the requested `fps` (`FPS` is a ceiling); used by the tests and the viewer's checks |
 | every other driver | `CAPTURE_UNAVAILABLE` `unsupported-platform` for now |
+
+## Android
+
+Android devices and emulators capture through
+[scrcpy](https://github.com/Genymobile/scrcpy)'s server, pinned at 5.0.1
+and shipped as `drivers/android/scrcpy-server-v5.0.1` (Apache-2.0,
+`drivers/android/LICENSE-scrcpy`). Nothing is installed on the device
+beyond that jar:
+
+- **Start.** The first viewer or recorder starts the capture. maestro-d
+  checks the jar's sha256 against the pinned one, pushes it to
+  `/data/local/tmp/maestro-d-scrcpy-server.jar` when the device's copy
+  differs (checked once per device per daemon, and again after a capture
+  on that device fails, so a jar the device lost is pushed again),
+  forwards a free local port to the server's socket, and starts the
+  server over `adb shell`. Its output goes to the daemon log, each line
+  prefixed `[scrcpy <serial>]`.
+- **Stop.** The capture stops 10 s after its last viewer leaves (the shell
+  and the forward go with it), and when the device is detached. The jar
+  stays on the device for the next start.
+- **Video.** H.264 from the device's encoder. Keyframes are seconds
+  apart (about every 4 s on a Pixel 8 while the screen changes, none while
+  it is still); a viewer or recording that joins between them still starts
+  at once, because the frames since the last keyframe arrive first, a
+  millisecond apart. `fps` is the encoder's `max_fps`, a ceiling: a static
+  screen sends almost nothing, so a stream of an idle screen has few
+  frames. After the screen stops changing the encoder repeats its last
+  frame a few times, every 100 ms or, below 10 fps, once per frame
+  interval (`repeat-previous-frame-after`), so the repeats stay under the
+  ceiling too. A rotation changes the stream's size in-band.
+- **Audio.** AAC, 48 kHz stereo, from Android 11 (SDK 30). On Android 13
+  and later the capture always takes the device's audio, from the
+  `playback` source with the device's speaker still playing. On Android 11
+  and 12 it takes audio only when the viewer that starts the capture (or a
+  recording) asks for it; a later viewer asking for audio then gets
+  `X-Maestro-Audio: false`. Below Android 11 there is no audio.
+- **Recording** (`--record`, `startRecording`) runs on the host through
+  the same capture: no three-minute cap, audio where the device has it.
+
+**Limits.**
+
+- **`FLAG_SECURE`.** Windows that set it (banking and DRM screens) capture
+  as black on Android 12 and later.
+- **Android 11 unlock.** Audio capture on Android 11 needs the screen
+  unlocked when the capture starts; otherwise the device disables audio
+  and the stream has none (the daemon log says so).
+- **Android 11–12 speaker.** Audio capture silences the device's speaker
+  while it runs. That is why, on those versions, audio is captured only
+  when the first viewer or a recording asks for it.
+- **Android 13+ opt-out.** The `playback` source keeps the speaker
+  playing, but captures only apps that allow their playback to be
+  captured; an app can opt out, and its sound is then missing.
+- **Old devices.** Below Android 5.0 (SDK 21) capture answers
+  `CAPTURE_UNAVAILABLE` `android-too-old`.
+- **Failures.** A server that does not start, or stops, answers
+  `scrcpy-failed`; the message carries the server's last log line.

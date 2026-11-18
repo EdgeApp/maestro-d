@@ -291,8 +291,9 @@ func TestRecorder_Lagged(t *testing.T) {
 		t.Fatalf("Err = %v, want ErrLagged", r.Err())
 	}
 	dest := filepath.Join(t.TempDir(), "lagged.mp4")
-	if err := r.Stop(dest); !errors.Is(err, capture.ErrLagged) {
-		t.Errorf("Stop = %v, want ErrLagged", err)
+	if err := r.Stop(dest); !errors.Is(err, capture.ErrLagged) || !errors.Is(err, capture.ErrEndedEarly) ||
+		err.Error() != "capture: the recording ended early: "+capture.ErrLagged.Error() {
+		t.Errorf("Stop = %v, want ErrEndedEarly wrapping ErrLagged", err)
 	}
 	if _, err := os.Stat(dest); err != nil {
 		t.Errorf("lagged recording not kept: %v", err)
@@ -317,8 +318,12 @@ func TestRecorder_SourceFailureAndEmpty(t *testing.T) {
 	if capture.ReasonOf(r.Err(), "") != capture.ReasonScrcpyFailed {
 		t.Fatalf("Err = %v", r.Err())
 	}
-	if err := r.Stop(filepath.Join(t.TempDir(), "failed.mp4")); capture.ReasonOf(err, "") != capture.ReasonScrcpyFailed {
+	failed := filepath.Join(t.TempDir(), "failed.mp4")
+	if err := r.Stop(failed); capture.ReasonOf(err, "") != capture.ReasonScrcpyFailed || !errors.Is(err, capture.ErrEndedEarly) {
 		t.Errorf("Stop = %v", err)
+	}
+	if _, err := os.Stat(failed); err != nil {
+		t.Errorf("a recording whose source failed was not saved: %v", err)
 	}
 
 	empty := &scripted{frames: 0, emitted: make(chan struct{})}
@@ -342,8 +347,8 @@ func TestRecorder_SourceFailureAndEmpty(t *testing.T) {
 	}
 	closed.Close()
 	dest := filepath.Join(t.TempDir(), "never.mp4")
-	if err := never.Stop(dest); err == nil {
-		t.Error("a recording without video was kept")
+	if err := never.Stop(dest); err == nil || errors.Is(err, capture.ErrEndedEarly) {
+		t.Errorf("a recording without video: %v, want an error that is not ErrEndedEarly", err)
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Errorf("dest exists: %v", err)

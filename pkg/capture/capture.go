@@ -46,7 +46,10 @@ type Packet struct {
 	Key   bool          // Video only: sync sample
 	Data  []byte
 	Video *VideoFormat // VideoConfig only
-	Audio *AudioFormat // AudioConfig only
+	// Audio is the AudioConfig's format. A source that cannot deliver the
+	// audio a run asked for emits an AudioConfig with a nil Audio, so
+	// subscribers stop waiting for audio and start video-only.
+	Audio *AudioFormat
 }
 
 // VideoFormat is an H.264 stream's size and parameter sets (NAL units
@@ -94,4 +97,13 @@ type Source interface {
 	// FPSControl reports whether Options.FPS is a ceiling the device
 	// honours (false: the device picks its own rate).
 	FPSControl() bool
+}
+
+// AudioPlanner is a Source that knows, as a run starts, whether the run
+// will carry audio. A Session asks it with the first subscriber's options;
+// later subscribers that ask for audio from a run without it get
+// Options.Audio false. Sources that are not AudioPlanners are assumed to
+// carry audio whenever a subscriber asks for it.
+type AudioPlanner interface {
+	PlansAudio(first Options) bool
 }

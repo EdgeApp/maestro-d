@@ -29,7 +29,8 @@ type Chunk struct {
 // Mux turns one subscriber's packets into fragmented MP4. It holds media
 // back until it can write the init segment: once it has the video config
 // and, when audio was asked for, the audio config (or a second of video
-// without one, after which it starts video-only).
+// without one, or an AudioConfig with no format, after which it starts
+// video-only).
 type Mux struct {
 	fps     int
 	audio   bool
@@ -102,7 +103,10 @@ func (x *Mux) Push(p Packet) ([]Chunk, error) {
 			x.video = p.Video
 		}
 	case AudioConfig:
-		if x.audio && p.Audio != nil {
+		switch {
+		case p.Audio == nil:
+			x.audio = false // the source has no audio after all
+		case x.audio:
 			x.audioF = p.Audio
 		}
 	case Video, Audio:

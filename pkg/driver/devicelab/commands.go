@@ -2126,41 +2126,8 @@ func (d *Driver) removeMedia(_ *flow.RemoveMediaStep) *core.CommandResult {
 	return successResult("Cleared MediaStore index", nil)
 }
 
-func (d *Driver) startRecording(step *flow.StartRecordingStep) *core.CommandResult {
-	if d.device == nil {
-		return errorResult(fmt.Errorf("device not configured"), "startRecording requires device access")
-	}
-
-	path := step.Path
-	if path == "" {
-		path = "/sdcard/recording.mp4"
-	}
-
-	cmd := fmt.Sprintf("screenrecord %s </dev/null >/dev/null 2>&1 &", path)
-	if _, err := d.device.Shell(cmd); err != nil {
-		return errorResult(err, fmt.Sprintf("Failed to start recording: %v", err))
-	}
-
-	return &core.CommandResult{
-		Success: true,
-		Message: fmt.Sprintf("Started recording to %s", path),
-		Data:    path,
-	}
-}
-
-func (d *Driver) stopRecording(_ *flow.StopRecordingStep) *core.CommandResult {
-	if d.device == nil {
-		return errorResult(fmt.Errorf("device not configured"), "stopRecording requires device access")
-	}
-
-	if _, err := d.device.Shell("pkill -INT screenrecord"); err != nil {
-		logger.Warn("failed to stop screenrecord process: %v", err)
-	}
-
-	time.Sleep(500 * time.Millisecond)
-
-	return successResult("Stopped recording", nil)
-}
+// maestro-d: startRecording and stopRecording run in the executor through
+// screen capture (recording.go); the screenrecord step code is removed.
 
 // ============================================================================
 // Wait Commands

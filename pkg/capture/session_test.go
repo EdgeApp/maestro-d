@@ -687,3 +687,58 @@ func TestStateAndKindStrings(t *testing.T) {
 		t.Error("Kind(0)")
 	}
 }
+
+// plannedStub is a stubSource that plans audio only when the first
+// subscriber asks for it (Android 11–12's scrcpy).
+type plannedStub struct{ *stubSource }
+
+func (p plannedStub) PlansAudio(first Options) bool { return first.Audio }
+
+// A later subscriber asking for audio from a run that carries none gets
+// Options.Audio false and no audio packets; a run started with audio gives
+// it to later subscribers.
+func TestSession_AudioPlanner(t *testing.T) {
+	src := plannedStub{newStub(OnDemand)}
+	s := NewSession(src)
+	defer s.Close()
+	first, err := s.Subscribe(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := src.next(t)
+	if run.opts.Audio {
+		t.Fatal("run started with audio for a subscriber that did not ask")
+	}
+	run.emit(vcfg)
+	run.emit(acfg)
+	run.emit(key(0))
+	run.emit(audio(0))
+	late, err := s.Subscribe(Options{Audio: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.Options().Audio {
+		t.Error("late subscriber on a run without audio got Audio true")
+	}
+	if got := kinds(drain(late)); !equalKinds(got, VideoConfig, Video) {
+		t.Errorf("late subscriber got %v", got)
+	}
+	first.Close()
+	late.Close()
+	s.Close()
+
+	src2 := plannedStub{newStub(OnDemand)}
+	s2 := NewSession(src2)
+	defer s2.Close()
+	if _, err := s2.Subscribe(Options{Audio: true}); err != nil {
+		t.Fatal(err)
+	}
+	src2.next(t)
+	sub, err := s2.Subscribe(Options{Audio: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sub.Options().Audio {
+		t.Error("subscriber on a run with audio got Audio false")
+	}
+}

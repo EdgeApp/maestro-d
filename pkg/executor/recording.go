@@ -10,6 +10,7 @@ package executor
 // a deferred finishRecording; see docs/daemon/UPSTREAM.md.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -153,24 +154,45 @@ func (fr *FlowRunner) stopRecording() *core.CommandResult {
 		return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
 	}
 	rel := fr.rec.rel
-	if err := fr.finishRecording(); err != nil {
+	err := fr.finishRecording()
+	if errors.Is(err, capture.ErrEndedEarly) {
+		return &core.CommandResult{Success: true, Message: fmt.Sprintf("Saved recording %s (warning: %v)", rel, err), Data: rel}
+	}
+	if err != nil {
 		return &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("stopRecording: %v", err), Data: rel}
 	}
 	return &core.CommandResult{Success: true, Message: "Saved recording " + rel, Data: rel}
 }
 
 // finishRecording finalizes a recording left running (the flow, session or
-// attachment ended). It is a no-op when none runs.
+// attachment ended). It is a no-op when none runs. An error wrapping
+// capture.ErrEndedEarly means the recording was saved but ended before
+// the step or the flow did.
 func (fr *FlowRunner) finishRecording() error {
 	r, dest, rel := fr.rec.active, fr.rec.dest, fr.rec.rel
 	if r == nil {
 		return nil
 	}
 	fr.rec.active = nil
-	if err := r.Stop(dest); err != nil {
-		logger.Warn("recording %s: %v", rel, err)
-		return err
+	err := r.Stop(dest)
+	recordingSaved("recording "+rel, err)
+	if err == nil {
+		logger.Info("Saved recording %s", dest)
 	}
-	logger.Info("Saved recording %s", dest)
-	return nil
+	return err
+}
+
+// recordingSaved reports whether a recording's Stop error still means the
+// file was saved: nil, or capture.ErrEndedEarly (logged as a warning). Any
+// other error is logged as a failed save.
+func recordingSaved(what string, err error) bool {
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, capture.ErrEndedEarly):
+		logger.Warn("%s: saved, but %v", what, err)
+		return true
+	}
+	logger.Warn("%s: failed to save the recording: %v", what, err)
+	return false
 }

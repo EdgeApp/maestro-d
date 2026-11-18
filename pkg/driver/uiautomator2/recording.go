@@ -1,72 +1,46 @@
 package uiautomator2
 
+// maestro-d: screen capture. CreateAndroidDriver hands the driver its
+// device's capture session (pkg/capture/scrcpy, on demand) through
+// SetCapture. The session gives the driver core.Capturer (live streams),
+// and --record (core.ScreenRecorder) records through it with the same
+// Recorder the streams use: no three-minute cap, audio where the device
+// has it, the file written on the host. The startRecording and
+// stopRecording steps run in the executor through Capture(); screenrecord
+// is gone. See docs/daemon/UPSTREAM.md.
+
 import (
 	"fmt"
-	"strings"
-	"time"
 
-	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
-// --record support (core.ScreenRecorder).
-//
-// screenrecord writes to the device filesystem and caps a single clip at its
-// default three minutes; a longer flow keeps its first three minutes. The file
-// is pulled to the host and removed from the device on stop.
+// SetCapture hands the driver its device's capture session. The caller
+// owns the session and closes it after the driver.
+func (d *Driver) SetCapture(s *capture.Session) { d.screen.Set(s) }
 
-const recordingDevicePath = "/sdcard/maestro-runner-recording.mp4"
+// Capture implements core.Capturer.
+func (d *Driver) Capture() (*capture.Session, error) { return d.screen.Session() }
 
-// StartScreenRecording implements core.ScreenRecorder.
-func (d *Driver) StartScreenRecording() error {
-	if d.device == nil {
-		return fmt.Errorf("screen recording requires device access")
-	}
-	// A recorder left over from an interrupted run would hold the file open.
-	_, _ = d.device.Shell("pkill -INT screenrecord")
-	_, _ = d.device.Shell("rm -f " + recordingDevicePath)
+// StartScreenRecording implements core.ScreenRecorder: it records the
+// capture session into a temporary file.
+func (d *Driver) StartScreenRecording() error { return d.screen.StartRecording() }
 
-	// The stdio redirects are load-bearing: a backgrounded child that inherits
-	// the adb shell's stdout either holds the session open or dies with it.
-	if _, err := d.device.Shell(fmt.Sprintf("screenrecord %s </dev/null >/dev/null 2>&1 &", recordingDevicePath)); err != nil {
-		return fmt.Errorf("start screenrecord: %w", err)
-	}
-	// screenrecord exits straight away on an unwritable path or unsupported
-	// resolution — confirm it is actually running before reporting success.
-	time.Sleep(300 * time.Millisecond)
-	if out, err := d.device.Shell("pgrep screenrecord"); err != nil || strings.TrimSpace(out) == "" {
-		return fmt.Errorf("screenrecord did not start")
-	}
-	return nil
+// StopScreenRecording implements core.ScreenRecorder: it finalizes the
+// recording at hostPath.
+func (d *Driver) StopScreenRecording(hostPath string) error {
+	return d.screen.StopRecording(hostPath)
 }
 
-// StopScreenRecording implements core.ScreenRecorder.
-func (d *Driver) StopScreenRecording(hostPath string) error {
-	if d.device == nil {
-		return fmt.Errorf("screen recording requires device access")
+// recordingStep answers startRecording and stopRecording when they reach
+// the driver. The executor runs them through Capture(), so this happens
+// only when the driver was given no capture session.
+func (d *Driver) recordingStep(step flow.Step) *core.CommandResult {
+	if _, err := d.Capture(); err != nil {
+		return errorResult(err, fmt.Sprintf("%s needs screen capture: %v", step.Type(), err))
 	}
-	if _, err := d.device.Shell("pkill -INT screenrecord"); err != nil {
-		logger.Warn("stop screenrecord: %v", err)
-	}
-	// The MP4 index is written as the process exits; pulling earlier yields an
-	// unplayable file.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		out, _ := d.device.Shell("pgrep screenrecord")
-		if strings.TrimSpace(out) == "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	puller, ok := d.device.(interface {
-		Pull(remotePath, localPath string) error
-	})
-	if !ok {
-		return fmt.Errorf("device does not support pulling files")
-	}
-	if err := puller.Pull(recordingDevicePath, hostPath); err != nil {
-		return fmt.Errorf("pull recording: %w", err)
-	}
-	_, _ = d.device.Shell("rm -f " + recordingDevicePath)
-	return nil
+	err := fmt.Errorf("%s runs in the executor, through the driver's screen capture", step.Type())
+	return errorResult(err, err.Error())
 }

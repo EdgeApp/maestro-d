@@ -14,6 +14,12 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/capture/fmp4"
 )
 
+// ErrEndedEarly is Stop's answer when the recording ended before Stop (it
+// fell behind, ErrLagged, or the source failed) but what it recorded was
+// saved at dest. Callers treat it as saved with a warning; the error
+// wraps the reason too.
+var ErrEndedEarly = errors.New("capture: the recording ended early")
+
 // Seams tests replace: rename moves a finished recording into place, and
 // startLoop runs a recorder's packet loop.
 var (
@@ -156,8 +162,8 @@ func (r *Recorder) put(c Chunk) {
 // Stop ends the recording and moves it to dest: it patches mehd with the
 // duration, appends mfra (every video keyframe and audio fragment with its
 // moof offset), fsyncs, and renames, copying instead across filesystems.
-// The file is kept when the recording ended early; the error says why.
-// Stopping again is a no-op.
+// When the recording ended early the file is still saved, and the error
+// wraps ErrEndedEarly and the reason. Stopping again is a no-op.
 func (r *Recorder) Stop(dest string) error {
 	r.stopMu.Lock()
 	defer r.stopMu.Unlock()
@@ -191,7 +197,7 @@ func (r *Recorder) stop(dest string) error {
 		return err
 	}
 	if early != nil {
-		return fmt.Errorf("capture: the recording ended early: %w", early)
+		return fmt.Errorf("%w: %w", ErrEndedEarly, early)
 	}
 	return nil
 }

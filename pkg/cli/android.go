@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"        // maestro-d: screen capture
+	"github.com/devicelab-dev/maestro-runner/pkg/capture/scrcpy" // maestro-d
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
 	devicelabdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab"
@@ -127,6 +129,7 @@ func CreateAndroidDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	driver, cleanup = attachAndroidCapture(driver, cleanup, dev, info) // maestro-d: screen capture
 
 	// 5. Wrap driver with Flutter VM Service fallback (lazy connection)
 	if !cfg.NoFlutterFallback {
@@ -551,5 +554,26 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 func traceAndroidClient(setLogPath func(string), outputDir string) {
 	if path := tracelog.Path(outputDir); path != "" {
 		setLogPath(path)
+	}
+}
+
+// maestro-d: attachAndroidCapture gives an Android driver its device's
+// screen capture: an on-demand capture.Session over the pinned
+// scrcpy-server, handed to the uiautomator2 or devicelab driver through
+// SetCapture. The returned cleanup closes the session after the driver's
+// own cleanup. A driver without SetCapture is returned unchanged.
+func attachAndroidCapture(driver core.Driver, cleanup func(), dev scrcpy.Device, info device.DeviceInfo) (core.Driver, func()) {
+	c, ok := driver.(interface{ SetCapture(*capture.Session) })
+	if !ok {
+		return driver, cleanup
+	}
+	sdk, _ := strconv.Atoi(strings.TrimSpace(info.SDK))
+	sess := capture.NewSession(scrcpy.New(dev, scrcpy.Config{SDK: sdk}))
+	c.SetCapture(sess)
+	return driver, func() {
+		if cleanup != nil {
+			cleanup()
+		}
+		sess.Close()
 	}
 }

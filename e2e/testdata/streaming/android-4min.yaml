@@ -1,0 +1,11 @@
+appId: com.android.settings
+---
+- launchApp
+- repeat:
+    times: 24
+    commands:
+      - scroll
+      - extendedWaitUntil:
+          visible: "maestro-d-never-present"
+          timeout: 10000
+          optional: true

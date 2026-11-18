@@ -3,6 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
+	"github.com/devicelab-dev/maestro-runner/pkg/capture/fake"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -229,5 +232,113 @@ func TestRecording_DriversWithoutCaptureKeepTheirSteps(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "recordings")); !os.IsNotExist(err) {
 			t.Fatalf("%T: a recordings directory was made", d)
 		}
+	}
+}
+
+// shortSource streams the fake clip for d, then fails, so a recording of
+// it ends before its stop.
+type shortSource struct{ d time.Duration }
+
+func (shortSource) Mode() capture.Mode { return capture.OnDemand }
+func (shortSource) FPSControl() bool   { return true }
+
+func (s shortSource) Run(ctx context.Context, opts capture.Options, emit func(capture.Packet)) error {
+	run, cancel := context.WithTimeout(ctx, s.d)
+	defer cancel()
+	_ = fake.New().Run(run, opts, emit)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return &capture.Unavailable{Reason: capture.ReasonScrcpyFailed, Message: "the server stopped"}
+}
+
+// earlyEndDriver is the mock with a capture session whose source fails
+// after half a second, for the recording steps and for --record.
+type earlyEndDriver struct {
+	*mock.Driver
+	screen capture.DriverCapture
+}
+
+func newEarlyEndDriver(cfg mock.Config) *earlyEndDriver {
+	d := &earlyEndDriver{Driver: mock.New(cfg)}
+	d.screen.Set(capture.NewSession(shortSource{500 * time.Millisecond}))
+	return d
+}
+
+func (d *earlyEndDriver) Capture() (*capture.Session, error)   { return d.screen.Session() }
+func (d *earlyEndDriver) StartScreenRecording() error          { return d.screen.StartRecording() }
+func (d *earlyEndDriver) StopScreenRecording(dst string) error { return d.screen.StopRecording(dst) }
+
+// Review 1.harness-review.2: a recording that ended early is saved, so
+// stopRecording succeeds with the warning in its message.
+func TestRecording_EndedEarlyStepSucceedsWithAWarning(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewSession(context.Background(), newEarlyEndDriver(mock.Config{}), RunnerConfig{OutputDir: dir}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if out := s.Execute(context.Background(), mustStep(t, "startRecording: early")); !out.Success {
+		t.Fatalf("start: %+v", out.Error)
+	}
+	time.Sleep(time.Second)
+	out := s.Execute(context.Background(), mustStep(t, "stopRecording"))
+	if !out.Success || out.Data != "recordings/early.mp4" {
+		t.Fatalf("stop: %+v %v", out.Error, out.Data)
+	}
+	if !strings.HasPrefix(out.Message, "Saved recording recordings/early.mp4 (warning: capture: the recording ended early: ") ||
+		!strings.Contains(out.Message, "the server stopped") {
+		t.Errorf("message %q", out.Message)
+	}
+	checkMP4(t, filepath.Join(dir, "recordings", "early.mp4"))
+}
+
+// Review 1.harness-review.2: --record links a recording that ended early,
+// and --video on-failure still discards it when the flow passed.
+func TestRecording_EndedEarlyRecordIsLinkedAndRetained(t *testing.T) {
+	run := func(mode string) (dir string, detail report.FlowDetail) {
+		dir = t.TempDir()
+		drv := newEarlyEndDriver(mock.Config{StepDelay: 1500 * time.Millisecond})
+		runner := New(drv, RunnerConfig{OutputDir: dir, Artifacts: ArtifactNever, DriverName: "mock", Record: true, RecordMode: mode})
+		f := flow.Flow{SourcePath: "early.yaml", Config: flow.Config{Name: "early"}, Steps: []flow.Step{
+			&flow.WaitForAnimationToEndStep{BaseStep: flow.BaseStep{StepType: flow.StepWaitForAnimationToEnd}},
+		}}
+		res, err := runner.Run(context.Background(), []flow.Flow{f})
+		if err != nil || res.Status != report.StatusPassed {
+			t.Fatalf("run: %v %+v", err, res)
+		}
+		flows, _ := filepath.Glob(filepath.Join(dir, "flows", "*.json"))
+		if len(flows) != 1 {
+			t.Fatalf("flow details %v", flows)
+		}
+		data, err := os.ReadFile(flows[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &detail); err != nil {
+			t.Fatal(err)
+		}
+		return dir, detail
+	}
+
+	dir, detail := run("")
+	if detail.Artifacts.Video == "" {
+		t.Fatal("the recording that ended early is not linked")
+	}
+	checkMP4(t, filepath.Join(dir, detail.Artifacts.Video))
+
+	dir, detail = run("on-failure")
+	if detail.Artifacts.Video != "" {
+		t.Errorf("on-failure linked %s for a passing flow", detail.Artifacts.Video)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "assets", "*", "recording.mp4")); len(left) != 0 {
+		t.Errorf("on-failure kept %v for a passing flow", left)
+	}
+}
+
+func TestRecordingSaved(t *testing.T) {
+	early := fmt.Errorf("%w: %w", capture.ErrEndedEarly, capture.ErrLagged)
+	if !recordingSaved("r", nil) || !recordingSaved("r", early) || recordingSaved("r", errors.New("disk full")) {
+		t.Error("recordingSaved: want nil and ErrEndedEarly saved, any other error not")
 	}
 }
