@@ -59,6 +59,9 @@ type hubEnv struct {
 	// emuAVD, when set, lists a running emulator-5554 running that AVD;
 	// downAVD a shut-down AVD of that name.
 	emuAVD, downAVD string
+	// tv, when set, lists a ready Apple TV, TV-1 "Lab TV"; tvKnown makes
+	// Deps.TVInfo know it.
+	tv, tvKnown bool
 	// lists counts live discoveries; onList, when set, runs in each.
 	lists  atomic.Int32
 	onList func()
@@ -115,6 +118,9 @@ func newHubEnv(t *testing.T, cfg Config) *hubEnv {
 		if env.downAVD != "" {
 			all = append(all, DeviceInfo{ID: AVDPrefix + env.downAVD, Platform: "android", Kind: "emulator", Name: env.downAVD, State: "Shutdown"})
 		}
+		if env.tv {
+			all = append(all, DeviceInfo{ID: "TV-1", Platform: "ios", Kind: "tv", Name: "Lab TV", OSVersion: "26.3", State: "connected", Ready: true})
+		}
 		if env.emuAVD != "" {
 			all = append(all, DeviceInfo{ID: "emulator-5554", Platform: "android", Kind: "emulator", Name: env.emuAVD, State: "device", Ready: true})
 		}
@@ -134,6 +140,14 @@ func newHubEnv(t *testing.T, cfg Config) *hubEnv {
 		cfg.HTTPAddr = ":7433"
 	}
 	cfg.ReportsDir = filepath.Join(t.TempDir(), "reports")
+	deps.TVInfo = func(id string) (string, bool) {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		if env.tvKnown && id == "TV-1" {
+			return "Lab TV", true
+		}
+		return "", false
+	}
 	env.s = New(cfg, deps)
 	env.s.info = Info{Name: cfg.Name, PID: os.Getpid(), APIVersion: APIVersion, Version: "test", Hub: "hubtest"}
 	env.s.leases.now = env.clock.now
@@ -2612,4 +2626,136 @@ func TestLeases_PendingBodyReadEndsBeforeServeLeasedReturns(t *testing.T) {
 		t.Fatalf("answer %d %s", rec.Code, rec.Body.Bytes())
 	}
 	waitFor(t, func() bool { return !env.s.leases.releasing(DeviceInfo{ID: "mock-1"}) })
+}
+
+func TestLeaseSelector_TVsOnlyWhenAsked(t *testing.T) {
+	tv := DeviceInfo{ID: "tv-1", Platform: "ios", Kind: "tv", Name: "Lab TV", Ready: true}
+	phone := DeviceInfo{ID: "phone-1", Platform: "ios", Kind: "device", Name: "iPhone", Ready: true}
+	for _, tc := range []struct {
+		sel       LeaseSelector
+		tv, phone bool
+	}{
+		{LeaseSelector{Platform: "ios"}, false, true},
+		{LeaseSelector{}, false, true},
+		{LeaseSelector{Platform: "ios", Kind: "device"}, false, true},
+		{LeaseSelector{Platform: "ios", Kind: "tv"}, true, false},
+		{LeaseSelector{Kind: "TV"}, true, false},
+		{LeaseSelector{Name: "Lab TV"}, true, false},
+		{LeaseSelector{Name: "tv-1"}, true, false},
+	} {
+		if got := tc.sel.matches(tv); got != tc.tv {
+			t.Errorf("%s on the TV: %v", tc.sel, got)
+		}
+		if got := tc.sel.matches(phone); got != tc.phone {
+			t.Errorf("%s on the phone: %v", tc.sel, got)
+		}
+	}
+}
+
+// A hub shares a TV only when --share-tv names it: a TV pairs with several
+// Macs, and naming it on one hub keeps one owner for it. Unnamed, no route
+// reaches it; named, the rest of the pool is unchanged.
+func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
+	ctx := context.Background()
+	remoteIDs := func(env *hubEnv) string {
+		devs, err := env.remote.Devices(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, d := range devs {
+			ids = append(ids, d.ID)
+		}
+		return strings.Join(ids, ",")
+	}
+	withTV := func(cfg Config) *hubEnv {
+		env := newHubEnv(t, cfg)
+		env.mu.Lock()
+		env.tv, env.tvKnown = true, true
+		env.mu.Unlock()
+		return env
+	}
+
+	for _, cfg := range []Config{{}, {ShareDevices: []string{"Lab TV", "mock-1"}}} {
+		env := withTV(cfg)
+		if got := remoteIDs(env); strings.Contains(got, "TV-1") || !strings.Contains(got, "mock-1") {
+			t.Fatalf("%+v: remote listing %s", cfg.ShareDevices, got)
+		}
+		if all, _ := env.local.Devices(ctx, ""); len(all) != 5 {
+			t.Fatalf("local listing: %d", len(all))
+		}
+		_, err := env.remote.Device(ctx, "TV-1")
+		wantErrCode(t, err, CodeDeviceNotFound)
+		wantErrCode(t, env.remote.StopDevice(ctx, "TV-1", false), CodeDeviceNotFound)
+		_, err = env.remote.AcquireLease(ctx, LeaseRequest{Device: "TV-1"})
+		wantErrCode(t, err, CodeDeviceNotFound)
+		_, err = env.remote.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Kind: "tv"}})
+		wantErrCode(t, err, CodeDeviceNotFound)
+		evCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err = env.remote.Events(evCtx, "TV-1", 0, func(Event) bool { return false })
+		cancel()
+		wantErrCode(t, err, CodeDeviceNotFound)
+		env.lease(env.remote, LeaseRequest{Device: "mock-1"})
+		// The unix socket reaches it.
+		if _, err := env.local.Device(ctx, "TV-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Named by --share-tv: shared, and every other device stays shared.
+	named := withTV(Config{ShareTVs: []string{"Lab TV"}})
+	if got := remoteIDs(named); got != "SIM-DOWN,SIM-UP,TV-1,mock-1,mock-2" {
+		t.Fatalf("named TV: remote listing %s", got)
+	}
+	if _, err := named.remote.Device(ctx, "TV-1"); err != nil {
+		t.Fatal(err)
+	}
+	named.lease(named.remote, LeaseRequest{Select: &LeaseSelector{Kind: "tv"}})
+	named.lease(named.remote, LeaseRequest{Device: "mock-2"})
+}
+
+// A shared TV driven remotely is looked up without discovery: the share
+// answer comes from Deps.TVInfo, not the registry.
+func TestLeases_SharedTVNoDiscoveryPerRequest(t *testing.T) {
+	ctx := context.Background()
+	env := newHubEnv(t, Config{ShareTVs: []string{"Lab TV"}})
+	env.mu.Lock()
+	env.tv, env.tvKnown = true, true
+	env.mu.Unlock()
+	env.lease(env.remote, LeaseRequest{Device: "TV-1", Attach: &AttachConfig{Platform: "mock"}})
+	before := env.lists.Load()
+	for i := 0; i < 5; i++ {
+		if _, err := env.remote.Command(ctx, "TV-1", "tapOn", "x", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := env.lists.Load() - before; got != 0 {
+		t.Fatalf("five commands on a shared TV ran %d discoveries", got)
+	}
+}
+
+// An attached TV stays private while Deps.TVInfo cannot answer (devicectl
+// down): the registry's record of it says it is a TV.
+func TestLeases_UnsharedTVPrivateWithoutTVInfo(t *testing.T) {
+	ctx := context.Background()
+	env := newHubEnv(t, Config{})
+	env.mu.Lock()
+	env.tv = true
+	env.mu.Unlock()
+	env.s.registry.MarkAttached(DeviceInfo{ID: "TV-1", Platform: "ios", Kind: "tv", Name: "Lab TV"})
+	_, err := env.remote.Device(ctx, "TV-1")
+	wantErrCode(t, err, CodeDeviceNotFound)
+	wantErrCode(t, env.remote.StopDevice(ctx, "TV-1", false), CodeDeviceNotFound)
+	if _, err := env.local.Device(ctx, "TV-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A plain daemon (not a hub) treats a TV like any other device.
+func TestShared_TVOnPlainDaemon(t *testing.T) {
+	s := &Server{cfg: Config{}, deps: Deps{TVInfo: func(string) (string, bool) { return "Lab TV", true }}}
+	s.registry = NewRegistry("plain", func(string) []DeviceInfo { return nil })
+	if !s.shared("TV-1") || !s.sharedInfo(DeviceInfo{ID: "TV-1", Kind: "tv"}) {
+		t.Fatal("a plain daemon hid a TV")
+	}
 }

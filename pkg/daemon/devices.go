@@ -147,6 +147,17 @@ func (r *Registry) Lookup(id string) (DeviceInfo, bool) {
 	return DeviceInfo{}, false
 }
 
+// Record returns the persisted record of id, without asking adb or simctl.
+func (r *Registry) Record(id string) (DeviceInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[id]
+	if !ok {
+		return DeviceInfo{}, false
+	}
+	return *rec, true
+}
+
 // Held returns the records of the devices this daemon has attached or
 // booted, without asking adb or simctl.
 func (r *Registry) Held() []DeviceInfo {

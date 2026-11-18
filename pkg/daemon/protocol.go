@@ -416,7 +416,7 @@ type DeviceInfo struct {
 	Hub       string `json:"hub,omitempty"`
 	LocalID   string `json:"localId,omitempty"`
 	Platform  string `json:"platform"`       // android | ios | web | mock
-	Kind      string `json:"kind,omitempty"` // device | emulator | simulator
+	Kind      string `json:"kind,omitempty"` // device | emulator | simulator | tv
 	Name      string `json:"name,omitempty"`
 	OSVersion string `json:"osVersion,omitempty"`
 	State     string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …

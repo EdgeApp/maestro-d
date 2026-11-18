@@ -285,48 +285,46 @@ var devicectlInfoTimeout = 10 * time.Second
 // DevicectlDeviceInfo reads udid's details from devicectl. It works for
 // devices usbmuxd does not list.
 func DevicectlDeviceInfo(udid string) (DevicectlDevice, error) {
-	f, err := os.CreateTemp("", "maestro-d-devicectl-*.json")
-	if err != nil {
-		return DevicectlDevice{}, err
-	}
-	path := f.Name()
-	_ = f.Close()
-	defer func() { _ = os.Remove(path) }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), devicectlInfoTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "info", "details",
-		"--device", udid, "--json-output", path, "-q")
-	// A child that outlives xcrun and holds its output open must not keep
-	// CombinedOutput waiting past the timeout.
-	cmd.WaitDelay = time.Second
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return DevicectlDevice{}, fmt.Errorf("devicectl device info details timed out after %v", devicectlInfoTimeout)
-	}
-	if err != nil {
-		return DevicectlDevice{}, fmt.Errorf("devicectl device info details: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	data, err := os.ReadFile(path)
+	data, err := runDevicectlJSON(devicectlInfoTimeout, "device", "info", "details", "--device", udid)
 	if err != nil {
 		return DevicectlDevice{}, err
 	}
 	return parseDevicectlDetails(data)
 }
 
+// runDevicectlJSON runs `xcrun devicectl <args> --json-output <tmp> -q`
+// and returns the JSON it wrote. devicectl hangs on a locked device, one
+// still pairing, or a wedged CoreDevice, so the call is bounded by timeout.
+func runDevicectlJSON(timeout time.Duration, args ...string) ([]byte, error) {
+	f, err := os.CreateTemp("", "maestro-d-devicectl-*.json")
+	if err != nil {
+		return nil, err
+	}
+	path := f.Name()
+	_ = f.Close()
+	defer func() { _ = os.Remove(path) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	what := "devicectl " + strings.Join(args, " ")
+	cmd := exec.CommandContext(ctx, "xcrun", append(append([]string{"devicectl"}, args...), "--json-output", path, "-q")...)
+	// A child that outlives xcrun and holds its output open must not keep
+	// CombinedOutput waiting past the timeout.
+	cmd.WaitDelay = 500 * time.Millisecond
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("%s timed out after %v", what, timeout)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %s", what, err, strings.TrimSpace(string(out)))
+	}
+	return os.ReadFile(path)
+}
+
 // parseDevicectlDetails reads devicectl's --json-output for one device.
 func parseDevicectlDetails(data []byte) (DevicectlDevice, error) {
 	var doc struct {
-		Result struct {
-			ConnectionProperties struct {
-				TunnelIPAddress string `json:"tunnelIPAddress"`
-				TunnelState     string `json:"tunnelState"`
-			} `json:"connectionProperties"`
-			DeviceProperties struct {
-				Name            string `json:"name"`
-				OSVersionNumber string `json:"osVersionNumber"`
-			} `json:"deviceProperties"`
-		} `json:"result"`
+		Result devicectlRecord `json:"result"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return DevicectlDevice{}, fmt.Errorf("devicectl output: %w", err)

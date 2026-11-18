@@ -66,7 +66,8 @@ token of every request it is forwarded) and the **same peer token**.
 | `--peer-token P` / `--peer-token-file F` | required | The mesh's shared secret, sent on every peer link |
 | `--tls-cert F --tls-key F` | none | Serve HTTPS and WSS |
 | `--peer-ca F` | system roots | Trust root for peers' TLS |
-| `--share-device ID\|NAME` | every device (repeatable) | Only these local devices join the pool; the rest stay private to this machine |
+| `--share-device ID\|NAME` | every device (repeatable) | Only these local devices join the pool; the rest stay private to this machine. Never a TV: TVs join only through `--share-tv` |
+| `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner. Naming a TV leaves `--share-device`'s pool as it is |
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it |
 | `--allow-remote-shell` | off | Let remote callers run `runShell` |
 | `--pass-env NAME` | none (repeatable) | A variable of the hub's environment that sessions may import |

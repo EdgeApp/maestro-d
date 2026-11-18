@@ -77,6 +77,7 @@ type hubOpts struct {
 	name      string
 	tokenFile string
 	share     []string
+	shareTV   []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
 	leaseMax      []string
 	remoteShell   bool

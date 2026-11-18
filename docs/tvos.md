@@ -1,6 +1,61 @@
-# Explicit tvOS simulator sessions
+# tvOS sessions
 
-The Apple WDA driver supports explicitly selected tvOS simulators. Automatic device discovery retains its existing iOS behavior.
+The Apple WDA driver runs tvOS simulators and physical Apple TVs.
+
+## Physical Apple TVs
+
+An Apple TV pairs with a Mac over the network, never over USB, so maestro-d
+finds it through `xcrun devicectl list devices`. Pair it once in Xcode
+(Window › Devices and Simulators) and turn on developer mode on the TV. Every
+paired TV is then listed as platform `ios`, kind `tv`:
+
+```sh
+maestro-d device list
+# 00000000000000000000000000000000000000a1  ios  tv  connected  Lab TV 26.3
+```
+
+A TV that is not paired, not in developer mode, or out of reach (off, or on
+another network) is not ready, and is listed only with `--all` (a daemon's
+listing always includes it). A listing gives devicectl 1.5 s
+and reuses its answer, or its failure, for 5 s; one caller asks devicectl at
+a time while the others take the last answer, which stands in for a minute
+while devicectl fails. So a stuck CoreDevice costs a listing its TVs, not
+the whole listing.
+`attach --device <udid> --team-id <team>` reads `devicectl list devices` to
+tell a TV from a phone (only for a device usbmuxd does not list; when
+devicectl fails there, attach fails with its error rather than guessing),
+builds WebDriverAgent's tvOS target
+for that TV once (cached per tvOS version and team), installs and starts it
+over CoreDevice, and reaches it at the TV's CoreDevice tunnel address.
+`install` sends an `.ipa` or `.app` with `devicectl device install app`; the
+package must be signed for the TV (an ad-hoc profile that lists it, or a
+development profile). `get screenshot`, element queries and assertions go
+through WebDriverAgent. TVs have no touch screen: move focus with
+`pressKey` (`up`, `down`, `left`, `right`, `select`, `menu`, `home`,
+`playPause`); WebDriverAgent sends them as Siri Remote presses. Touchpad
+swipes on a physical TV need the Companion pairing below.
+
+A TV can pair with several Macs, so a hub shares one only when `--share-tv`
+names it (by id or name); name each TV on exactly one hub. `--share-tv`
+leaves the rest of the pool as it is: without `--share-device` the hub still
+shares every phone, simulator and emulator. An unnamed TV is private to the
+machine: no remote route lists, reads, stops or leases it. A shared TV is
+leased like any device. A selector picks a TV only when it asks for
+`--kind tv` or names the TV, so `lease --platform ios` still means a phone or
+tablet:
+
+```sh
+maestro-d hub start --share-tv "Lab TV" …
+maestro-d lease --kind tv --target-hub=hub.lan
+maestro-d lease --name "Lab TV" --target-hub=hub.lan
+```
+
+WebDriverAgent's first build signs with the login keychain, which a hub
+started over SSH cannot use (`errSecInternalComponent`). Run that hub as the
+launchd service (`hub service install`, docs/daemon/hub.md), or build once
+from a GUI session.
+
+## Simulators
 
 ```sh
 maestro-d attach --daemon tv-work --platform ios --device "$TV_SIMULATOR_UDID" --app-file "$TV_APP_FILE"

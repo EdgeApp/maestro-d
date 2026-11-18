@@ -60,8 +60,10 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
 	strFlag("peer-ca", "PEM trust root for peers' TLS (default: the system roots)", nil,
 		func(o *daemonOpts, v string) { o.hub.peerCA = v }),
-	{name: "share-device", kind: kindSlice, usage: "Share only this device, by id or name (a running emulator's AVD name); repeatable. Default: every device",
+	{name: "share-device", kind: kindSlice, usage: "Share only this device, by id or name (a running emulator's AVD name); repeatable. Default: every device (TVs are shared only with --share-tv)",
 		apply: func(o *daemonOpts, v string) error { o.hub.share = append(o.hub.share, v); return nil }},
+	{name: "share-tv", kind: kindSlice, usage: "Share this Apple TV, by id or name; repeatable. A TV pairs with several Macs, so name each TV on one hub only. Default: none",
+		apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
 	{name: "lease-max", kind: kindSlice, value: "8h", usage: "The longest lease window, DURATION (8h, 90m, or seconds) for the whole hub, or DEVICE=DURATION for one device by id or name; repeatable",
 		apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
 	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
@@ -247,6 +249,9 @@ func hubChildArgs(o *daemonOpts) []string {
 	for _, d := range o.hub.share {
 		args = append(args, "--share-device", d)
 	}
+	for _, d := range o.hub.shareTV {
+		args = append(args, "--share-tv", d)
+	}
 	for _, m := range o.hub.leaseMax {
 		args = append(args, "--lease-max", m)
 	}
@@ -366,6 +371,9 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		fmt.Fprintf(os.Stderr, "warning: cannot open daemon.log: %v\n", err)
 	}
 	defer logger.Close()
+	// Read this host's TVs before serving, so the hub knows them (and keeps
+	// them private unless --share-tv names them) from its first request.
+	cachedTVs()
 	mesh := newMesh(hub.Config{
 		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
 		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version,
@@ -384,6 +392,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		Hub:              true,
 		HubName:          o.hub.name,
 		ShareDevices:     o.hub.share,
+		ShareTVs:         o.hub.shareTV,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,
 		Advertise:        o.hub.advertise,

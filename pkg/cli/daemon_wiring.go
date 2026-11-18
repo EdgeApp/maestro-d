@@ -40,6 +40,7 @@ func daemonDeps() daemon.Deps {
 		InstallApp:         daemonInstallApp,
 		UninstallApp:       daemonUninstallApp,
 		AppID:              appIDOf,
+		TVInfo:             physicalTVInfo,
 	}
 }
 
@@ -186,6 +187,8 @@ func daemonNewDriver(ctx context.Context, id string, cfg daemon.AttachConfig) (c
 			info.Kind = "simulator"
 		case pi.IsSimulator:
 			info.Kind = "emulator"
+		case isTVDriver(driver):
+			info.Kind = "tv"
 		default:
 			info.Kind = "device"
 		}
@@ -206,6 +209,12 @@ func daemonNewDriver(ctx context.Context, id string, cfg daemon.AttachConfig) (c
 		info.Kind = "device"
 	}
 	return driver, info, cleanup, nil
+}
+
+// isTVDriver reports whether driver runs a physical Apple TV.
+func isTVDriver(driver core.Driver) bool {
+	tv, ok := driver.(interface{ IsTV() bool })
+	return ok && tv.IsTV()
 }
 
 // envMockDevices lists mock devices for tests (MAESTRO_D_MOCK_DEVICES=

@@ -43,8 +43,13 @@ type Config struct {
 	// HubName names a hub (default: the short host name).
 	HubName string
 	// ShareDevices, on a hub, limits the devices remote callers see and
-	// may lease to these ids or names; empty shares every device.
+	// may lease to these ids or names; empty shares every device but TVs.
 	ShareDevices []string
+	// ShareTVs, on a hub, names the Apple TVs it shares, by id or name. A
+	// TV pairs with several Macs, so it is shared only when named, and
+	// naming it on one hub keeps one owner for it. TVs are left out of
+	// ShareDevices either way.
+	ShareTVs []string
 	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
@@ -315,9 +320,12 @@ func (s *Server) Run(ctx context.Context) error {
 		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
 	}
 	if s.cfg.Hub {
-		share := "every device"
+		share := "every device but TVs"
 		if len(s.cfg.ShareDevices) > 0 {
 			share = strings.Join(s.cfg.ShareDevices, ", ")
+		}
+		if len(s.cfg.ShareTVs) > 0 {
+			share += "; TVs " + strings.Join(s.cfg.ShareTVs, ", ")
 		}
 		logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.info.Hub, s.hubLeaseMax(),
 			leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)

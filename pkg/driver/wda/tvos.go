@@ -27,7 +27,7 @@ func (r *Runner) configureRuntime() error {
 			return r.runtimeError
 		}
 		if _, exists := targets[r.deviceUDID]; exists {
-			r.simulatorPlatform = "tvOS"
+			r.runtimePlatform = "tvOS"
 			return nil
 		}
 	}
@@ -36,27 +36,41 @@ func (r *Runner) configureRuntime() error {
 	if list == nil {
 		list = simulator.ListSimulators
 	}
-	devices, err := list()
-	if err != nil {
-		return nil
+	if devices, err := list(); err == nil {
+		for _, device := range devices {
+			if device.UDID != r.deviceUDID || !device.IsAvailable {
+				continue
+			}
+			if device.Platform != "iOS" && device.Platform != "tvOS" {
+				r.runtimeError = fmt.Errorf("WDA does not support the %s simulator", device.Platform)
+				return r.runtimeError
+			}
+			r.runtimePlatform = device.Platform
+			r.runtimeVersion = device.OSVersion
+			return nil
+		}
 	}
-	for _, device := range devices {
-		if device.UDID != r.deviceUDID || !device.IsAvailable {
-			continue
-		}
-		if device.Platform != "iOS" && device.Platform != "tvOS" {
-			r.runtimeError = fmt.Errorf("WDA does not support the %s simulator", device.Platform)
-			return r.runtimeError
-		}
-		r.simulatorPlatform = device.Platform
-		r.simulatorVersion = device.OSVersion
-		break
+
+	// A physical Apple TV pairs over the network, so only devicectl knows
+	// it is a TV.
+	lookup := r.lookupTV
+	if lookup == nil {
+		lookup = physicalTVLookup
+	}
+	tv, isTV, err := lookup(r.deviceUDID)
+	if err != nil {
+		r.runtimeError = fmt.Errorf("cannot tell whether %s is an Apple TV: %w", r.deviceUDID, err)
+		return r.runtimeError
+	}
+	if isTV {
+		r.runtimePlatform = "tvOS"
+		r.runtimeVersion = tv.OSVersion
 	}
 	return nil
 }
 
 // IsTV reports the explicitly selected runtime after Build has validated it.
-func (r *Runner) IsTV() bool { return r.simulatorPlatform == "tvOS" }
+func (r *Runner) IsTV() bool { return r.runtimePlatform == "tvOS" }
 func (r *Runner) runnerScheme() string {
 	if r.IsTV() {
 		return "WebDriverAgentRunner_tvOS"
@@ -88,3 +102,6 @@ func tvRemoteButton(key string) string {
 
 // SetTVMode enables remote-only keys without changing iOS keyboard behavior.
 func (d *Driver) SetTVMode(enabled bool) { d.isTV = enabled }
+
+// IsTV reports whether the driver runs a TV.
+func (d *Driver) IsTV() bool { return d.isTV }

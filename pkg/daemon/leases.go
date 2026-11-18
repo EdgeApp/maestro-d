@@ -84,7 +84,9 @@ type DeviceLease struct {
 // LeaseSelector picks a device by its properties. Every field set must
 // match: platform and kind exactly, name as the device's name or id,
 // osVersion as the version or a prefix of it ("26" matches "26.5"), hub as
-// the hub's name.
+// the hub's name. A TV (kind tv) is picked only by a selector that asks
+// for kind tv or names the TV: a client asking for an iOS device wants a
+// phone or tablet.
 type LeaseSelector struct {
 	Platform  string `json:"platform,omitempty"`
 	Kind      string `json:"kind,omitempty"`
@@ -618,8 +620,13 @@ func shareMatches(entry string, d DeviceInfo) bool {
 		(strings.HasPrefix(d.ID, AVDPrefix) && strings.EqualFold(entry, strings.TrimPrefix(d.ID, AVDPrefix)))
 }
 
-// sharedInfo reports whether a listed device is in the hub's pool.
+// sharedInfo reports whether a listed device is in the hub's pool. On a hub
+// a TV is in it only when --share-tv names it (see Config.ShareTVs); any other
+// device when --share-device names it, or when that list is empty.
 func (s *Server) sharedInfo(d DeviceInfo) bool {
+	if s.cfg.Hub && strings.EqualFold(d.Kind, "tv") {
+		return s.sharedTV(d)
+	}
 	if len(s.cfg.ShareDevices) == 0 {
 		return true
 	}
@@ -629,6 +636,32 @@ func (s *Server) sharedInfo(d DeviceInfo) bool {
 		}
 	}
 	return false
+}
+
+// sharedTV reports whether --share-tv names the TV d.
+func (s *Server) sharedTV(d DeviceInfo) bool {
+	for _, entry := range s.cfg.ShareTVs {
+		if shareMatches(entry, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// tvInfo reports whether id is an Apple TV on this host, and its name: from
+// Deps.TVInfo, or from the registry's record of a TV this daemon attached.
+// Neither runs discovery, and neither forgets a TV while devicectl fails,
+// so an unshared TV stays private.
+func (s *Server) tvInfo(id string) (DeviceInfo, bool) {
+	if s.deps.TVInfo != nil {
+		if name, ok := s.deps.TVInfo(id); ok {
+			return DeviceInfo{ID: id, Kind: "tv", Name: name}, true
+		}
+	}
+	if rec, ok := s.registry.Record(id); ok && strings.EqualFold(rec.Kind, "tv") {
+		return rec, true
+	}
+	return DeviceInfo{}, false
 }
 
 // shareCacheFor is how long shared remembers an answer it may not keep:
@@ -650,6 +683,11 @@ type shareAnswer struct {
 // them to a remote caller, look the device up once, not per request and
 // per event: a lookup runs live discovery (adb, emulator, simctl).
 func (s *Server) shared(id string) bool {
+	if s.cfg.Hub {
+		if tv, ok := s.tvInfo(id); ok {
+			return s.sharedTV(tv)
+		}
+	}
 	if len(s.cfg.ShareDevices) == 0 {
 		return true
 	}
@@ -1141,6 +1179,10 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 			writeError(w, Errorf(CodeDeviceNotFound, "device %s is not listed on hub %s", req.Device, s.hubName()))
 			return
 		}
+		if caller.Remote && !s.sharedInfo(d) {
+			writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", req.Device))
+			return
+		}
 		entry, e = s.leaseDevice(d, holder, req.TTLSec, claimNone)
 	} else {
 		entry, e = s.leaseSelect(r, *req.Select, holder, req.TTLSec)
@@ -1508,6 +1550,9 @@ func (sel LeaseSelector) matches(d DeviceInfo) bool {
 		return false
 	}
 	if sel.Kind != "" && !strings.EqualFold(sel.Kind, d.Kind) {
+		return false
+	}
+	if sel.Kind == "" && sel.Name == "" && strings.EqualFold(d.Kind, "tv") {
 		return false
 	}
 	if sel.Name != "" && sel.Name != d.ID && !strings.EqualFold(sel.Name, d.Name) {

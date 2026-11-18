@@ -39,4 +39,11 @@ type Deps struct {
 	InstallApp   func(ctx context.Context, deviceID, platform, path string) error
 	UninstallApp func(ctx context.Context, deviceID, platform, appID string) error
 	AppID        func(path string) (string, error)
+
+	// TVInfo reports whether id is a physical Apple TV this host has ever
+	// listed, and its name. It answers from memory, never running devicectl,
+	// and a TV once seen stays a TV, so the answer holds while devicectl
+	// fails. nil means no TVs. A hub shares a TV only when --share-tv names
+	// it.
+	TVInfo func(id string) (name string, ok bool)
 }

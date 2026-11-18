@@ -55,11 +55,14 @@ const (
 
 // Runner handles building and running WDA on iOS devices.
 type Runner struct {
-	runtimeChecked      bool
-	runtimeError        error
-	simulatorPlatform   string
-	simulatorVersion    string
-	listSimulators      func() ([]simulator.SimulatorDevice, error)
+	runtimeChecked  bool
+	runtimeError    error
+	runtimePlatform string
+	runtimeVersion  string
+	listSimulators  func() ([]simulator.SimulatorDevice, error)
+	// lookupTV reports whether a physical device is an Apple TV; nil means
+	// physicalTVLookup.
+	lookupTV            func(udid string) (DevicectlTV, bool, error)
 	deviceUDID          string
 	teamID              string
 	wdaBundleID         string
@@ -655,8 +658,8 @@ func (r *Runner) isSimulator() (bool, error) {
 
 // getIOSVersion returns the iOS version of the device.
 func (r *Runner) getIOSVersion() (string, error) {
-	if r.simulatorVersion != "" {
-		return r.simulatorVersion, nil
+	if r.runtimeVersion != "" {
+		return r.runtimeVersion, nil
 	}
 	// Try simctl first (for simulators)
 	cmd := exec.Command("xcrun", "simctl", "list", "devices", "-j")
