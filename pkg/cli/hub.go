@@ -384,6 +384,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return err
 	}
 	srv := daemon.New(daemon.Config{
+		KeepRunDir:       serviceInstalled,
 		Name:             o.Name,
 		HTTPAddr:         o.HTTPAddr,
 		Token:            token,

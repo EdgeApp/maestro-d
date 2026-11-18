@@ -48,6 +48,10 @@ against `cwd` (default `process.cwd()`), so a script that writes a
 screenshot and reads it back runs unchanged. `device.installApp(file)`,
 `device.uninstallApp(appId)`, `device.artifacts()` and
 `device.artifact(path)` are `POST/DELETE …/apps` and `GET …/artifacts`.
+Those artifacts are fetchable while the device is attached. The report
+directory stays after `detach()` for local readers and is swept 3 days after
+its last write; `attach({…, discardReports: true})` deletes it at detach
+instead.
 
 Whole flows and step lists run on the hub as
 [flow bundles](rest.md#flow-bundles). `device.flow({file})` packs the file

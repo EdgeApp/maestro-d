@@ -129,8 +129,3 @@ func TestCanonicalDirJoinsSpellings(t *testing.T) {
 		t.Errorf("two spellings counted apart: %v", s.reportUsers)
 	}
 }
-
-func present(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}

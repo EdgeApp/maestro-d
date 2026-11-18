@@ -29,6 +29,10 @@ type daemonOpts struct {
 	NoSpawn bool
 	Verbose bool
 
+	// gc
+	DryRun            bool
+	IncludeBuildCache bool
+
 	// Daemon spawn options (start, or auto-start from a one-shot).
 	IdleTimeout  int // seconds; 0 = default, -1 = never
 	HTTPAddr     string

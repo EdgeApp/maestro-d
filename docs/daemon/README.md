@@ -89,7 +89,7 @@ overrides the root):
 | `devices.json` | devices this daemon booted (ownership survives a crash so `--orphans` can clean up) |
 | `startup.log` | the spawned process's stdout/stderr until it was ready (shown when spawning fails) |
 | `daemon.log` | the daemon's log |
-| `reports/<device>/<timestamp>/` | report directory of each attach: screenshots, hierarchies, `report.json` |
+| `reports/<device>/<timestamp>/` | report directory of each attach: `report.json`, `junit-report.xml`, `flows/`, `assets/` (failure screenshots, hierarchies), `outputs/`; and `client.log` with `MAESTRO_D_ANDROID_TRACE=1` |
 
 Drivers, caches and downloaded browsers live in the same `~/.maestro-d`,
 under `bin/`, `drivers/`, `cache/` and `browsers/`. The binary resolves that
@@ -98,6 +98,33 @@ upstream's variable name), else the parent of its `bin/` directory — so
 installing to `~/.maestro-d/bin/maestro-d` is all it takes. maestro-d
 deliberately keeps its own home rather than sharing `~/.maestro-runner`, so
 installing it cannot disturb an existing maestro-runner.
+
+### What maestro-d keeps on disk
+
+maestro-d keeps only what a later run reuses. Each daemon sweeps its home
+half a minute after it starts and then hourly (`maestro-d gc` runs the same sweep on demand); the iOS
+runners prune their build caches when they start.
+
+| path | kept | removed |
+| --- | --- | --- |
+| `blobs/sha256/`, `blobs/partial/` | uploaded app packages, reused by later installs | when unused for 24 hours |
+| `run/<name>/reports/<device>/<ts>/` | the session's report, after detach too | 3 days after its last write, unless a live daemon still lists it; at detach with `discardReports` |
+| `run/<name>/reports/…/blobs/`, `bundles/` | while a session in that directory is attached | at detach of the last session using the directory |
+| `run/<name>/` | while its daemon runs | 7 days after its last write, once the daemon is gone |
+| `$TMPDIR/rod/user-data/<id>/` | while the web session runs | when the session closes; an orphan a day idle (a week where `ps` is unavailable) |
+| `cache/wda-builds/<config>/` | the WebDriverAgent build | unused for 30 days; a real-device build only once this host has compiled a build for its team since |
+| `cache/wda-builds/<config>/results/` | the running test's result bundle | when the runner stops |
+| `cache/devicelab-ios-runner-builds/`, `cache/embedded-runner-src/` | the runner build and source in use | unused for 30 days |
+| `bin/`, `drivers/`, `browsers/`, `profiles/`, `hub/`, `leases.json` | always | never |
+
+On Windows, where neither a daemon's lock nor its pid can be tested, the
+sweep leaves report and run directories alone and deletes only blobs and
+Chrome profiles.
+
+The Android drivers trace nothing by default. With
+`MAESTRO_D_ANDROID_TRACE=1` they write `client.log` into the session's
+report directory, truncated at 50 MB, with typed and pasted text replaced
+by `<redacted N chars>`.
 
 ## Errors and exit codes
 
