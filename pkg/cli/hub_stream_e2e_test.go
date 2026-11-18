@@ -1,7 +1,8 @@
 package cli
 
-// hub_stream_e2e_test.go: a screen stream across two hubs (I7) and the
-// viewer page and token on a hub's TCP listener (the hub half of I5).
+// hub_stream_e2e_test.go: a screen stream across two hubs (I7), five
+// concurrent streams beside an artifact download (I8), and the viewer page
+// and token on a hub's TCP listener (the hub half of I5).
 
 import (
 	"context"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,6 +83,55 @@ func TestE2E_HubStream(t *testing.T) {
 	}
 	if d := time.Duration(firstAt.Load()); d == 0 || d > time.Second {
 		t.Fatalf("first bytes after %v", d)
+	}
+
+	// I8: five concurrent streams and an artifact download across the
+	// mesh all complete: streams take no bulk slot, so none waits behind
+	// another or answers PEER_UNAVAILABLE.
+	if _, err := c.Command(ctx, "mock-1@hub-b", "startRecording", "clip", true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	if _, err := c.Command(ctx, "mock-1@hub-b", "stopRecording", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	sizes := make([]atomic.Int64, 6)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sctx, scancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer scancel()
+			_, err := c.Stream(sctx, "mock-1@hub-b", daemon.StreamOptions{Duration: 3 * time.Second}, writerFunc(func(p []byte) (int, error) {
+				sizes[i].Add(int64(len(p)))
+				return len(p), nil
+			}))
+			errs <- err
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		actx, acancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer acancel()
+		errs <- c.Artifact(actx, "mock-1@hub-b", "recordings/clip.mp4", writerFunc(func(p []byte) (int, error) {
+			sizes[5].Add(int64(len(p)))
+			return len(p), nil
+		}))
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent stream or artifact: %v", err)
+		}
+	}
+	for i := range sizes {
+		if sizes[i].Load() < 1000 {
+			t.Fatalf("transfer %d moved %d bytes", i, sizes[i].Load())
+		}
 	}
 
 	// I5 on a hub: the viewer without a token, a stream without one 401.

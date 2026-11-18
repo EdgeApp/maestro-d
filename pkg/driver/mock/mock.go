@@ -3,9 +3,7 @@ package mock
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -23,11 +21,12 @@ type Driver struct {
 	// Internal state
 	stepCount int
 
-	// maestro-d: the fake capture session (created on first use) and the
-	// --record recorder on it.
-	capMu    sync.Mutex
-	session  *capture.Session
-	recorder *capture.Recorder
+	// maestro-d: the fake capture session (created on first use, under
+	// capMu) and the --record recording on it, kept by screen as every
+	// capture driver's are.
+	capMu   sync.Mutex
+	session *capture.Session
+	screen  capture.DriverCapture
 }
 
 // Config configures mock driver behavior.
@@ -190,36 +189,23 @@ func (d *Driver) Capture() (*capture.Session, error) {
 	defer d.capMu.Unlock()
 	if d.session == nil {
 		d.session = capture.NewSession(fake.New())
+		d.screen.Set(d.session)
 	}
 	return d.session, nil
 }
 
-// StartScreenRecording records the capture session into a temporary file.
+// StartScreenRecording records the capture session into a temporary file
+// (capture.DriverCapture).
 func (d *Driver) StartScreenRecording() error {
-	s, _ := d.Capture()
-	d.capMu.Lock()
-	defer d.capMu.Unlock()
-	if d.recorder != nil {
-		return errors.New("a recording is already running")
-	}
-	r, err := capture.NewRecorder(s, os.TempDir(), capture.Options{FPS: capture.DefaultFPS, Audio: true})
-	if err != nil {
+	if _, err := d.Capture(); err != nil {
 		return err
 	}
-	d.recorder = r
-	return nil
+	return d.screen.StartRecording()
 }
 
 // StopScreenRecording finalizes the recording at hostPath.
 func (d *Driver) StopScreenRecording(hostPath string) error {
-	d.capMu.Lock()
-	r := d.recorder
-	d.recorder = nil
-	d.capMu.Unlock()
-	if r == nil {
-		return errors.New("no recording is running")
-	}
-	return r.Stop(hostPath)
+	return d.screen.StopRecording(hostPath)
 }
 
 // Close ends the capture session, if one was made.
@@ -227,6 +213,7 @@ func (d *Driver) Close() {
 	d.capMu.Lock()
 	s := d.session
 	d.session = nil
+	d.screen.Set(nil)
 	d.capMu.Unlock()
 	if s != nil {
 		s.Close()

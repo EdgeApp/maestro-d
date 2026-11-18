@@ -742,3 +742,24 @@ func TestSession_AudioPlanner(t *testing.T) {
 		t.Error("subscriber on a run with audio got Audio false")
 	}
 }
+
+// RunDone is closed before any Run, open while one runs, and closed once a
+// failed Run's state is recorded.
+func TestSession_RunDone(t *testing.T) {
+	src := newStub(AlwaysOn)
+	s := NewSession(src)
+	waitDone(t, s.RunDone(), "RunDone before any Run")
+	s.Start(Options{})
+	r := src.next(t)
+	select {
+	case <-s.RunDone():
+		t.Fatal("RunDone closed while the source runs")
+	default:
+	}
+	r.fail <- &Unavailable{Reason: ReasonNoCaptureDevice}
+	waitDone(t, s.RunDone(), "RunDone after the Run failed")
+	if st, reason := s.State(); st != StateUnavailable || reason != ReasonNoCaptureDevice {
+		t.Fatalf("state %v %s once RunDone closed", st, reason)
+	}
+	s.Close()
+}

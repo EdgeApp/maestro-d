@@ -203,14 +203,16 @@ func TestCaptureAndScreenRecorder(t *testing.T) {
 	}
 	sub.Close()
 
-	if err := d.StopScreenRecording(filepath.Join(t.TempDir(), "x.mp4")); err == nil {
-		t.Fatal("stop without a start")
+	// Review 2.harness-review.9: capture.DriverCapture keeps the
+	// recording, with the same texts as every capture driver's.
+	if err := d.StopScreenRecording(filepath.Join(t.TempDir(), "x.mp4")); err == nil || err.Error() != "no screen recording is running" {
+		t.Fatalf("stop without a start: %v", err)
 	}
 	if err := d.StartScreenRecording(); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.StartScreenRecording(); err == nil {
-		t.Fatal("a second start")
+	if err := d.StartScreenRecording(); err == nil || err.Error() != "a screen recording is already running" {
+		t.Fatalf("a second start: %v", err)
 	}
 	time.Sleep(1200 * time.Millisecond)
 	out := filepath.Join(t.TempDir(), "rec.mp4")

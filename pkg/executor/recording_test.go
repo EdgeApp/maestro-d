@@ -293,6 +293,83 @@ func TestRecording_EndedEarlyStepSucceedsWithAWarning(t *testing.T) {
 	checkMP4(t, filepath.Join(dir, "recordings", "early.mp4"))
 }
 
+// lostCaptureDriver answers Capture() as WebDriverAgent does on a
+// physical iPhone: once its session's source has failed, Capture() refuses
+// the session with the failure's reason.
+type lostCaptureDriver struct{ *earlyEndDriver }
+
+func (d lostCaptureDriver) Capture() (*capture.Session, error) {
+	s, err := d.screen.Session()
+	if err != nil {
+		return nil, err
+	}
+	if st, reason := s.State(); st == capture.StateLost || st == capture.StateUnavailable {
+		return nil, &capture.Unavailable{Reason: reason, Message: "the capture ended"}
+	}
+	return s, nil
+}
+
+// Review 4.harness-review.1: a recording whose capture was lost before its
+// stopRecording is still stopped by the step, saved with the warning and
+// named in the step's data, instead of the step reaching the driver.
+func TestRecording_StopAfterTheCaptureIsLostSavesTheRecording(t *testing.T) {
+	dir := t.TempDir()
+	drv := lostCaptureDriver{newEarlyEndDriver(mock.Config{})}
+	s, err := NewSession(context.Background(), drv, RunnerConfig{OutputDir: dir}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if out := s.Execute(context.Background(), mustStep(t, "startRecording: lost")); !out.Success {
+		t.Fatalf("start: %+v", out.Error)
+	}
+	time.Sleep(time.Second)
+	if _, err := drv.Capture(); err == nil {
+		t.Fatal("the capture is not lost yet")
+	}
+	out := s.Execute(context.Background(), mustStep(t, "stopRecording"))
+	if !out.Success || out.Data != "recordings/lost.mp4" {
+		t.Fatalf("stop: %+v %v %q", out.Error, out.Data, out.Message)
+	}
+	if !strings.HasPrefix(out.Message, "Saved recording recordings/lost.mp4 (warning: capture: the recording ended early: ") {
+		t.Errorf("message %q", out.Message)
+	}
+	checkMP4(t, filepath.Join(dir, "recordings", "lost.mp4"))
+}
+
+// permissionDriver is a driver with capture whose capture failed: the Mac
+// has no camera permission.
+type permissionDriver struct{ *recordingDriver }
+
+func (permissionDriver) Capture() (*capture.Session, error) {
+	return nil, &capture.Unavailable{Reason: capture.ReasonCameraPermission, Message: "allow the camera"}
+}
+
+// Review 4.harness-review.1: a driver whose capture failed fails the
+// recording steps with the reason, instead of handing them to the driver.
+func TestRecording_FailedCaptureFailsTheStepsWithTheReason(t *testing.T) {
+	dir := t.TempDir()
+	drv := permissionDriver{&recordingDriver{Driver: mock.New(mock.Config{})}}
+	s, err := NewSession(context.Background(), drv, RunnerConfig{OutputDir: dir}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, step := range []string{"startRecording", "stopRecording"} {
+		out := s.Execute(context.Background(), mustStep(t, step+": x"))
+		want := step + " needs screen capture: screen capture unavailable (camera-permission): allow the camera"
+		if out.Success || out.Error == nil || !strings.HasPrefix(out.Error.Message, want) {
+			t.Errorf("%s: %+v", step, out.Error)
+		}
+	}
+	if len(drv.got) != 0 {
+		t.Errorf("the driver saw %v", drv.got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "recordings")); !os.IsNotExist(err) {
+		t.Error("a recordings directory was made")
+	}
+}
+
 // Review 1.harness-review.2: --record links a recording that ended early,
 // and --video on-failure still discards it when the flow passed.
 func TestRecording_EndedEarlyRecordIsLinkedAndRetained(t *testing.T) {

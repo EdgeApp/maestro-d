@@ -12,6 +12,8 @@ samples (and its audio) are re-wrapped by a pure-Go muxer.
 - [Errors](#errors): `CAPTURE_UNAVAILABLE` and its reasons
 - [Platforms](#platforms)
 - [Android](#android): scrcpy-server, audio, limits
+- [iPhones and iPads](#iphones-and-ipads): the capture helper, Camera
+  approval, USB re-enumeration, one capture-enabled process per Mac
 
 ## The stream API
 
@@ -190,13 +192,13 @@ tells it from `DAEMON_UNAVAILABLE`'s 503.
 | `unsupported-platform` | the driver has no screen capture (web, tvOS, Appium) | — |
 | `simulator` | an iOS simulator | — |
 | `not-macos` | iOS capture needs a macOS host | run the daemon on the Mac the device is plugged into |
-| `camera-permission` | macOS denied the capture helper Camera access | allow it in System Settings → Privacy & Security → Camera |
-| `no-capture-device` | the device's capture source was not found | check the USB connection |
-| `ambiguous-device-name` | two devices share a name | rename one |
-| `helper-failed` | the capture helper did not start | see the daemon log |
+| `camera-permission` | macOS denied the capture helper Camera access, or nobody approved the prompt within 120 s | [Camera approval](#camera-approval) |
+| `no-capture-device` | the device's capture source was not found: it is not connected over USB (Wi-Fi or a CoreDevice network link only), or it did not appear within 10 s | [troubleshooting](#troubleshooting-ios-capture) |
+| `ambiguous-device-name` | two iOS devices on the Mac share a name, and macOS does not say which capture device has which UDID ([finding the capture source](#the-capture-helper)) | rename one |
+| `helper-failed` | the capture helper did not build, start or connect, or the device did not start capturing within 15 s | [troubleshooting](#troubleshooting-ios-capture) |
 | `android-too-old` | Android below SDK 21 | — |
 | `scrcpy-failed` | the Android capture server failed (its last log line is in the message) | see the daemon log's `[scrcpy <serial>]` lines |
-| `capture-lost` | the capture stopped while the device was attached | detach and attach again |
+| `capture-lost` | the capture stopped while the device was attached (on iOS the helper exited or the device's connection broke; the device re-enumerated, so WebDriverAgent is gone too) | detach and attach again |
 | `no-frames` | no frames arrived within 10 s (a screen that is off, a capture that never started) | wake the device, then retry |
 
 Through a hub, a stream to a peer the hub cannot open a bulk link to fails
@@ -215,7 +217,23 @@ on-demand capture stopping because nobody watches is not published.
 | --- | --- |
 | `uiautomator2`, `devicelab` (Android devices and emulators) | [scrcpy-server](#android), on demand: H.264 at up to the requested `fps`, AAC audio on Android 11 and later |
 | `mock` | an embedded 640×360 H.264 clip with AAC audio, looped at the requested `fps` (`FPS` is a ceiling); used by the tests and the viewer's checks |
+| `wda`, a physical iPhone or iPad on a macOS host, over USB | Apple's QuickTime screen-capture channel through the capture helper ([below](#iphones-and-ipads)): the device's own H.264 at about 60 fps (`X-Maestro-Fps: device`; `fps` is advisory) and LPCM audio as the device delivers it (48 kHz, 2 channels, 16-bit integer as `ipcm` or 32-bit float as `fpcm`). Always on while the device is attached |
+| `wda`, an iOS simulator | `CAPTURE_UNAVAILABLE` `simulator`; `--record` still records through `simctl io recordVideo`, and the recording steps stay unsupported |
+| `wda` on tvOS; `devicelab` (iOS simulators), `appium`, `cdp` (web) | `CAPTURE_UNAVAILABLE` `unsupported-platform` |
 | every other driver | `CAPTURE_UNAVAILABLE` `unsupported-platform` for now |
+
+Measured on an M1 Max MacBook Pro (macOS 26) with an iPhone 13
+Pro on iOS 26.6.1 and a Pixel 8 on Android 16, streaming at `fps=15`
+while steps ran (the Pixel with the Clock stopwatch running, so its
+screen changed all the time):
+
+| | iPhone 13 Pro, QuickTime channel | Pixel 8, scrcpy |
+| --- | --- | --- |
+| video | H.264 (`avc3` on the wire), 1170×2532, about 60 fps whatever `fps` asks, about 2 keyframes a second | H.264 (`avc3`), 2400×1080 in landscape, at most `fps`, a keyframe about every 4 s while the screen changes and none while it is still |
+| audio | LPCM 48 kHz, 2 ch, 16-bit integer (`ipcm`) or 32-bit float (`fpcm`) | AAC-LC 48 kHz, 2 ch, about 0.13 Mb/s |
+| bitrate | about 3.2 (static screen) to 3.8 Mb/s (swiping) | video about 0.2 (mostly static screen) to 1.2 Mb/s (swiping) |
+| host CPU | the capture helper about 4.6% of one core, maestro-d about 1.0% (attached with no viewer: 4.9% and 0.6%) | maestro-d about 0.7% of one core (attached with no viewer: 0.1%); no helper |
+| device CPU | `airplayd` about 8% of one core (none without capture); Instruments' total load about 66% summed over the six cores, against 46% with no capture and WebDriverAgent stopped | the scrcpy server (`app_process`) about 30% of one core, the hardware encoder's service (`samsung.hardware.media.c2@1.2-service`) 11%, `media.swcodec` (AAC) 10%, `audioserver` 2%, `surfaceflinger` 42% against 32% without capture; `top`'s whole-device load 231% of 900% against 160% without capture |
 
 ## Android
 
@@ -272,3 +290,155 @@ beyond that jar:
   `CAPTURE_UNAVAILABLE` `android-too-old`.
 - **Failures.** A server that does not start, or stops, answers
   `scrcpy-failed`; the message carries the server's last log line.
+
+## iPhones and iPads
+
+On a macOS host, attaching a physical iPhone or iPad over USB starts its
+screen capture before anything else touches the device, and keeps it
+running until the device is detached. Frames nobody watches are dropped.
+Streams, the viewer, `--record` and the recording steps all read that
+one capture.
+
+### The capture helper
+
+The capture runs in `MaestroDCapture.app` (bundle id
+`app.edge.maestro-d.capture`; macOS names it **MaestroDCapture**), a small
+Swift app whose source ships in `drivers/ios/MaestroDCapture/`. maestro-d builds
+it on first use with `xcrun swiftc` (Xcode's command-line tools), signs
+it, and keeps it in `<home>/cache/capture-helper/<key>/` (the newest two
+builds are kept; the key covers the source, `Info.plist`, the compiler
+version and the signing identity). It is launched with `open -n -g -j`,
+so it runs in the background with no Dock icon, and talks to maestro-d
+over a unix socket in `$TMPDIR/maestro-d-cap-<uid>/` (mode 0700).
+
+Each maestro-d process (a daemon, or one `maestro-d test` run) runs at
+most one helper, shared by all of its iOS devices. It starts with the
+process's first iPhone attach and exits with the process; detaching a
+device stops only that device's capture.
+
+**Finding the device's capture source.** The helper looks among the
+Mac's external capture devices whose model is `iOS Device`, every 250 ms
+for up to 10 s. It would take one whose unique ID, without dashes, is the
+UDID (the device's USB serial number), but macOS does not give one: an
+iPhone's capture device has a UUID of its own as its unique ID, which no
+CoreMediaIO device property, IOKit USB entry or lockdown value of the
+device repeats, and which no UUID derivation of the UDID gives. So the
+helper matches by name: the one capture device named like the device
+(Settings → General → About → Name), and the daemon logs
+`capture <udid>: capturing (match: name)`. Two USB iOS devices with the
+same name on one Mac both answer `ambiguous-device-name` after 10 s; give
+each its own name.
+
+**Signing.** The helper is signed with `MAESTRO_D_CAPTURE_SIGN_IDENTITY`
+when set, else the first `Apple Development:` identity
+`security find-identity -p codesigning -v` lists, else ad-hoc. macOS
+remembers the Camera approval per signing identity: with an Apple
+Development identity a rebuilt helper (a new maestro-d version, a new
+Xcode) keeps the approval; an ad-hoc signed helper asks again after every
+rebuild.
+
+### Camera approval
+
+macOS treats screen capture of a USB iPhone as a camera, so the helper
+needs Camera access. The first time a Mac's helper starts, macOS shows
+**"MaestroDCapture" would like to access the camera**. Someone at the
+Mac has to click **Allow**, once per Mac (and per signing identity, see
+above):
+
+- While the prompt is open, the attach waits up to 120 s and the daemon
+  logs "approve camera access for MaestroDCapture on this Mac". After
+  that the device attaches without capture (`camera-permission`); the
+  helper keeps waiting, and the next attach captures once access is
+  allowed.
+- The approval cannot be granted ahead of time by an MDM profile: Camera
+  is one of the privacy services a PPPC profile can only deny, never
+  allow.
+- Denied: allow it in System Settings → Privacy & Security → Camera →
+  MaestroDCapture. To be asked again, reset the decision with
+  `tccutil reset Camera app.edge.maestro-d.capture` and attach again.
+- A Mac reached only over SSH, with nobody at its screen, cannot answer
+  the prompt; approve it once from the screen (or Screen Sharing).
+
+### USB re-enumeration and the attach order
+
+Turning the capture channel on makes every USB iOS device on the Mac
+switch to its capture USB configuration, which re-enumerates it and drops
+every usbmux connection to it (WebDriverAgent's, Xcode's, other tools').
+Turning it off again (the helper exiting) does the same. So the attach
+order is:
+
+1. Start the capture: launch the helper if the process has none, open
+   the device, and wait until it captures (15 s, plus up to 120 s while
+   the helper is built and launched or the Camera prompt is open).
+2. When the device re-enumerated (the helper found its capture device),
+   wait until usbmuxd lists it again, and at least 1.5 s.
+3. Install the app, build and start WebDriverAgent, as before.
+
+Detaching stops WebDriverAgent first, then the device's capture.
+
+A capture that fails never fails the attach: the device attaches, the
+`device.capture` event says `unavailable` with the reason, and streams
+answer `CAPTURE_UNAVAILABLE`. When the capture is lost later (the helper
+was killed, the cable was pulled) the device has re-enumerated, so
+WebDriverAgent's connection is gone too: `device.capture` says `lost`,
+steps that fail with a network error add "the iPhone re-enumerated when
+screen capture stopped; detach and attach again", and there is no
+automatic recovery. Detach and attach again.
+
+Capture is skipped, and `Capture`/streams answer why, for a simulator
+(`simulator`), a TV (`unsupported-platform`), a device usbmuxd lists only
+over Wi-Fi or one reachable only through CoreDevice
+(`no-capture-device`, "not connected over USB"), and a host that is not
+macOS (`not-macos`). `maestro-d test` captures only when the run records
+(`--record`/`--video`, or a `startRecording` step anywhere in its flows,
+or a sub-flow file it cannot see ahead); the one-shot `screenshot` and
+`hierarchy` commands never capture.
+
+### One capture-enabled process per Mac
+
+The capture channel is a switch for the whole Mac. When the first helper
+on the Mac starts, and when the last one exits, every USB iOS device on
+the Mac re-enumerates, and every other process using one (another daemon,
+a `maestro-d test` run, the upstream one-shots, Xcode) loses its
+connection. The helper's start logs "screen capture switches every USB
+iOS device on this Mac into capture mode; other processes using those
+devices lose their connections now".
+
+So run **one capture-enabled maestro-d process per Mac**: the hub's
+daemon, or one daemon, and attach every iOS device there. Within one
+daemon the switch happens once, during its first iOS attach, before any
+of its WebDriverAgent connections exist; later attaches find it on.
+Restarting that daemon within 10 s is fine: the next helper launch waits
+out launchd's relaunch throttle and retries once.
+
+### Audio in browsers
+
+iOS sends LPCM as the device delivers it: usually 16-bit integer, which
+MP4 carries as `ipcm`, and on some attaches 32-bit float, carried as
+`fpcm` (ISO/IEC 23003-5; FFmpeg reads it as `pcm_f32le`). The float
+attaches deliver each channel's samples one after the other
+(non-interleaved); MP4 wants them interleaved, so the host reorders them,
+copying every sample bit for bit. It never converts a sample, so the
+format can differ from one attach to the next; the daemon log's
+`capture <udid>: audio lpcm …` line names the one an attach got. FFmpeg plays both, and VLC and QuickTime Player play `ipcm`;
+browsers play neither. The viewer therefore asks an iPhone's
+stream without audio, and the HTML report's `<video>` plays an iPhone
+recording's video and ignores its audio track.
+
+### Troubleshooting iOS capture
+
+The daemon log (`<home>/run/<daemon>/daemon.log`)
+has a `capture <udid>:` line for each step, and the helper's own
+statuses.
+
+| reason | look for | fix |
+| --- | --- | --- |
+| `camera-permission` | "approve camera access" | approve the prompt at the Mac's screen; if it was denied, System Settings → Privacy & Security → Camera, or `tccutil reset Camera app.edge.maestro-d.capture` |
+| `helper-failed` "build the capture helper" | `swiftc:` or `codesign:` errors | install Xcode's command-line tools; unlock the login keychain that holds the signing identity, or set `MAESTRO_D_CAPTURE_SIGN_IDENTITY=-` |
+| `helper-failed` "did not connect" | "capture helper relaunched within 10 s" | another helper is being torn down; attach again after a few seconds |
+| `helper-failed` "did not start capturing within 15 s" | `capture <udid>: device found` without `capturing` | unlock the device and wake its screen; the capture sends nothing while the display is off |
+| `no-capture-device` "not connected over USB" | — | connect the device with a cable; Wi-Fi and CoreDevice network links cannot capture |
+| `no-capture-device` "did not appear within 10 s" | — | unlock the device, trust the Mac, reconnect the cable |
+| `ambiguous-device-name` | — | give each device a unique name (Settings → General → About → Name) |
+| `capture-lost` | "capture helper pid … exited" | detach and attach again; another process starting or stopping capture on the Mac also causes it ([one per Mac](#one-capture-enabled-process-per-mac)) |
+| `no-frames` (stream) | — | wake the device's screen |

@@ -40,18 +40,26 @@ type stepRecording struct {
 	rel      string          // its path relative to the report directory
 }
 
-// captureSession returns the session of a driver with screen capture, or
-// nil when the driver has none (or answers Unavailable).
-func captureSession(d core.Driver) *capture.Session {
+// captureSession returns the session of a driver with screen capture. It
+// returns nil and a nil error when the driver has none: it is no
+// core.Capturer, or it answers that it has no capture (a simulator, an
+// unsupported platform, or an error that is no *capture.Unavailable). It
+// returns the *capture.Unavailable of a Capturer whose capture failed for
+// any other reason (camera-permission, helper-failed, capture-lost, …).
+func captureSession(d core.Driver) (*capture.Session, error) {
 	c, ok := core.Unwrap(d).(core.Capturer)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	s, err := c.Capture()
-	if err != nil || s == nil {
-		return nil
+	if err == nil && s != nil {
+		return s, nil
 	}
-	return s
+	var u *capture.Unavailable
+	if !errors.As(err, &u) || u.Reason == capture.ReasonSimulator || u.Reason == capture.ReasonUnsupportedPlatform {
+		return nil, nil
+	}
+	return nil, err
 }
 
 // recordingName turns a step's path into a recording's file name: the
@@ -105,16 +113,28 @@ func (fr *FlowRunner) recordingBase() (abs, rel string) {
 }
 
 // executeRecordingStep runs startRecording or stopRecording: through the
-// driver's capture session when it has one, else on the driver.
+// driver's capture session when it has one, else on the driver. A
+// stopRecording while a recording runs always stops it, even when the
+// capture has since been lost (the file is saved with the
+// capture.ErrEndedEarly warning). A driver whose capture failed (not a
+// simulator or an unsupported platform) fails the step with the reason.
 func (fr *FlowRunner) executeRecordingStep(step flow.Step) *core.CommandResult {
-	s := captureSession(fr.driver)
-	if s == nil {
-		return fr.driver.Execute(step)
-	}
 	start := time.Now()
+	st, isStart := step.(*flow.StartRecordingStep)
+	name := "stopRecording"
+	if isStart {
+		name = "startRecording"
+	}
+	s, err := captureSession(fr.driver)
 	var res *core.CommandResult
-	switch st := step.(type) {
-	case *flow.StartRecordingStep:
+	switch {
+	case !isStart && fr.rec.active != nil:
+		res = fr.stopRecording()
+	case err != nil:
+		res = &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("%s needs screen capture: %v", name, err)}
+	case s == nil:
+		return fr.driver.Execute(step)
+	case isStart:
 		res = fr.startRecording(s, st.Path)
 	default:
 		res = fr.stopRecording()

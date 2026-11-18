@@ -151,6 +151,19 @@ func (s *Session) State() (State, string) {
 	return s.state, s.reason
 }
 
+// RunDone is closed once the source's current Run has returned and the
+// session has recorded how it ended (a closed channel when none started).
+func (s *Session) RunDone() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done == nil {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return s.done
+}
+
 // LastError is the error the source last failed with, or nil.
 func (s *Session) LastError() error {
 	s.mu.Lock()
