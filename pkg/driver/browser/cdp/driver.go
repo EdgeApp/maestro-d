@@ -3,6 +3,7 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -68,10 +69,10 @@ type Driver struct {
 	networkMocks  []networkMock // active mock rules
 	networkBlocks []string      // blocked URL patterns
 	fetchEnabled  bool          // whether Fetch domain is enabled
-	networkMu     sync.Mutex    // protects mocks/blocks
+	networkMu     sync.Mutex    // protects mocks, observation scopes and emulation
 
-	// Network idle tracking (for waitForPageReady)
-	network *networkTracker
+	networkScopes    map[proto.TargetSessionID]*networkScope
+	networkEmulation map[proto.TargetSessionID]*networkEmulationHold
 
 	// Console capture
 	consoleLogs []ConsoleEntry
@@ -200,17 +201,13 @@ func New(cfg Config) (*Driver, error) {
 	// Start background handlers
 	d.startDialogHandler()
 	d.startConsoleHandler()
-	d.setupNetworkTracking(page)
 
 	// Navigate to initial URL if provided
 	if cfg.URL != "" {
-		if err := page.Navigate(cfg.URL); err != nil {
+		if err := d.navigateAndWait(page, func() error { return page.Navigate(cfg.URL) }); err != nil {
+			_ = d.Close()
 			return nil, fmt.Errorf("failed to navigate to %s: %w", cfg.URL, err)
 		}
-		page.MustWaitLoad()
-		p := page.Timeout(5 * time.Second)
-		_ = p.WaitDOMStable(300*time.Millisecond, 0)
-		d.network.waitForIdle(5*time.Second, 500*time.Millisecond)
 	}
 
 	return d, nil
@@ -464,50 +461,30 @@ func (t *networkTracker) waitForIdle(timeout, quietPeriod time.Duration) bool {
 	return false
 }
 
-// setupNetworkTracking enables the CDP Network domain and subscribes to request
-// lifecycle events on the given page. Replaces any previous tracker.
-func (d *Driver) setupNetworkTracking(page *rod.Page) {
+// navigateAndWait observes only this navigation, including asynchronous loads
+// that keep running after the page's load event and DOM stabilization.
+func (d *Driver) navigateAndWait(page *rod.Page, navigate func() error) (err error) {
 	tracker := newNetworkTracker()
-	d.network = tracker
-
-	if err := (proto.NetworkEnable{}).Call(page); err != nil {
-		log.Printf("[browser] failed to enable Network domain: %v", err)
-		return
-	}
-
-	go page.EachEvent(
-		func(e *proto.NetworkRequestWillBeSent) bool {
+	observation, err := d.observeNetwork(page, page.GetContext(),
+		func(e *proto.NetworkRequestWillBeSent) {
 			url := ""
 			if e.Request != nil {
 				url = e.Request.URL
 			}
 			tracker.onRequest(e.RequestID, url, e.Type)
-			select {
-			case <-d.stopCh:
-				return true
-			default:
-				return false
-			}
 		},
-		func(e *proto.NetworkLoadingFinished) bool {
-			tracker.onComplete(e.RequestID)
-			select {
-			case <-d.stopCh:
-				return true
-			default:
-				return false
-			}
-		},
-		func(e *proto.NetworkLoadingFailed) bool {
-			tracker.onComplete(e.RequestID)
-			select {
-			case <-d.stopCh:
-				return true
-			default:
-				return false
-			}
-		},
-	)()
+		func(e *proto.NetworkLoadingFinished) { tracker.onComplete(e.RequestID) },
+		func(e *proto.NetworkLoadingFailed) { tracker.onComplete(e.RequestID) },
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, observation.close()) }()
+	if err = navigate(); err != nil {
+		return err
+	}
+	d.waitForPageReady(page, tracker)
+	return nil
 }
 
 // Execute runs a single step and returns the result.

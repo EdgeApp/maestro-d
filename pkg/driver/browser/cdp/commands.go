@@ -1,8 +1,10 @@
 package cdp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -949,21 +951,19 @@ func elementSwipeCoords(dir string, b core.Bounds) (startX, startY, endX, endY f
 
 // waitForPageReady waits for the page to finish loading and DOM to stabilize.
 // Used after navigations to handle SPAs that render content after the load event.
-func (d *Driver) waitForPageReady() {
-	_ = d.page.WaitLoad()
-	p := d.page.Timeout(5 * time.Second)
+func (d *Driver) waitForPageReady(page *rod.Page, tracker *networkTracker) {
+	_ = page.WaitLoad()
+	p := page.Timeout(5 * time.Second)
 	_ = p.WaitDOMStable(300*time.Millisecond, 0)
-	if d.network != nil {
-		d.network.waitForIdle(5*time.Second, 500*time.Millisecond)
-	}
+	tracker.waitForIdle(5*time.Second, 500*time.Millisecond)
 }
 
 // back navigates back in browser history.
 func (d *Driver) back(step *flow.BackStep) *core.CommandResult {
-	if err := d.page.NavigateBack(); err != nil {
+	page := d.page
+	if err := d.navigateAndWait(page, page.NavigateBack); err != nil {
 		return errorResult(err, "Failed to navigate back")
 	}
-	d.waitForPageReady()
 	return successResult("Navigated back", nil)
 }
 
@@ -1044,10 +1044,10 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 		d.clearAllState()
 	}
 
-	if err := d.page.Navigate(url); err != nil {
+	page := d.page
+	if err := d.navigateAndWait(page, func() error { return page.Navigate(url) }); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to navigate to %s", url))
 	}
-	d.waitForPageReady()
 
 	return successResult(fmt.Sprintf("Navigated to %s", url), nil)
 }
@@ -1166,10 +1166,10 @@ func (d *Driver) openBrowser(step *flow.OpenBrowserStep) *core.CommandResult {
 
 // navigateToURL navigates to a URL and waits for load (shared by openLink/openBrowser).
 func (d *Driver) navigateToURL(url string) *core.CommandResult {
-	if err := d.page.Navigate(url); err != nil {
+	page := d.page
+	if err := d.navigateAndWait(page, func() error { return page.Navigate(url) }); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to open %s", url))
 	}
-	d.waitForPageReady()
 	return successResult(fmt.Sprintf("Opened %s", url), nil)
 }
 
@@ -1899,8 +1899,6 @@ func (d *Driver) openTab(step *flow.OpenTabStep) *core.CommandResult {
 		_ = p.WaitDOMStable(300*time.Millisecond, 0)
 	}
 
-	d.setupNetworkTracking(page)
-
 	if step.TabLabel != "" {
 		d.tabLabels[step.TabLabel] = page
 	}
@@ -2160,6 +2158,8 @@ func (d *Driver) handleInterceptedRequest(e *proto.FetchRequestPaused) {
 
 // setNetworkConditions emulates network throttling or offline mode.
 func (d *Driver) setNetworkConditions(step *flow.SetNetworkConditionsStep) *core.CommandResult {
+	d.networkMu.Lock()
+	defer d.networkMu.Unlock()
 	// Convert KB/s to bytes/sec (-1 means no throttle)
 	download := step.DownloadSpeed * 1024
 	if step.DownloadSpeed <= 0 {
@@ -2170,12 +2170,12 @@ func (d *Driver) setNetworkConditions(step *flow.SetNetworkConditionsStep) *core
 		upload = -1
 	}
 
-	err := (proto.NetworkEmulateNetworkConditions{
+	err := d.applyNetworkConditions(d.page, proto.NetworkEmulateNetworkConditions{
 		Offline:            step.Offline,
 		Latency:            step.Latency,
 		DownloadThroughput: download,
 		UploadThroughput:   upload,
-	}).Call(d.page)
+	})
 	if err != nil {
 		return errorResult(fmt.Errorf("setNetworkConditions: %w", err), "")
 	}
@@ -2188,7 +2188,7 @@ func (d *Driver) setNetworkConditions(step *flow.SetNetworkConditionsStep) *core
 }
 
 // waitForRequest waits for a matching network request to be made.
-func (d *Driver) waitForRequest(step *flow.WaitForRequestStep) *core.CommandResult {
+func (d *Driver) waitForRequest(step *flow.WaitForRequestStep) (result *core.CommandResult) {
 	if step.URL == "" {
 		return errorResult(fmt.Errorf("waitForRequest: url is required"), "")
 	}
@@ -2198,16 +2198,14 @@ func (d *Driver) waitForRequest(step *flow.WaitForRequestStep) *core.CommandResu
 		timeoutMs = 30000
 	}
 
-	// Enable network events
-	if err := (proto.NetworkEnable{}).Call(d.page); err != nil {
-		return errorResult(fmt.Errorf("waitForRequest: %w", err), "")
-	}
-
+	page := d.page
+	ctx, cancel := context.WithTimeout(page.GetContext(), time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
 	matchMethod := strings.ToUpper(step.Method)
 	doneCh := make(chan string, 1)
 
-	wait := d.page.EachEvent(func(e *proto.NetworkRequestWillBeSent) bool {
-		if !matchURLPattern(e.Request.URL, step.URL) {
+	observation, err := d.observeNetwork(page, ctx, func(e *proto.NetworkRequestWillBeSent) bool {
+		if e.Request == nil || !matchURLPattern(e.Request.URL, step.URL) {
 			return false
 		}
 		if matchMethod != "" && e.Request.Method != matchMethod {
@@ -2216,26 +2214,33 @@ func (d *Driver) waitForRequest(step *flow.WaitForRequestStep) *core.CommandResu
 		doneCh <- e.Request.PostData
 		return true // stop listening
 	})
-	go wait()
+	if err != nil {
+		return errorResult(fmt.Errorf("waitForRequest: %w", err), "")
+	}
+	defer func() {
+		if err := observation.close(); err != nil {
+			result = errorResult(errors.Join(result.Error, err), "Failed to release request observation")
+		}
+	}()
 
 	select {
 	case body := <-doneCh:
 		result := successResult(fmt.Sprintf("Request matched: %s", step.URL), nil)
 		result.Data = body
 		return result
-	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-		return errorResult(fmt.Errorf("waitForRequest: no request matching %q within %dms", step.URL, timeoutMs), "")
+	case <-ctx.Done():
+		return errorResult(fmt.Errorf("waitForRequest: no request matching %q within %dms: %w", step.URL, timeoutMs, ctx.Err()), "")
 	}
 }
 
 // clearNetworkMocks disables Fetch interception and clears all mocks and blocks.
 func (d *Driver) clearNetworkMocks() *core.CommandResult {
 	d.networkMu.Lock()
+	defer d.networkMu.Unlock()
 	d.networkMocks = nil
 	d.networkBlocks = nil
 	wasFetchEnabled := d.fetchEnabled
 	d.fetchEnabled = false
-	d.networkMu.Unlock()
 
 	if wasFetchEnabled {
 		if err := (proto.FetchDisable{}).Call(d.page); err != nil {
@@ -2244,12 +2249,14 @@ func (d *Driver) clearNetworkMocks() *core.CommandResult {
 	}
 
 	// Reset network conditions to default
-	_ = (proto.NetworkEmulateNetworkConditions{
+	if err := d.applyNetworkConditions(d.page, proto.NetworkEmulateNetworkConditions{
 		Offline:            false,
 		Latency:            0,
 		DownloadThroughput: -1,
 		UploadThroughput:   -1,
-	}).Call(d.page)
+	}); err != nil {
+		return errorResult(fmt.Errorf("clearNetworkMocks: %w", err), "")
+	}
 
 	return successResult("Cleared all network mocks and conditions", nil)
 }

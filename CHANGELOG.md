@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fixed: Browser sessions release unused network request history and avoid caching downloaded responses, reducing memory use while preserving navigation waits, request matching and network emulation.
+
 ## 3.1.0 (2026-11-19)
 
 - added: The core of live screen streaming and recording. A device's own H.264 video and its AAC or LPCM audio are wrapped in fragmented MP4 as they arrive, with no decoding or re-encoding on the host: a pure-Go muxer writes `avc3` video (parameter sets in band, so a rotation needs no new init segment), `mp4a` AAC and LPCM as the source delivers it, `ipcm` for integer samples and `fpcm` for floating point, one fragment per sample. One capture session per device feeds every viewer and recorder: a viewer or recording that joins late starts at the moment it joins (the frames since the latest keyframe arrive first, a millisecond apart, so the picture is whole at once and nothing from before the join plays), a viewer that falls behind is dropped rather than slowing the device, and a device that starts capturing on demand stops 10 s after its last viewer leaves. Recordings end with their duration and a seek index (`mehd`, `mfra`), so a browser's `<video>` knows their length and can seek. A requested frame rate is 3–60 fps, 15 by default.
