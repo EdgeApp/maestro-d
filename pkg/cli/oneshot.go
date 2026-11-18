@@ -27,7 +27,7 @@ import (
 )
 
 // oneShotFlags are the table flags every one-shot accepts.
-var oneShotFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags)
+var oneShotFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags)
 
 // oneShotCommands builds one cli.Command per known step type.
 func oneShotCommands() []*cli.Command {
@@ -146,12 +146,32 @@ func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p 
 	if err != nil {
 		return err
 	}
-	cwd, _ := os.Getwd()
+	// Relative paths resolve against the caller's directory — on this
+	// machine. A targeted daemon is another machine, and a remote caller
+	// may not name a directory there, so no cwd is sent.
+	cwd := ""
+	if o.Target == "" {
+		cwd, _ = os.Getwd()
+	}
 	client, id, err := session(ctx, o)
 	if err != nil {
 		return err
 	}
+	var files *hubFiles
+	if o.Target != "" {
+		// The daemon is another machine: upload the input files and name
+		// the outputs ourselves, then fetch those back.
+		files = newHubFiles(ctx, client, id, o.Attach.Env, o.JSON)
+		if value, err = files.rewrite(spec, value); err != nil {
+			return err
+		}
+	}
 	res, err := client.CommandCwd(ctx, id, spec.Name, value, cwd, !o.NoWait)
+	if files != nil && res != nil {
+		if ferr := files.fetchOutputs(res.Outputs); ferr != nil && err == nil {
+			err = ferr
+		}
+	}
 	return emitStep(o, res, err)
 }
 

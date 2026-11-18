@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,7 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/google/uuid"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -27,21 +29,6 @@ type DriverInfo struct {
 	Platform string
 	Kind     string
 	Name     string
-}
-
-// Deps are the pieces pkg/cli injects so this package never imports it.
-type Deps struct {
-	// NewDriver opens a driver on deviceID. cleanup tears it down (never
-	// nil on success). Log output goes to the daemon's stdout.
-	NewDriver func(ctx context.Context, deviceID string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error)
-	// ListDevices discovers live devices; platform "" means all.
-	ListDevices func(platform string) []DeviceInfo
-	// NormalizeHierarchy turns a driver's raw hierarchy (XML or JSON) into
-	// the cross-driver tree. Optional: without it the raw document is
-	// returned parsed (JSON) or as a string (XML).
-	NormalizeHierarchy func(raw []byte) (any, error)
-	// Version is the binary version for daemon.json and reports.
-	Version string
 }
 
 // attached is one device with a live driver: the executor.Session plus the
@@ -84,6 +71,30 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return nil, WrapErr(CodeInternal, err)
 	}
+	// The blobs an attach materializes (a packed .app is a full unzipped
+	// copy) are the session's, in a directory of this attach's own under
+	// blobs/: an attach that fails removes that directory again, and
+	// never another attach's blobs in a shared outputDir. blobs/ itself
+	// goes too when this attach made it and it is left empty.
+	blobsRoot := filepath.Join(reportDir, "blobs")
+	_, statErr := os.Stat(blobsRoot)
+	madeRoot := statErr != nil
+	blobDir := filepath.Join(blobsRoot, uuid.New().String())
+	keep := false
+	defer func() {
+		if keep {
+			return
+		}
+		if err := os.RemoveAll(blobDir); err != nil {
+			logger.Warn("attach %s: remove %s: %v", id, blobDir, err)
+		}
+		if madeRoot {
+			_ = os.Remove(blobsRoot) // only when empty
+		}
+	}()
+	if e := s.mapAttachBlobs(&cfg, blobDir); e != nil {
+		return nil, e
+	}
 
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
@@ -94,6 +105,14 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	}
 	if cleanup == nil {
 		cleanup = func() {}
+	}
+	if leaseFrom(ctx) != nil && ctx.Err() != nil {
+		// The lease (or its client) ended while a driver start that cannot
+		// be cancelled ran: the driver is discarded, never attached.
+		logger.Info("attach %s: cancelled while the driver started; discarding it", id)
+		discardDriver(id, cleanup)
+		cancel()
+		return nil, Errorf(CodeInterrupted, "attach %s cancelled", id)
 	}
 
 	alertMonitor := true
@@ -117,10 +136,10 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		OnStepComplete: func(idx int, desc string, passed bool, durationMs int64, errMsg string) {
-			s.hub.Publish(Event{Type: "step", Device: id, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
+			s.events.Publish(Event{Type: "step", Device: id, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
 		},
 		OnNestedStep: func(depth int, desc string, passed bool, durationMs int64, errMsg string) {
-			s.hub.Publish(Event{Type: "nestedStep", Device: id, Depth: depth, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
+			s.events.Publish(Event{Type: "nestedStep", Device: id, Depth: depth, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
 		},
 	}
 	sc := executor.SessionConfig{
@@ -130,6 +149,8 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		FlowDir:        cfg.FlowDir,
 		AlertMonitor:   alertMonitor,
 		CommandTimeout: cfg.CommandTimeout,
+		ImportEnv:      s.importsEnv(),
+		PassEnv:        s.cfg.PassEnv,
 	}
 	session, err := executor.NewSession(base, driver, rc, sc)
 	if err != nil {
@@ -157,9 +178,20 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}
 	s.registry.MarkAttached(info)
-	s.hub.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
+	s.events.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
 	logger.Info("Attached device %s (report %s)", id, reportDir)
+	keep = true
 	return a, nil
+}
+
+// discardDriver runs a driver's cleanup, surviving a panic in it.
+func discardDriver(id string, cleanup func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("driver cleanup for %s panicked: %v", id, r)
+		}
+	}()
+	cleanup()
 }
 
 // baseCtx is cancelled on detach/shutdown.
@@ -169,14 +201,7 @@ func (a *attached) baseCtx() context.Context { return a.base }
 func (a *attached) close() {
 	a.cancel()
 	a.session.Close()
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Warn("driver cleanup for %s panicked: %v", a.id, r)
-			}
-		}()
-		a.cleanup()
-	}()
+	discardDriver(a.id, a.cleanup)
 }
 
 func parseArtifacts(s string) executor.ArtifactMode {
@@ -243,4 +268,36 @@ func keys(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// mapAttachBlobs replaces a blob: appFile or extra.capsFile with the
+// session's copy of that blob.
+func (s *Server) mapAttachBlobs(cfg *AttachConfig, dir string) *Error {
+	mapRef := func(field, ref string) (string, *Error) {
+		if _, _, err := executor.ParseBlobRef(ref); err != nil {
+			return "", forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
+		}
+		local, err := s.blobs.Materialize(ref, dir)
+		if err != nil {
+			return "", Errorf(CodeUsage, "%s %s: %v", field, ref, err).WithDetails("field", field)
+		}
+		return local, nil
+	}
+	if strings.HasPrefix(cfg.AppFile, "blob:") {
+		local, e := mapRef("appFile", cfg.AppFile)
+		if e != nil {
+			return e
+		}
+		cfg.AppFile = local
+	}
+	if v, ok := cfg.Extra["capsFile"].(string); ok && strings.HasPrefix(v, "blob:") {
+		local, e := mapRef("extra.capsFile", v)
+		if e != nil {
+			return e
+		}
+		extra := maps.Clone(cfg.Extra)
+		extra["capsFile"] = local
+		cfg.Extra = extra
+	}
+	return nil
 }

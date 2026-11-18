@@ -35,6 +35,8 @@ type ScriptEngine struct {
 	variables          map[string]string
 	flowDir            string // Directory of current flow (for resolving relative paths)
 	conditionTimeoutMs int    // default timeout for when/while condition checks
+
+	policy *CallerPolicy // maestro-d: the current daemon call's caller policy (caller_policy.go)
 }
 
 // NewScriptEngine creates a new script engine.
@@ -361,6 +363,9 @@ func (se *ScriptEngine) EvalCondition(script string) (bool, error) {
 
 // ResolvePath resolves a relative path against the flow directory.
 func (se *ScriptEngine) ResolvePath(path string) string {
+	if p, ok := se.policyResolve(path); ok { // maestro-d: caller policy, hook 2
+		return p
+	}
 	if filepath.IsAbs(path) || se.flowDir == "" {
 		return path
 	}
@@ -823,6 +828,7 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 	case *flow.OpenBrowserStep:
 		s.URL = se.ExpandVariables(s.URL)
 	}
+	se.policyStep(step) // maestro-d: caller policy, hook 1
 }
 
 // ExpandCondition expands variables in a condition's selector and string

@@ -9,6 +9,8 @@ of it; anything that can speak HTTP can drive a device the same way.
 | --- | --- | --- |
 | unix socket | always | `~/.maestro-d/run/<name>/daemon.sock` (`$MAESTRO_D_HOME` overrides the root) |
 | TCP | daemon started with `--http ADDR` | `http://ADDR`, with `Authorization: Bearer <token>` when `--token` was given |
+| TCP + TLS | `serve --http ADDR --tls-cert F --tls-key F` | `https://ADDR`; a self-signed certificate needs its trust root on the client (`--ca`, `ca`) |
+| hub | `hub start --listen ADDR --token T` (default `:7433`, every interface) | `http(s)://ADDR` with the bearer token; devices are [leased](#leases-hubs) |
 
 ```sh
 maestro-d start --daemon api --http 127.0.0.1:7788 --token s3cret
@@ -24,7 +26,13 @@ Two headers matter:
   with `DAEMON_UNAVAILABLE`. Every response carries it.
 - `Authorization: Bearer <token>` — required on TCP when the daemon has a
   token; never checked on the unix socket (file permissions do that).
-  A missing or wrong token is `401` with a `USAGE` body.
+  A missing or wrong token is `401` with a `USAGE` body. A daemon whose
+  `--http` address reaches beyond loopback (`0.0.0.0:7433`, a LAN address)
+  refuses to start without `--token`.
+- `X-Maestro-Request-Id: <uuid>` — optional; see
+  [Request ids and retries](#request-ids-and-retries).
+- `X-Maestro-Lease: <lease id>` — on a hub, required on every route that
+  drives a device; see [Leases](#leases-hubs).
 
 Every request resets the idle timer.
 
@@ -58,7 +66,108 @@ Every request resets the idle timer.
   another step is running waits for its turn; `?wait=false` makes it fail
   at once with `BUSY` (409) instead.
 - Closing the connection mid-step cancels the step on the device
-  (`INTERRUPTED`, 499 if the response can still be written).
+  (`INTERRUPTED`, 499 if the response can still be written). A TCP request
+  that carries a request id is the exception: it keeps running for 10 s so
+  a retry can collect its outcome, and is cancelled only if none arrives.
+
+## Remote callers
+
+The daemon decides for **each request** whether its sender may reach the
+host it runs on, not by who attached the session:
+
+- The unix socket is always local.
+- On `serve --http`, a TCP request from a loopback address is local, as
+  before, and one from any other address is **remote**. (On a hub, from
+  `hub start`, every TCP request is remote, loopback included.)
+
+A remote caller drives devices but not the host. These are refused with
+`FORBIDDEN` (403, exit 2), with the step and field in `details`:
+
+- `runShell`, at the top level or nested in `runFlow`/`retry`/`repeat`
+  commands, a `/steps` list or an inline flow. The call stops at that step.
+- A path on the host in a step: `addMedia` files, `runScript` file (a value
+  ending in `.js`; other values are inline JavaScript and run), `uploadFile`
+  path(s), `runWebViewScript`/`runBrowserScript` file, `loadAuthState`,
+  and the `runFlow`/`retry` file — whether absolute, relative, or built
+  from a `${VAR}`, and whether in a one-shot or inside a bundled flow (a
+  `..` that leaves the bundle counts). Nothing on the host is read. Upload the file instead
+  ([blobs](#blobs-uploaded-files)) and name it
+  `blob:sha256:<hex>/<basename>`; the daemon gives the step its own copy,
+  with that basename and extension. A ref whose hash is not 64 lowercase
+  hex digits, or whose basename is not a plain file name, is `FORBIDDEN`
+  before any file is opened. A flow file goes as a
+  [flow bundle](#flow-bundles) instead: `bundle:sha256:<manifest>/<root>`
+  in `runFlow`'s `file` or `else`, or `retry`'s `file`.
+- An output path that is absolute or contains `..` (`takeScreenshot`,
+  `saveAuthState`). A relative one is written under the session's report
+  directory, in `outputs/<path>` (`takeScreenshot` adds `.png` when it has
+  no extension), and the result lists it in [`outputs`](#outputs). Inside a
+  bundle the path is taken relative to the bundle root from the step's own
+  flow directory: `takeScreenshot: x` in `sub/open.yaml` is `outputs/sub/x.png`.
+  `startRecording`'s path is a device path on Android and passes through.
+- `assertScreenshot`'s reference: a `blob:` ref is compared; a relative
+  path that names no uploaded file is a **baseline**, written to
+  `outputs/<path>` (`.png` added) as a local first run writes it beside the
+  flow; an absolute host path is `FORBIDDEN`. On a mismatch the diff image
+  is written to `outputs/`, named after the caller's reference —
+  `outputs/<first 8 hex of the ref's sha256>/<basename>_diff.png` for a
+  `blob:` ref — and listed in `outputs`; the failure message names that
+  output, not a path on the daemon's host.
+- `?cwd=` on a command, `cwd` in a `/steps` or `/flows` body, and `file` in
+  a `/flows` body: send the flow as a `bundle` (or its `yaml`) instead.
+- A [flow bundle](#flow-bundles) manifest with a name or hash that could
+  leave its directory.
+- An attach with `platform: web` (or a browser driver), `outputDir`,
+  `flowDir`, `extra.userDataDir` or `extra.browser`, or an `appFile` that
+  is a host path rather than an uploaded `blob:` ref.
+- An Appium attach: `driver: appium` (any case), `appiumUrl`, or any
+  `extra.capsFile`, even a `blob:` ref. Appium capabilities can name host
+  files and programs (`appium:app`, `appium:chromedriverExecutable`), and
+  `appiumUrl` would open sessions to any address the daemon can reach. A
+  unix-socket caller attaches with Appium as before.
+
+A daemon listening beyond loopback also keeps its own environment to
+itself: sessions import none of its variables (so `${HOME}`, `GET …/vars`,
+`eval` and scripts see only what callers set), except the names listed with
+`serve --pass-env NAME`. A unix-socket-only or loopback-only daemon imports
+its environment as before.
+
+### Outputs
+
+A step, batch or flow result carries `outputs`, the files its output
+fields wrote, as paths under the report directory (`outputs/<path>`),
+nested steps and subflows included. Fetch each with
+[`GET …/artifacts/{path}`](#get-v1devicesidartifactspath). It is present
+for a remote caller, and for any caller that sends
+`X-Maestro-Client-Outputs: 1`: a client that names its own output files
+(the CLI with `--target-hub`, the JavaScript library on a hub) sends it, so
+its relative output paths go to `outputs/` even when it reaches the daemon
+over loopback. A local call without it writes where it always has and has
+no `outputs`.
+
+The CLI and the JavaScript library, when they target another machine,
+never send their own output path: they send
+`<first 8 hex of sha256(caller path)>/<basename>`, then fetch the result's
+`outputs` back to the caller's path (relative to their own working
+directory, or absolute). `takeScreenshot --path name` writes `name.png` on
+the client, as a local run would. For a [bundle](#flow-bundles) they fetch
+each `outputs/<path>` to `<path>` under the bundle's directory on the
+client (its files' common directory), where a local run writes it.
+
+## Request ids and retries
+
+`POST …/commands/{name}`, `…/steps`, `…/flows` and `…/apps` may carry
+`X-Maestro-Request-Id`. The daemon keeps each device's last 256 outcomes
+by id for 10 minutes: a repeat of an id that is still running waits for
+that run's outcome, and a repeat of a finished one is answered from the
+cache (with `X-Maestro-Replayed: true`), so a retried `inputText` never
+types twice.
+
+The CLI and the JavaScript library send a fresh id on each of these calls
+over TCP and, after a reset or refused connection, `PEER_UNAVAILABLE`, or
+a 502/504 from a gateway (not the daemon's own `DEVICE_ERROR`), retry it
+up to 3 times with the same id, waiting 0.5 s, 1 s and 2 s. Reads and
+attaches are retried the same way.
 
 ## Errors
 
@@ -72,9 +181,29 @@ Every request resets the idle timer.
 | `DEVICE_NOT_FOUND` | 404 | 4 | no such device id |
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
-| `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device |
-| `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot (use `force`) |
+| `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
+| `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
 | `INTERRUPTED` | 499 | 130 | the request was cancelled mid-step |
+| `FORBIDDEN` | 403 | 2 | a [remote caller](#remote-callers) asked for the host: `runShell`, a host path, `cwd`, a web attach, or to stop a hub |
+| `PEER_UNAVAILABLE` | 503 | 3 | hub mesh: the hub that owns the device is not linked, or its link dropped mid-request (`details.hub`); clients retry it |
+| `HUB_NAME_TAKEN` | 409 | 5 | hub mesh: a joining hub's name is the receiver's own, or one already linked from another address |
+| `HUB_VERSION` | 409 | 5 | hub mesh: a joining hub speaks another API version |
+| `LEASE_REQUIRED` | 409 | 5 | hub: a request that drives a device without its `X-Maestro-Lease` (or with another device's lease); the message names `maestro-d lease --device <id>` and `md.lease()`, `details.hint` the command |
+| `LEASE_EXPIRED` | 409 | 5 | hub: the request's lease has expired or was released |
+
+`PEER_UNAVAILABLE`, `HUB_NAME_TAKEN` and `HUB_VERSION` come from the hub
+mesh ([below](#the-hub-mesh)); the two lease codes come from a hub. A
+`serve` daemon answers with none of them.
+
+Every error answer also carries its code in the header
+`X-Maestro-Error-Code: <code>`, and a hub relaying a peer's answer passes
+it on. An answer without a body, a `HEAD`'s, has only the header to tell
+its code: `LEASE_REQUIRED`, `LEASE_EXPIRED`, `DEVICE_IN_USE` and `BUSY`
+are all `409`, and `PEER_UNAVAILABLE` and `DAEMON_UNAVAILABLE` both `503`.
+The CLI and the JavaScript library read the header when there is no body,
+so a `HEAD` refused `LEASE_EXPIRED` drops the lease from `leases.json` as
+any other request does. A client falls back on the status alone only when
+the header is missing (a proxy's own error page).
 
 A failed step with `optional: true` is *not* an error: `200`, `ok: true`,
 and `error` filled in for inspection.
@@ -96,20 +225,30 @@ curl -s -H "$H" $D/v1/status
     "httpAddr": "127.0.0.1:7788", "startedAt": "2026-09-10T10:00:00Z",
     "runDir": "/Users/me/.maestro-d/run/api",
     "reportsDir": "/Users/me/.maestro-d/run/api/reports",
-    "idleTimeout": 1800
+    "idleTimeout": 1800,
+    "tls": false,
+    "hub": "lab-mac"
   },
-  "devices": [ … as GET /v1/devices, attached ones only … ],
+  "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
   "idleShutdownAt": "2026-09-10T10:30:00Z"
 }
 ```
 
-The only route that still answers while the daemon is shutting down.
+`daemon.hub` is the hub's name, present only on a hub (`hub start`):
+clients use it to know the daemon leases its devices. The name is the
+host's short name, lowercased.
+
+The only route that still answers while the daemon is shutting down. It
+runs no device discovery (adb, simctl), so it answers quickly and clients
+use it as their liveness check.
 
 ### `POST /v1/shutdown`
 
 Detaches every device, shuts down the simulators and emulators the daemon
 booted, and exits. Answers `{"ok": true}` first; the process is gone a
-moment later. No body.
+moment later. No body. On a hub it is served only on the unix socket
+(`maestro-d hub stop`): a TCP caller, or a request a peer forwarded, gets
+`FORBIDDEN`.
 
 ### `GET /v1/events` — server-sent events
 
@@ -130,11 +269,15 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"29271FDH200ABP"}
 | query / header | |
 | --- | --- |
 | `?device=ID` | only that device's events (daemon-wide events such as `daemon.shutdown` have no device and are filtered out too) |
-| `?after=SEQ` or `Last-Event-ID: SEQ` | replay buffered events with `seq > SEQ` first — reconnecting clients miss nothing that is still in the ring buffer |
+| `?after=SEQ` or `Last-Event-ID: SEQ` | replay buffered events with `seq > SEQ` first — reconnecting clients miss nothing that is still in the ring buffer. Not on a hub's merged stream (no `device`, no `scope=local`): that is `USAGE`, see [The hub mesh](#the-hub-mesh) |
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
-`device.stopped`, `daemon.shutdown`. `message` carries free text where
+`device.stopped`, `daemon.shutdown`, and on a hub `lease.granted`,
+`lease.released` and `lease.expired` (`message` names the holder).
+`lease.expired` is a lease whose window ran out; every other end of a lease
+is `lease.released`: a release, its device stopped or deleted, the attach in
+its `POST /v1/leases` failing, or the hub stopping. `message` carries free text where
 there is any. The stream never ends on its own; close the connection to
 stop.
 
@@ -151,10 +294,16 @@ not), emulator AVDs — merged with what this and other daemons hold.
   "devices": [
     { "id": "29271FDH200ABP", "platform": "android", "kind": "device", "name": "Pixel 7", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/29271FDH200ABP/20260910-100000" },
     { "id": "CD9D3952-58FA-4E81-AC64-736189D71D1E", "platform": "ios", "kind": "simulator", "name": "iPhone 13 Pro", "osVersion": "26.0", "state": "Shutdown", "ready": false, "attached": false },
-    { "id": "00008110-0006098A02FA801E", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" }
+    { "id": "00008110-0006098A02FA801E", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" },
+    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "state": "device", "ready": true, "attached": false },
+    { "id": "avd:ci-pixel", "platform": "android", "kind": "emulator", "name": "ci-pixel", "state": "Shutdown", "ready": false, "attached": false, "createdBy": "maestro-d" },
+    { "id": "00000000000000000000000000000000000000a1", "platform": "ios", "kind": "tv", "name": "Lab TV", "osVersion": "26.3", "state": "connected", "ready": true, "attached": false }
   ]
 }
 ```
+
+A running emulator's `name` is its AVD name. An AVD that is not running is
+listed once, as `avd:<name>`; booting it returns the emulator's serial.
 
 | field | |
 | --- | --- |
@@ -163,23 +312,104 @@ not), emulator AVDs — merged with what this and other daemons hold.
 | `busy` | a step is running on it right now |
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
+| `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
+| `lease` | hub only: `{holder, expiresAt}` while the device is leased |
+| `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
+| `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
+| `machine`, `addresses` | hub only: the machine the device is attached to — its host name (`os.Hostname()`), and the owning hub's `--advertise` address (when set) followed by that machine's non-loopback IPs. Set by the owner and carried through the mesh, so a client compares them with its own host name and IPs to find the devices on its own machine, whichever hub it asked |
 
-### `POST /v1/devices` — boot a simulator or emulator
+On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
+and the list covers every hub of the mesh, with `unreachable` naming a hub
+that did not answer; see [The hub mesh](#the-hub-mesh).
+
+On a hub started with `--share-device`, a remote caller sees only the
+shared devices, here and in `GET /v1/status`; every other device is
+`DEVICE_NOT_FOUND` on every route, and booting or creating one is refused.
+Its leases are left out of `GET /v1/leases`, and to that caller are
+`LEASE_EXPIRED` on the `/v1/leases/{lid}` routes, as an unknown lease is.
+The hub's unix socket sees every device. Whether an id is in the pool is
+looked up once, not per request or event: a device id is remembered for the
+hub's life, while an emulator serial (whichever AVD boots on that port next
+reuses it) and an id outside the pool are remembered for 30 s, or until a
+device is booted, stopped, created or deleted on the hub, or a lease ends.
+
+### `GET /v1/catalog[?platform=ios|android][&available=true]`
+
+What `create` can use. iOS comes from `simctl list runtimes -j` and
+`simctl list devicetypes -j` (iPhone and iPad types only); Android from
+`sdkmanager --list_installed` (`--list` with `available=true`, which adds
+the images that can be downloaded) and `avdmanager list device -c`.
+
+```json
+{
+  "ok": true, "exitCode": 0,
+  "ios": {
+    "runtimes": [ { "id": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "name": "iOS 26.5", "version": "26.5", "build": "23F77", "available": true, "deviceTypes": ["com.apple.CoreSimulator.SimDeviceType.iPhone-16", "…"] } ],
+    "deviceTypes": [ { "id": "com.apple.CoreSimulator.SimDeviceType.iPhone-16", "name": "iPhone 16", "productFamily": "iPhone", "minRuntimeVersion": "18.0.0" } ]
+  },
+  "android": {
+    "images": [ { "id": "system-images;android-35;google_apis;arm64-v8a", "api": "android-35", "tag": "google_apis", "abi": "arm64-v8a", "installed": true } ],
+    "profiles": ["pixel_8", "pixel_9", "…"]
+  }
+}
+```
+
+Without `platform`, a platform whose tools are missing is left out and
+named in `"errors": {"android": "sdkmanager not found; …"}`. With
+`platform`, a missing tool fails `DEVICE_ERROR` naming the tool and how to
+install it.
+
+### `POST /v1/devices` — boot, or create and boot, a simulator or emulator
 
 ```sh
 curl -s -H "$H" $D/v1/devices -d '{"platform":"ios","name":"iPhone 16","bootTimeout":120}'
+curl -s -H "$H" $D/v1/devices -d '{"name":"avd:ci-pixel"}'
 ```
 
-`name` is a simulator name or UDID, or an Android AVD name. Waits until the
-device is ready and answers `{"ok": true, "device": {…}}` with the booted
-device (its `id` is what to attach). The device is recorded as booted by
-this daemon.
+`name` is a simulator name or UDID, or an Android AVD name (or
+`avd:<name>`). `platform` may be left out: `avd:` means android, and a name
+or UDID that `GET /v1/devices` lists picks that device's platform; anything
+else fails `USAGE`. Waits until the device is ready and answers
+`{"ok": true, "device": {…}}` with the booted device (its `id` is what to
+attach — an emulator's serial). The device is recorded as booted by this
+daemon.
+
+With `create`, the device is created first, recorded in
+`<home>/created.json`, and booted unless `"boot": false`:
+
+```sh
+curl -s -H "$H" $D/v1/devices -d '{"platform":"ios","name":"ci-phone","create":{"type":"iPhone 16","runtime":"iOS-26-5"}}'
+curl -s -H "$H" $D/v1/devices -d '{"platform":"android","name":"ci-pixel","boot":false,
+  "create":{"image":"system-images;android-35;google_apis;arm64-v8a","profile":"pixel_8","dataSize":"8G"}}'
+```
+
+| `create` field | |
+| --- | --- |
+| `name` | defaults to the request's `name` |
+| `type`, `runtime` | iOS: a device type name or id, and a runtime id, short form (`iOS-26-5`), name or version; defaults are the newest installed runtime and the newest iPhone it supports |
+| `image`, `profile` | Android: an sdkmanager package path and an avdmanager profile; defaults are the newest installed `google_apis` image for the host's ABI (`arm64-v8a` on Apple silicon) and `pixel_8` |
+| `dataSize` | Android: the data partition (`disk.dataPartition.size`), default `6G`, refused above `10G` |
+| `installImage`, `acceptLicenses` | Android: download a missing image with `sdkmanager --install`; `installImage` without `acceptLicenses` fails `USAGE` |
+
+A duplicate name, an unknown runtime, type, image or profile, a missing
+image without `installImage`, and a field of the other platform fail
+`USAGE` before anything is created. Without `boot: false` the answer is the
+booted device; with it, the shut-down one (an AVD as `avd:<name>`).
 
 ### `DELETE /v1/devices/{id}`
 
 Detaches if attached, then shuts the simulator/emulator down. Refuses with
 `DEVICE_EXTERNAL` unless the daemon booted it; body `{"force": true}` or
 `?force=true` overrides. Answers `{"ok": true}`.
+
+With `?delete=true` (or body `{"delete": true}`) it deletes the simulator
+or AVD instead: `{id}` may be a UDID, a simulator name, `avd:<name>`, an
+AVD name or a running emulator's serial (which deletes its AVD). Only
+devices `create` made are deleted without `force`; anything else fails
+`DEVICE_EXTERNAL` and is left untouched. A device that is attached is
+detached, a running one is shut down, then `simctl delete` or
+`avdmanager delete avd` runs. Answers `{"ok": true, "device": {…}}` with
+the deleted device.
 
 ### `POST /v1/devices/{id}/attach`
 
@@ -200,7 +430,7 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 | --- | --- | --- |
 | `platform` | `--platform` | `android`, `ios`, `web`, `mock`; inferred from the id when omitted |
 | `driver` | `--driver` | |
-| `appFile` | `--app-file` | installed on attach unless `noAppInstall` |
+| `appFile` | `--app-file` | installed on attach unless `noAppInstall`; a host path, or an uploaded `blob:sha256:<hex>/<basename>` ref (the only form a remote caller may send) |
 | `appId` | `--app-id` | default for `launchApp`, `stopApp`, `clearState`, … |
 | `url` | `--url` | web |
 | `teamId` | `--team-id` | physical iOS: signs WebDriverAgent; omitted, the daemon's own `MAESTRO_TEAM_ID` / `DEVELOPMENT_TEAM` |
@@ -222,7 +452,12 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 
 Answers `{"ok": true, "device": {…}}`. Errors: `DEVICE_NOT_FOUND`,
 `DEVICE_IN_USE`, `DEVICE_ERROR` (driver would not start — the message has
-the driver's own error).
+the driver's own error), and for a [remote caller](#remote-callers)
+`FORBIDDEN` on `web`, `outputDir`, `flowDir`, `extra.userDataDir`,
+`extra.browser`, a host-path `appFile`, or Appium (`driver: appium`,
+`appiumUrl`, `extra.capsFile`). A `blob:` ref in `appFile` (or, from a
+local caller, `extra.capsFile`) that is malformed is `FORBIDDEN`, and one
+the daemon was never sent is `USAGE`.
 
 ### `POST /v1/devices/{id}/detach`
 
@@ -233,6 +468,168 @@ Closes the driver; the device keeps running. `{"ok": true}`, or
 
 One device, same shape as the list entries. `DEVICE_NOT_FOUND` if the host
 cannot see it and the daemon does not hold it.
+
+## The hub mesh
+
+Hubs link into a mesh ([hub.md](hub.md)); any hub serves the full API for
+every hub's devices and forwards each request to the device's owner, which
+runs it through its own handler, so every route, rule and error code is the
+same.
+
+- **Qualified ids.** On a hub every device id is `<localId>@<hub>` and every
+  lease id `<uuid>@<hub>`, in responses and events; device entries carry
+  `hub` and `localId`. A request may send either form: an unqualified id
+  resolves to this hub's device, else to the one hub that lists it (several:
+  `USAGE` with `details.candidates`; a linked hub that does not answer in
+  time, or a known hub whose link is down, when no hub lists the id:
+  `PEER_UNAVAILABLE` with `details.hubs`).
+- **Routing.** `/v1/devices/{id}/…` and `/v1/leases/{lid}/…` go to the hub
+  the suffix names; `POST /v1/leases` by its body's `device` (a `select` is
+  tried here first, then on the peers by RTT, ready devices before booted
+  ones); `GET /v1/events?device=` by the id; `POST /v1/devices` and
+  `GET /v1/catalog` by `hub` in the body or query (or a qualified `name`).
+- **Mesh-wide lists.** `GET /v1/devices`, `GET /v1/leases` and
+  `GET /v1/events` without `device` include every linked hub (each asked
+  within 3 s, answers cached 2 s); `unreachable: [{hub, error}]` names a hub
+  that did not answer or whose link is down. `?scope=local` limits a list
+  to this hub. The merged event stream adds a hub as it links and
+  resubscribes one that restarts; it carries no `id:` lines, and `after` or
+  `Last-Event-ID` on it is `USAGE` (each hub numbers its own events).
+- **Failures.** A request for a hub that is not linked, or whose link drops
+  while it runs, fails `PEER_UNAVAILABLE` (503) with `details.hub`.
+
+### `GET /v1/hub`
+
+```json
+{ "ok": true, "exitCode": 0,
+  "hub": { "name": "hub-b", "version": "1.1.0", "apiVersion": "1", "listen": "[::]:7433", "mdns": true,
+    "peers": [ { "name": "hub-a", "addr": "10.0.0.2:7433", "state": "linked", "direction": "outbound",
+                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z" } ] } }
+```
+
+`state` is `linked`, `down`, `stopped` (it shut down cleanly), `connecting`
+or `refused`. A daemon that is not a hub answers `USAGE`.
+
+### `GET /v1/hub/link`
+
+The peer link: a WebSocket upgrade with `Authorization: Bearer <peer
+token>` and `X-Maestro-Hub: <name>` (`?bulk=1` for a short-lived link that
+carries one large or streamed exchange). It is for hubs, not clients:
+refused `401` for a wrong peer token, `HUB_NAME_TAKEN` or `HUB_VERSION`
+(409) for a hub that may not join.
+
+## Leases (hubs)
+
+A hub (`maestro-d hub start`) lends each device to one client at a time.
+A client takes a **lease** on the device, then sends its id in
+`X-Maestro-Lease` on every request for that device. A plain daemon has no
+leases: its lease routes answer `USAGE`, and attach-and-own works as
+before.
+
+- **Which routes need it.** Every `/v1/devices/{id}/…` route — attach,
+  detach, commands, steps, flows, apps, blobs, artifacts, screenshot,
+  hierarchy, state, vars and eval — and `DELETE /v1/devices/{id}` while the
+  device is leased. A `DELETE` that names the device by its name is checked
+  as the device the name resolves to. Without the header: `LEASE_REQUIRED` (409, exit 5);
+  with a lease that has ended: `LEASE_EXPIRED` (409, exit 5).
+  `GET /v1/devices/{id}` and `…/info` stay open, and so do the listings.
+  This holds over the hub's unix socket too.
+- **A fixed window.** A lease runs from its grant (or its last explicit
+  renew) for `ttlSec` seconds: 8 hours (28800) by default. Using it never
+  moves its expiry; only `POST /v1/leases/{lid}/renew` does.
+- **Maximum.** Each device has a maximum window: 8 hours, or the hub's
+  `--lease-max DURATION`, or one device's `--lease-max DEVICE=DURATION` (by
+  id or name, as for `--share-device`). A `ttlSec` over it is `USAGE` naming
+  the maximum (`details.maxSec`), and nothing is granted; the same goes for
+  renew. Leases and device listings carry `maxSec`.
+- **Expiry.** At the end of the window the hub ends the lease: a request
+  still running under it is cancelled (it answers `INTERRUPTED` when its step
+  unwinds within about a second, else `LEASE_EXPIRED`; see below), the
+  device is detached, and shut down if the hub booted it for the lease, and
+  it is listed as available again. Every later request with that lease is
+  `LEASE_EXPIRED`. Releasing does the same at once. Work under the lease is
+  cancelled as far as its driver allows: a WebDriverAgent HTTP call runs to
+  its own timeout, and a WebDriverAgent start to its end (minutes when
+  cold). A request whose work has not unwound within about a second answers
+  `LEASE_EXPIRED` without it (an attach at once, and the driver it starts is
+  discarded). Until every request and attach under the ended lease has
+  returned, the device stays attached to it and is not detached, not
+  available, and a new lease on it is `DEVICE_IN_USE` ("being released"),
+  so that work never touches a later holder's session. A request whose
+  answer has already begun when the lease ends finishes that answer itself.
+- **Stopping the device.** Stopping or deleting a leased device
+  (`DELETE /v1/devices/{id}`, with its lease) ends the lease once the stop or
+  delete succeeds (`lease.released`). A lease that ends while that stop runs
+  waits for it and does not shut the device down again. While a device is
+  being released, a stop or delete without its lease is `DEVICE_IN_USE`.
+- **Clients never lease on their own.** The CLI and the JavaScript library
+  send a lease only when the client holds one (`maestro-d lease`, `md.lease()`,
+  recorded in `<home>/leases.json`); without one the request goes bare and
+  the hub answers `LEASE_REQUIRED`.
+
+### `POST /v1/leases`
+
+```sh
+curl -s -H "$H" -X POST $D/v1/leases \
+  -d '{"device":"99FA590E-…","ttlSec":3600,"holder":"ci@builder","attach":{}}'
+curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"simulator"}}'
+```
+
+| field | |
+| --- | --- |
+| `device` | the device to lease: one the hub (or, through the mesh, a peer) lists. An id no hub lists is `DEVICE_NOT_FOUND` and nothing is granted; when a peer did not answer it is `PEER_UNAVAILABLE` instead, since the device may be that peer's |
+| `select` | or the first free device that matches `{platform, kind, name, osVersion, hub, boot}`: platform and kind exactly, `name` the device's name (any case) or id, `osVersion` the version or a prefix (`"26"` matches `26.5`), `hub` this hub's name. A TV (`kind: "tv"`) matches only a selector that asks for `kind: "tv"` or names it. Free means ready and neither leased nor attached; with `boot: true` a shut-down simulator or AVD is a candidate too, after the ready ones, and the hub boots it for the lease (`booted: true`) and shuts it down when the lease ends |
+| `ttlSec` | the window: default 28800 (8 hours), or the device's maximum when that is shorter; over the maximum is `USAGE` naming it. A selector skips a candidate whose maximum is shorter, and answers that `USAGE` when none is left |
+| `holder` | who holds it, as listings show; default the caller's address |
+| `attach` | an attach body ([`POST …/attach`](#post-v1devicesidattach)); the device is attached in the same call, and a failed attach ends the lease. Without it the device is only reserved |
+
+```json
+{
+  "ok": true, "exitCode": 0,
+  "lease": { "id": "5ae28c45-60e9-46f6-89e0-66b98f06b61d", "device": "99FA590E-…", "holder": "ci@builder", "expiresAt": "2026-11-08T13:00:00Z", "ttlSec": 3600, "maxSec": 28800 },
+  "device": { …as GET /v1/devices/{id}, with lease… }
+}
+```
+
+A device that another lease holds, or another daemon on the hub's machine
+has attached, is `DEVICE_IN_USE` (`details.holder`/`expiresAt`, or
+`details.owner`); so is one whose ended lease is still detaching it or
+shutting it down (a selector passes over it). Those teardowns hold up no
+lease call for another device. A selector that matches nothing is `DEVICE_NOT_FOUND`
+naming the selector; one whose matches are all taken is `DEVICE_IN_USE`
+listing them in `details.candidates`. Through a mesh, when no hub grants
+and the only other answers came from hubs that are unreachable or stopping,
+it is `PEER_UNAVAILABLE` naming them in `details.hubs` (retry). The request takes an
+`X-Maestro-Request-Id`, so a retried request is granted once. With
+`attach`, the attach runs under the lease: if the window ends first, the
+answer is `LEASE_EXPIRED` at once, the attach is cancelled (or its driver
+discarded when it returns) and the device is left detached; it is
+released only after that attach has unwound.
+
+### `GET /v1/leases`, `GET /v1/leases/{lid}`
+
+The live leases (`{leases: [Lease…]}`), or one (`{lease}`); a lease that
+has ended is `LEASE_EXPIRED`. On a hub started with `--share-device`, a
+remote caller gets only the shared devices' leases: another device's lease
+is `LEASE_EXPIRED` to it here, on renew and on `DELETE`, and is left as it
+is.
+
+### `POST /v1/leases/{lid}/renew`
+
+Body `{ttlSec?}`. Sets the expiry to now plus `ttlSec`, which becomes the
+lease's window (default the lease's own window); answers `{lease}`. Over
+the device's maximum is `USAGE` naming it, and the lease is left as it was;
+a lease that has ended is `LEASE_EXPIRED`.
+
+```sh
+curl -s -H "$H" -X POST $D/v1/leases/$LEASE/renew -d '{"ttlSec":1800}'
+```
+
+### `DELETE /v1/leases/{lid}`
+
+Ends the lease: the device is detached (and shut down when the hub booted
+it for the lease). Answers the lease as it was; `LEASE_EXPIRED` when it had
+already ended.
 
 ## Steps
 
@@ -281,7 +678,7 @@ validated the same way as the outer command.
 | query | |
 | --- | --- |
 | `wait=false` | `BUSY` instead of queueing behind a running step |
-| `cwd=DIR` | directory relative paths in the value (`runFlow: file`, `runScript`, `addMedia`) resolve against |
+| `cwd=DIR` | directory relative paths in the value (`runFlow: file`, `runScript`, `addMedia`) resolve against; local callers only (`FORBIDDEN` from a [remote caller](#remote-callers)) |
 
 The response is a **step result**:
 
@@ -310,6 +707,7 @@ The response is a **step result**:
 | `element` | the element a selector resolved to, when there was one |
 | `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the file path for `startRecording` |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
+| `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |
 
 Unknown `{name}`: `USAGE`. A value the parser rejects (unknown field, wrong
@@ -326,7 +724,9 @@ curl -s -H "$H" $D/v1/devices/29271FDH200ABP/steps -d '{
 }'
 ```
 
-`steps` is a JSON list of steps (or `yaml` a string holding the YAML list).
+`steps` is a JSON list of steps (or `yaml` a string holding the YAML list,
+or `bundle` an uploaded [flow bundle](#flow-bundles) whose root file is the
+step list).
 Each entry is `{"<command>": <body>}`, where `<body>` is what the single
 command route takes, so the same field checking applies; a bad field reports
 which step it was in (`step 2: tapOn has no field "txt"`).
@@ -344,6 +744,14 @@ failure and the status is its code's (`422` for `COMMAND_FAILED`):
 }
 ```
 
+A batch's `outputs` collects every result's `outputs`.
+
+With `bundle`, the daemon builds the bundle (below) and runs its root file's
+steps with the session's flow directory set, for that call only, to the
+root file's own directory, so relative `runFlow`, `runScript` and
+`addMedia` resolve inside the bundle as they would beside the file; the
+session's flow directory is restored afterwards.
+
 Query `wait` and `cwd` as for commands.
 
 ### `POST /v1/devices/{id}/flows` — a flow file
@@ -355,13 +763,157 @@ curl -s -H "$H" $D/v1/devices/29271FDH200ABP/flows -d '{
 }'
 ```
 
-`file` (a path on the daemon's host) or `yaml` (the file's text, with the
-`appId:` / `---` header). The flow runs as `maestro-runner test` would —
+`file` (a path on the daemon's host; local callers only), `yaml` (the
+file's text, with the `appId:` / `---` header) or `bundle` (an uploaded
+[flow bundle](#flow-bundles); its root file runs, with the flow directory
+set to the root's directory for the whole call, hooks included). The flow runs as `maestro-runner test` would —
 `onFlowStart`/`onFlowComplete` hooks, the flow's own `env`, `runFlow`
 relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.
 The response is one step result of type `runFlow` whose `subSteps` are the
 flow's steps.
+
+### Flow bundles
+
+A client that runs a flow on another machine's daemon packs it with its
+dependency closure (`maestro-d pack --flow FILE --json`): each file is
+uploaded as a [blob](#blobs-uploaded-files), and the **manifest** names
+them relative to their common directory:
+
+```json
+{ "root": "main.yaml",
+  "files": { "main.yaml": "<sha256>", "sub/open-general.yaml": "<sha256>",
+             "scripts/compute.js": "<sha256>", "photo.png": "<sha256>" } }
+```
+
+`POST …/flows {"bundle": <manifest>, "env": {…}}` and
+`POST …/steps {"bundle": <manifest>, "continueOnError": …}` take it inline.
+In a one-shot's flow field (`runFlow` `file`/`else`, `retry` `file`) it is
+`bundle:sha256:<manifest sha256>/<root>`, with the manifest's JSON uploaded
+as a blob too; `<root>` may be any file of the bundle. The daemon builds
+the directory `bundles/<manifest sha256>/` in the session's report
+directory, with hard links from the blob store, and runs from there; that
+directory is one of the call's allowed roots, so the flow's relative
+references, and its subflows', resolve inside it. A file not yet uploaded
+is `USAGE`, naming it.
+
+Before it creates anything the daemon checks every name and hash, and
+answers `FORBIDDEN` otherwise: each `files` key and `root` must be a
+relative, slash-separated path with no empty, `.` or `..` element (and no
+backslash); `root` must be a key of `files`; each hash, and a `bundle:`
+ref's manifest hash, must be 64 lowercase hex digits. A bundle's
+`runShell` and host paths are refused as for any [remote
+caller](#remote-callers).
+
+```sh
+B=$(maestro-d pack --flow main.yaml --json)
+echo "$B" | jq -r '.bundle.units[] | "\(.sha256) \(.file)"' | while read SUM F; do
+  curl -s -H "$H" -X PUT --data-binary @"$F" $D/v1/devices/$ID/blobs/$SUM >/dev/null
+done
+curl -s -H "$H" $D/v1/devices/$ID/flows -d "{\"bundle\": $(echo "$B" | jq -c .bundle.manifest)}"
+```
+
+## Blobs (uploaded files)
+
+Every daemon keeps a content-addressed store at
+`$MAESTRO_D_HOME/blobs/sha256/<hex>` (default `~/.maestro-d`). A client
+that targets a daemon on another machine uploads each file a step, an
+install or an attach needs, then names it `blob:sha256:<hex>/<basename>`.
+The routes are per device, so on a mesh they reach the device's owner; the
+device need not be attached. Blobs unused for 7 days are deleted when the
+daemon starts. `{sha256}` must be 64 lowercase hex digits, or the request
+is `FORBIDDEN` before any file is opened.
+
+### `HEAD /v1/devices/{id}/blobs/{sha256}`
+
+`200` when the daemon has the blob, `404` when it does not. Either way
+`Upload-Offset` says how many bytes it holds (of a partial upload, for a
+404). A refusal (on a hub, `LEASE_REQUIRED` or `LEASE_EXPIRED`; a
+`DEVICE_NOT_FOUND` `404`) has no body either: it names its code in
+`X-Maestro-Error-Code`, which a missing blob's `404` does not carry (see
+[Errors](#errors)).
+
+### `PUT /v1/devices/{id}/blobs/{sha256}`
+
+The body is the file's bytes, streamed (not subject to the 32 MiB JSON
+cap). `Content-Range: bytes START-END/TOTAL` resumes an upload at
+`START`, which must not be past `Upload-Offset`; without it the body is the
+whole file. Bytes that arrive before a dropped connection are kept. When
+the file is complete its sha256 is checked before it becomes visible: a
+mismatch is `USAGE` and nothing is kept.
+
+```json
+{ "ok": true, "exitCode": 0, "sha256": "…", "offset": 81234, "complete": true }
+```
+
+`201` when the blob was stored, `200` when the daemon already had it,
+`202` when a range left it incomplete. Concurrent uploads of one hash are
+serialised.
+
+Over TCP the CLI and the JavaScript library upload this way: after a reset
+or refused connection, a `503` (`DAEMON_UNAVAILABLE` or `PEER_UNAVAILABLE`,
+when a hub loses its link to the device's hub) or a gateway's 502/504, on
+the `HEAD` or the `PUT`, they ask again and resume from `Upload-Offset`, up
+to 3 times, waiting 0.5 s, 1 s and 2 s.
+
+```sh
+SUM=$(shasum -a 256 photo.png | cut -d' ' -f1)
+curl -s -H "$H" -I $D/v1/devices/$ID/blobs/$SUM                     # 404: not there yet
+curl -s -H "$H" -X PUT --data-binary @photo.png $D/v1/devices/$ID/blobs/$SUM
+curl -s -H "$H" $D/v1/devices/$ID/commands/addMedia -d "{\"files\":[\"blob:sha256:$SUM/photo.png\"]}"
+```
+
+`maestro-d pack PATH… --json` prints each file's `sha256`, `size` and `ref`.
+A directory (an iOS `.app`) is packed as a deterministic zip — sorted
+entries, fixed timestamps — named after the directory, and the daemon
+unpacks it into the step's or installer's copy.
+
+## Apps
+
+### `POST /v1/devices/{id}/apps`
+
+```sh
+curl -s -H "$H" $D/v1/devices/emulator-5554/apps -d '{"app": "blob:sha256:…/settings_apk-debug.apk"}'
+```
+
+Installs an app without attaching, with the installers `attach --app-file`
+uses (`adb install -r -g`; `simctl install`; `devicectl`, then go-ios, on a
+physical iPhone). `app` is a `blob:` ref, or — local callers only — a path
+on the daemon's host (`.apk`, `.app` or `.ipa`). `reinstall: true`
+uninstalls the app first; `platform` overrides the platform the file and
+the device imply. The answer names the app:
+
+```json
+{ "ok": true, "exitCode": 0, "device": "emulator-5554", "appId": "io.appium.settings" }
+```
+
+`appId` is the `CFBundleIdentifier` of an `.app` or an `.ipa`'s
+`Payload/*.app`, or an `.apk`'s package name from `aapt2 dump packagename`
+(the newest `build-tools` under `$ANDROID_HOME`); without `aapt2` it is
+left out. An installer failure is `DEVICE_ERROR`.
+
+### `DELETE /v1/devices/{id}/apps/{appId}`
+
+Uninstalls by bundle id or package name.
+
+## Artifacts
+
+### `GET /v1/devices/{id}/artifacts`
+
+The attached session's report directory: screenshots, `outputs/`,
+recordings, hierarchy dumps, the report files. Uploaded inputs (`blobs/`)
+are left out.
+
+```json
+{ "ok": true, "exitCode": 0, "device": "…", "reportDir": "…",
+  "artifacts": [ { "path": "outputs/3f2a91c0/photos.png", "size": 81234, "modTime": "2026-11-08T20:01:02Z" }, … ] }
+```
+
+### `GET /v1/devices/{id}/artifacts/{path…}`
+
+One file's bytes. `path` is relative to the report directory, as the
+listing and `outputs` name it; an absolute path, a `..` element, or a
+symlink that leads out of the directory is `FORBIDDEN`.
 
 ## Reading state
 

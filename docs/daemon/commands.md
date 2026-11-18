@@ -133,7 +133,7 @@ await m.addMedia({ … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `files` | `string[]` |  |
+| `files` | `string[]` | A file on the caller's machine: uploaded to a hub. |
 
 ## `assertCondition`
 
@@ -303,7 +303,7 @@ await m.assertScreenshot({ path: '<path>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `path` | `string` |  |
+| `path` | `string` | A file on the caller's machine: uploaded to a hub. |
 | `cropOn` | `Selector` |  |
 | `thresholdPercentage` | `unknown` |  |
 
@@ -1140,7 +1140,7 @@ await m.loadAuthState({ path: '<path>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `path` | `string` | Input file path |
+| `path` | `string` | Input file path A file on the caller's machine: uploaded to a hub. |
 
 ## `longPressOn`
 
@@ -1424,7 +1424,7 @@ Nested steps (`commands:` / `steps:`) are given as a YAML list or JSON array; th
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `maxRetries` | `string` | String for variable support |
-| `file` | `string` |  |
+| `file` | `string` | A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `env` | `Record<string, string>` |  |
 | `commands` | `Step[]` | Steps to retry (alternative to file) |
 
@@ -1447,7 +1447,7 @@ await m.runBrowserScript({ file: '<file>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `file` | `string` | Path to JS file |
+| `file` | `string` | Path to JS file A file on the caller's machine: uploaded to a hub. |
 | `env` | `Record<string, string>` | Environment variables injected as window.__env |
 | `output` | `string` | Variable name to store the return value |
 
@@ -1472,11 +1472,11 @@ Nested steps (`commands:` / `steps:`) are given as a YAML list or JSON array; th
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `file` | `string` |  |
+| `file` | `string` | A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `when` | `Condition` |  |
 | `env` | `Record<string, string>` |  |
 | `commands` | `Step[]` | Inline steps (alternative to file) |
-| `else` | `string | Step[]` | Fallback flow file or inline steps when `when` is false |
+| `else` | `string | Step[]` | Fallback flow file or inline steps when `when` is false A flow file on the caller's machine: packed with its references and sent to a hub as a bundle. |
 | `elseCommands` | `Step[]` | Inline fallback steps when `when` is false |
 
 ## `runScript`
@@ -1498,8 +1498,8 @@ await m.runScript({ script: '<script>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `script` | `string` | Script content or filename (string form) |
-| `file` | `string` | Script filename (map form) |
+| `script` | `string` | Script content or filename (string form) A file when the value ends in `.js`: uploaded to a hub. |
+| `file` | `string` | Script filename (map form) A file when the value ends in `.js`: uploaded to a hub. |
 | `env` | `Record<string, string>` |  |
 
 ## `runShell`
@@ -1544,7 +1544,7 @@ await m.runWebViewScript({ file: '<file>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `file` | `string` | Path to JS file |
+| `file` | `string` | Path to JS file A file on the caller's machine: uploaded to a hub. |
 | `env` | `Record<string, string>` | Environment variables injected as window.__env |
 | `output` | `string` | Variable name to store the return value |
 
@@ -1567,7 +1567,7 @@ await m.saveAuthState({ path: '<path>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `path` | `string` | Output file path |
+| `path` | `string` | Output file path Written on the device's host: fetched back from a hub. |
 
 ## `scroll`
 
@@ -1919,7 +1919,7 @@ await m.takeScreenshot({ path: '<path>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `path` | `string` |  |
+| `path` | `string` | Written on the device's host: fetched back from a hub. |
 | `cropOn` | `Selector` |  |
 
 ## `tapOn`
@@ -2119,8 +2119,8 @@ await m.uploadFile({ … })
 | `repeat` | `number` | Tap repeat count |
 | `delay` | `number` | Delay between repeats (ms) |
 | `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
-| `path` | `string` | Single file path |
-| `paths` | `string[]` | Multiple file paths |
+| `path` | `string` | Single file path A file on the caller's machine: uploaded to a hub. |
+| `paths` | `string[]` | Multiple file paths A file on the caller's machine: uploaded to a hub. |
 
 ## `waitForAnimationToEnd`
 

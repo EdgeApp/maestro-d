@@ -89,16 +89,21 @@ func TestTVRuntimeSelection(t *testing.T) {
 	for _, devices := range [][]simulator.SimulatorDevice{nil, {{UDID: "different", Platform: "tvOS", IsAvailable: true}}, {{UDID: "fixture", Platform: "tvOS", IsAvailable: false}}} {
 		r := NewRunner("fixture", "", "")
 		r.listSimulators = func() ([]simulator.SimulatorDevice, error) { return devices, nil }
+		r.lookupTV = notTV
 		if err := r.configureRuntime(); err != nil || r.IsTV() {
 			t.Fatalf("no-match fallback: %v", err)
 		}
 	}
 	r := NewRunner("fixture", "", "")
 	r.listSimulators = func() ([]simulator.SimulatorDevice, error) { return nil, fmt.Errorf("simctl unavailable") }
+	r.lookupTV = notTV
 	if err := r.configureRuntime(); err != nil || r.IsTV() {
 		t.Fatal("discovery failure changed fallback")
 	}
 }
+
+// notTV is a lookupTV for a device devicectl says is not a TV.
+func notTV(string) (DevicectlTV, bool, error) { return DevicectlTV{}, false, nil }
 
 func TestTVRemoteKeys(t *testing.T) {
 	t.Setenv("MAESTRO_TV_REMOTE_CONFIG", "")

@@ -5,12 +5,15 @@ package cli
 // and exit codes across the command surface.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -24,7 +27,14 @@ type e2e struct {
 	bin  string
 	home string
 	cwd  string
+	// coverDir, from MAESTRO_D_E2E_COVERDIR, is where the -cover binary
+	// and the daemons it spawns write their coverage (GOCOVERDIR).
+	coverDir string
 }
+
+// envE2ECoverDir makes newE2E build the binary with -cover; `make
+// cover-changed` sets it so code only a subprocess runs is counted.
+const envE2ECoverDir = "MAESTRO_D_E2E_COVERDIR"
 
 func newE2E(t *testing.T) *e2e {
 	t.Helper()
@@ -37,12 +47,20 @@ func newE2E(t *testing.T) *e2e {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "maestro-d")
-	build := exec.Command("go", "build", "-o", bin, ".")
+	args := []string{"build", "-o", bin, "."}
+	coverDir := os.Getenv(envE2ECoverDir)
+	if coverDir != "" {
+		if err := os.MkdirAll(coverDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		args = []string{"build", "-cover", "-o", bin, "."}
+	}
+	build := exec.Command("go", args...)
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	e := &e2e{t: t, bin: bin, home: filepath.Join(dir, "home"), cwd: dir}
+	e := &e2e{t: t, bin: bin, home: filepath.Join(dir, "home"), cwd: dir, coverDir: coverDir}
 	t.Cleanup(func() {
 		e.run("stop", "--all")
 	})
@@ -54,17 +72,48 @@ type result struct {
 	code           int
 }
 
-func (e *e2e) run(args ...string) result {
-	e.t.Helper()
-	cmd := exec.Command(e.bin, args...)
-	cmd.Dir = e.cwd
-	cmd.Env = append(os.Environ(),
+// targetEnv are the variables that point a client at a TCP daemon or hub.
+// The harness drops them, so a targeting shell never reaches the cases
+// that test the local daemon; TestE2E_TargetHub sets them for itself.
+var targetEnv = []string{"MAESTRO_D_HUB", "MAESTRO_D_TOKEN", "MAESTRO_D_CA"}
+
+// env is the environment of every command the harness runs, plus extra.
+func (e *e2e) env(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		drop := false
+		for _, t := range targetEnv {
+			drop = drop || k == t
+		}
+		if !drop {
+			env = append(env, kv)
+		}
+	}
+	env = append(env,
 		daemon.EnvHome+"="+e.home,
 		daemon.EnvBin+"="+e.bin,
 		daemon.EnvName+"=",
 		daemon.EnvDevice+"=",
 		"NO_COLOR=1",
 	)
+	if e.coverDir != "" {
+		env = append(env, "GOCOVERDIR="+e.coverDir)
+	}
+	return append(env, extra...)
+}
+
+func (e *e2e) run(args ...string) result {
+	e.t.Helper()
+	return e.runEnv(nil, args...)
+}
+
+// runEnv is run with extra environment variables.
+func (e *e2e) runEnv(extra []string, args ...string) result {
+	e.t.Helper()
+	cmd := exec.Command(e.bin, args...)
+	cmd.Dir = e.cwd
+	cmd.Env = e.env(extra...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -82,6 +131,16 @@ func (e *e2e) run(args ...string) result {
 func (e *e2e) ok(args ...string) result {
 	e.t.Helper()
 	r := e.run(args...)
+	if r.code != 0 {
+		e.t.Fatalf("%v: exit %d\n%s%s", args, r.code, r.stdout, r.stderr)
+	}
+	return r
+}
+
+// okEnv is ok with extra environment variables.
+func (e *e2e) okEnv(extra []string, args ...string) result {
+	e.t.Helper()
+	r := e.runEnv(extra, args...)
 	if r.code != 0 {
 		e.t.Fatalf("%v: exit %d\n%s%s", args, r.code, r.stdout, r.stderr)
 	}
@@ -330,7 +389,7 @@ func TestE2E_AttachFailureAndInterrupt(t *testing.T) {
 	os.WriteFile(loop, []byte("while:\n  visible: Login\ncommands:\n  - tapOn: Login\n"), 0o644)
 	cmd := exec.Command(e.bin, "repeat", "--yaml", loop)
 	cmd.Dir = e.cwd
-	cmd.Env = append(os.Environ(), daemon.EnvHome+"="+e.home, daemon.EnvBin+"="+e.bin, daemon.EnvName+"=", daemon.EnvDevice+"=")
+	cmd.Env = e.env()
 	var errb bytes.Buffer
 	cmd.Stderr = &errb
 	if err := cmd.Start(); err != nil {
@@ -345,4 +404,368 @@ func TestE2E_AttachFailureAndInterrupt(t *testing.T) {
 	}
 	// The device is free again right away.
 	e.ok("tapOn", "Login")
+}
+
+// TestE2E_DeviceManagementRefusals drives device catalog, create, start and
+// delete through the binary for the refusals that are decided before any
+// simulator or emulator tool runs, so it needs none installed.
+func TestE2E_DeviceManagementRefusals(t *testing.T) {
+	e := newE2E(t)
+	cases := []struct {
+		code int
+		want daemon.Code
+		args []string
+	}{
+		{2, daemon.CodeUsage, []string{"device", "catalog", "--platform", "windows"}},
+		{2, daemon.CodeUsage, []string{"device", "catalog", "extra"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--name", "x"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--platform", "android", "--name", "e2e-x", "--data-size", "12G", "--no-boot"}},
+		{2, daemon.CodeUsage, []string{"device", "create", "--platform", "ios", "--name", "e2e-x", "--image", "system-images;a;b;c"}},
+		{2, daemon.CodeUsage, []string{"device", "start", "202611080630-no-such-device"}},
+		{4, daemon.CodeDeviceNotFound, []string{"device", "delete", "202611080630-no-such-device"}},
+		{2, daemon.CodeUsage, []string{"device", "delete"}},
+	}
+	for _, tc := range cases {
+		r := e.fails(tc.code, tc.args...)
+		if got := envelopeCode(t, r.stderr); got != tc.want {
+			t.Errorf("%v: code %s, want %s", tc.args, got, tc.want)
+		}
+	}
+	r := e.fails(2, "device", "create", "--platform", "android", "--name", "e2e-x", "--data-size", "12G", "--json")
+	if !strings.Contains(r.stdout, "above the 10G limit") {
+		t.Errorf("--json puts the envelope on stdout:\n%s", r.stdout)
+	}
+	e.ok("stop")
+}
+
+func TestE2E_HarnessDropsTargetEnv(t *testing.T) {
+	t.Setenv("MAESTRO_D_HUB", "203.0.113.1:7433")
+	t.Setenv("MAESTRO_D_TOKEN", "parent-token")
+	t.Setenv("MAESTRO_D_CA", "/parent/ca.pem")
+	e := &e2e{t: t, home: t.TempDir(), bin: "maestro-d"}
+	for _, kv := range e.env() {
+		for _, k := range targetEnv {
+			if strings.HasPrefix(kv, k+"=") {
+				t.Fatalf("%s reached the harness environment", kv)
+			}
+		}
+	}
+	if env := e.env("MAESTRO_D_HUB=x"); env[len(env)-1] != "MAESTRO_D_HUB=x" {
+		t.Fatal("a case can still set it for itself")
+	}
+}
+
+// TestE2E_TargetHub drives a TCP daemon (serve --http --token) with
+// one-shots through MAESTRO_D_HUB and --target-hub, and checks that no
+// local daemon is spawned.
+func TestE2E_TargetHub(t *testing.T) {
+	e := newE2E(t)
+	serve := exec.Command(e.bin, "serve", "--daemon", "th", "--http", "127.0.0.1:0", "--token", "e2e-token", "--idle-timeout", "0")
+	serve.Dir = e.cwd
+	serve.Env = e.env()
+	stdout, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve.Stdout = w
+	if err := serve.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	// Reap it as soon as it exits, so `stop` sees it gone.
+	exited := make(chan struct{})
+	go func() { _ = serve.Wait(); close(exited) }()
+	t.Cleanup(func() {
+		_ = serve.Process.Kill()
+		<-exited
+	})
+	addr := ""
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		if line := sc.Text(); strings.HasPrefix(line, "READY") {
+			for _, f := range strings.Fields(line) {
+				if strings.HasPrefix(f, "http=") {
+					addr = strings.TrimPrefix(f, "http=")
+				}
+			}
+			break
+		}
+	}
+	if addr == "" {
+		t.Fatal("serve printed no READY line with an http address")
+	}
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+	hub := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=e2e-token"}
+
+	// MAESTRO_D_HUB and MAESTRO_D_TOKEN target the TCP daemon.
+	r := e.runEnv(hub, "tapOn", "Login", "--device", "mock-1", "--platform", "mock")
+	if r.code != 0 || !strings.Contains(r.stdout, "✓ tapOn") || strings.Contains(r.stderr, "Started daemon") {
+		t.Fatalf("targeted tapOn: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	// --target-hub=ADDR and --token on the line do the same; tapOn's text
+	// after a bare flag is still the text.
+	r = e.ok("tapOn", "--target-hub="+addr, "--token", "e2e-token", "Login")
+	if !strings.Contains(r.stdout, `text="Login"`) {
+		t.Fatalf("stdout: %s", r.stdout)
+	}
+	r = e.ok("status", "--target-hub="+addr, "--token", "e2e-token", "--json")
+	if !strings.Contains(r.stdout, `"name": "th"`) {
+		t.Fatalf("status: %s", r.stdout)
+	}
+	e.ok("device", "list", "--target-hub="+addr, "--token", "e2e-token")
+	// A step list runs from its YAML; the file stays on the client.
+	steps := filepath.Join(e.cwd, "remote-steps.yaml")
+	_ = os.WriteFile(steps, []byte("- tapOn: One\n- tapOn: Two\n"), 0o644)
+	r = e.runEnv(hub, "run", steps)
+	if r.code != 0 || !strings.Contains(r.stdout, "2 passed") {
+		t.Fatalf("run: %s%s", r.stdout, r.stderr)
+	}
+	flowFile := filepath.Join(e.cwd, "remote-flow.yaml")
+	_ = os.WriteFile(flowFile, []byte("appId: com.example\n---\n- tapOn: ${USER}\n"), 0o644)
+	r = e.runEnv(hub, "run", flowFile, "-e", "USER=carol")
+	if r.code != 0 || !strings.Contains(r.stdout, "carol") {
+		t.Fatalf("run flow: %s%s", r.stdout, r.stderr)
+	}
+
+	// Without the token: 401 → USAGE, exit 2.
+	r = e.fails(2, "tapOn", "Login", "--target-hub="+addr)
+	if envelopeCode(t, r.stderr) != daemon.CodeUsage || !strings.Contains(r.stderr, "bearer token") {
+		t.Fatalf("no token: %s", r.stderr)
+	}
+	// Unreachable: exit 3, and nothing is spawned.
+	r = e.fails(3, "tapOn", "Login", "--target-hub=127.0.0.1:1", "--token", "x")
+	if envelopeCode(t, r.stderr) != daemon.CodeDaemonUnavailable {
+		t.Fatal("expected DAEMON_UNAVAILABLE")
+	}
+	// --output-dir names a directory on the daemon's host.
+	e.fails(2, "tapOn", "Login", "--target-hub="+addr, "--token", "e2e-token", "--output-dir", "/tmp/x")
+
+	r = e.ok("ps", "--json")
+	if strings.Contains(r.stdout, `"name": "default"`) || !strings.Contains(r.stdout, `"name": "th"`) {
+		t.Fatalf("a targeted command spawned a local daemon:\n%s", r.stdout)
+	}
+	e.ok("stop", "--daemon", "th")
+}
+
+// TestE2E_Leases drives a single `hub start` with listed mock devices
+// (MAESTRO_D_MOCK_DEVICES): a targeted command takes its own lease, a
+// second client home gets DEVICE_IN_USE, lease prints the lease on file,
+// release frees the device, a selector lease expires and another client
+// takes the device over, and leases.json is reused and pruned.
+func TestE2E_Leases(t *testing.T) {
+	e := newE2E(t)
+	mocks := []string{"MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
+	tokenFile := filepath.Join(e.cwd, "hub-token")
+	if err := os.WriteFile(tokenFile, []byte("lease-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No token, or a token file others can read: refused before starting.
+	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh"); r.code != 2 || !strings.Contains(r.stderr, "needs --token") {
+		t.Fatalf("no token: exit %d\n%s", r.code, r.stderr)
+	}
+	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "chmod 600") {
+		t.Fatalf("readable token file: exit %d\n%s", r.code, r.stderr)
+	}
+	_ = os.Chmod(tokenFile, 0o600)
+	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "needs --peer-token") {
+		t.Fatalf("no peer token: exit %d\n%s", r.code, r.stderr)
+	}
+	mesh := []string{"--name", "lh-hub", "--no-mdns", "--peer-token", "lease-peer", "--lease-max", "1h", "--lease-max", "mock-2=8s"}
+	r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, mesh...)...)
+	if r.code != 0 {
+		t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	var started struct {
+		Daemon daemon.Info `json:"daemon"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &started); err != nil || started.Daemon.Hub == "" || started.Daemon.HTTPAddr == "" {
+		t.Fatalf("hub start --json: %v\n%s", err, r.stdout)
+	}
+	addr := started.Daemon.HTTPAddr
+	for _, a := range started.Daemon.StartArgs {
+		if strings.Contains(a, "lease-token") {
+			t.Fatalf("the token reached the hub's command line: %v", started.Daemon.StartArgs)
+		}
+	}
+	if r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--token", "lease-token"}, mesh...)...); r.code != 0 || !strings.Contains(r.stdout, "already running") {
+		t.Fatalf("second hub start: exit %d\n%s", r.code, r.stdout)
+	}
+	hub := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=lease-token"}
+	home2 := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=lease-token", daemon.EnvHome + "=" + filepath.Join(e.cwd, "home2")}
+	leaseFile := func(home string) string {
+		data, _ := os.ReadFile(filepath.Join(home, "leases.json"))
+		return string(data)
+	}
+	leaseOf := func(stdout string) daemon.Lease {
+		t.Helper()
+		var res daemon.LeaseResult
+		if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+			t.Fatalf("lease --json: %v\n%s", err, stdout)
+		}
+		return res.Lease
+	}
+
+	r = e.runEnv(hub, "status")
+	if !strings.Contains(r.stdout, "hub:") {
+		t.Fatalf("status names the hub: %s", r.stdout)
+	}
+	r = e.runEnv(hub, "device", "list")
+	if !strings.Contains(r.stdout, "LEASE") || !strings.Contains(r.stdout, "available") {
+		t.Fatalf("device list: %s", r.stdout)
+	}
+	// Listings carry each device's maximum window: --lease-max 1h for the
+	// hub, mock-2=8s for one device.
+	r = e.runEnv(hub, "device", "list", "--platform", "mock", "--json")
+	var listed daemon.DevicesResult
+	if err := json.Unmarshal([]byte(r.stdout), &listed); err != nil || len(listed.Devices) != 2 ||
+		listed.Devices[0].MaxSec != 3600 || listed.Devices[1].MaxSec != 8 {
+		t.Fatalf("maxSec in the listing: %v\n%s", err, r.stdout)
+	}
+	// No client leases on its own: without a lease the hub refuses the
+	// command, naming `maestro-d lease`, and no lease is taken.
+	r = e.runEnv(hub, "tapOn", "Login", "--device", "mock-1")
+	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired || !strings.Contains(r.stderr, "maestro-d lease --device mock-1") {
+		t.Fatalf("no lease: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	if f := leaseFile(e.home); strings.Contains(f, "mock-1") {
+		t.Fatalf("a lease was taken: %s", f)
+	}
+	// A window over the maximum is refused, naming it; nothing is granted.
+	r = e.runEnv(hub, "lease", "--device", "mock-1", "--ttl", "2h")
+	if r.code != 2 || !strings.Contains(r.stderr, "1h0m0s") {
+		t.Fatalf("over the maximum: exit %d\n%s", r.code, r.stderr)
+	}
+	// An explicit lease, by default the device's maximum window, recorded
+	// with the qualified id the hub returns.
+	onFile := leaseOf(e.runEnv(hub, "lease", "--device", "mock-1", "--json").stdout)
+	if onFile.Device != "mock-1@lh-hub" || onFile.TTLSec != 3600 || onFile.MaxSec != 3600 {
+		t.Fatalf("lease: %+v", onFile)
+	}
+	if f := leaseFile(e.home); !strings.Contains(f, `"device": "mock-1@lh-hub"`) || !strings.Contains(f, addr) {
+		t.Fatalf("leases.json: %s", f)
+	}
+	// Commands use it, and never move its end.
+	e.okEnv(hub, "tapOn", "Login", "--device", "mock-1")
+	time.Sleep(1100 * time.Millisecond)
+	e.okEnv(hub, "tapOn", "Again", "--device", "mock-1")
+	// lease --device with a live lease on file prints that lease, as it is.
+	if again := leaseOf(e.runEnv(hub, "lease", "--device", "mock-1", "--json").stdout); again.ID != onFile.ID || again.ExpiresAt != onFile.ExpiresAt {
+		t.Fatalf("use moved the window, or lease printed a new one: %+v vs %+v", again, onFile)
+	}
+	r = e.runEnv(hub, "device", "list", "--platform", "mock")
+	if !regexpMatch(`mock-1@lh-hub .* yes .*\(\d+m\d+s\)`, r.stdout) {
+		t.Fatalf("device list shows the holder and the time left:\n%s", r.stdout)
+	}
+	// Only renew moves it; over the maximum it is refused.
+	renewed := leaseOf(e.runEnv(hub, "renew", "--device", "mock-1", "--ttl", "30m", "--json").stdout)
+	if renewed.ID != onFile.ID || renewed.TTLSec != 1800 {
+		t.Fatalf("renew: %+v", renewed)
+	}
+	if r = e.runEnv(hub, "renew", "--device", "mock-1", "--ttl", "2h"); r.code != 2 || !strings.Contains(r.stderr, "maximum") {
+		t.Fatalf("renew over the maximum: exit %d\n%s", r.code, r.stderr)
+	}
+	if r = e.runEnv(hub, "renew"); r.code != 0 || !strings.Contains(r.stdout, "mock-1@lh-hub renewed") {
+		t.Fatalf("renew every lease: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	// Another client home: DEVICE_IN_USE for a lease, LEASE_REQUIRED for a
+	// command (exit 5 both); renew with nothing on file is LEASE_REQUIRED.
+	r = e.runEnv(home2, "lease", "--device", "mock-1")
+	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeDeviceInUse {
+		t.Fatalf("second client lease: exit %d\n%s", r.code, r.stderr)
+	}
+	r = e.runEnv(home2, "tapOn", "Login", "--device", "mock-1")
+	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired {
+		t.Fatalf("second client command: exit %d\n%s", r.code, r.stderr)
+	}
+	if r = e.runEnv(home2, "renew", "--device", "mock-1"); r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired {
+		t.Fatalf("renew without a lease: exit %d\n%s", r.code, r.stderr)
+	}
+	e.ok("release", "--device", "mock-1", "--target-hub="+addr, "--token", "lease-token")
+	if strings.Contains(leaseFile(e.home), "mock-1") {
+		t.Fatalf("release left the entry: %s", leaseFile(e.home))
+	}
+	if r = e.runEnv(hub, "release", "--device", "mock-1"); r.code != 0 || !strings.Contains(r.stdout, "No lease") {
+		t.Fatalf("release with nothing on file: %s", r.stdout)
+	}
+
+	// A selector lease with a short window attaches mock-1; --no-attach
+	// only reserves mock-2, for its 8 s maximum.
+	sel := leaseOf(e.runEnv(hub, "lease", "--platform", "mock", "--ttl", "6", "--json").stdout)
+	if sel.Device != "mock-1@lh-hub" || sel.TTLSec != 6 || !strings.HasSuffix(sel.ID, "@lh-hub") {
+		t.Fatalf("selector lease: %+v", sel)
+	}
+	r = e.runEnv(hub, "lease", "--platform", "mock", "--no-attach", "--json")
+	var reserved daemon.LeaseResult
+	_ = json.Unmarshal([]byte(r.stdout), &reserved)
+	if reserved.Lease.Device != "mock-2@lh-hub" || reserved.Lease.TTLSec != 8 || (reserved.Device != nil && reserved.Device.Attached) {
+		t.Fatalf("--no-attach: %s", r.stdout)
+	}
+	if r = e.runEnv(hub, "lease", "--platform", "mock"); r.code != 5 {
+		t.Fatalf("every mock leased: exit %d\n%s", r.code, r.stderr)
+	}
+	// Used through the window: the uses before its end work, the first
+	// after it is LEASE_EXPIRED (the use in between did not extend it), the
+	// entry is dropped, and the next try is LEASE_REQUIRED: no new lease.
+	end, _ := time.Parse(time.RFC3339, sel.ExpiresAt)
+	for time.Until(end) > 1500*time.Millisecond {
+		e.okEnv(hub, "tapOn", "During", "--device", "mock-1")
+		time.Sleep(time.Second)
+	}
+	time.Sleep(time.Until(end) + 1500*time.Millisecond)
+	r = e.runEnv(hub, "tapOn", "After", "--device", "mock-1")
+	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseExpired || strings.Contains(leaseFile(e.home), sel.ID) {
+		t.Fatalf("past the window: exit %d\n%s\n%s", r.code, r.stderr, leaseFile(e.home))
+	}
+	if r = e.runEnv(hub, "tapOn", "Again", "--device", "mock-1"); r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired {
+		t.Fatalf("after the expired entry: exit %d\n%s", r.code, r.stderr)
+	}
+	// The hub ended it and detached the device: the second client leases
+	// it and takes over.
+	leaseOf(e.runEnv(home2, "lease", "--device", "mock-1", "--json").stdout)
+	e.okEnv(home2, "tapOn", "Takeover", "--device", "mock-1")
+	r = e.runEnv(home2, "release", "--all", "--json")
+	if r.code != 0 || !strings.Contains(r.stdout, `"released"`) {
+		t.Fatalf("release --all: %s", r.stdout)
+	}
+	e.ok("release", "--device", "mock-2", "--target-hub="+addr, "--token", "lease-token")
+
+	// Over the hub's unix socket the CLI needs a lease the same way.
+	r = e.runEnv(mocks, "tapOn", "Local", "--daemon", "lh", "--device", "mock-2")
+	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired {
+		t.Fatalf("unix socket without a lease: exit %d\n%s", r.code, r.stderr)
+	}
+	e.okEnv(mocks, "lease", "--daemon", "lh", "--device", "mock-2")
+	r = e.runEnv(mocks, "tapOn", "Local", "--daemon", "lh", "--device", "mock-2")
+	if r.code != 0 || !strings.Contains(leaseFile(e.home), "unix:lh") {
+		t.Fatalf("unix socket: exit %d\n%s\n%s", r.code, r.stderr, leaseFile(e.home))
+	}
+	e.ok("release", "--all", "--daemon", "lh")
+
+	// Usage errors.
+	e.fails(2, "release", "--target-hub="+addr, "--token", "lease-token")
+	e.fails(2, "lease", "--target-hub="+addr, "--token", "lease-token")
+	e.fails(2, "lease", "--device", "mock-1", "--kind", "device", "--target-hub="+addr, "--token", "lease-token")
+
+	// A daemon without leases: release does nothing and succeeds; lease is
+	// a usage error.
+	plain := serveTCP(t, e, "plainlease", "plain-token")
+	if r = e.run("release", "--device", "mock-1", "--target-hub="+plain, "--token", "plain-token"); r.code != 0 || !strings.Contains(r.stdout, "no leases") {
+		t.Fatalf("release on a plain daemon: exit %d\n%s", r.code, r.stdout)
+	}
+	if r = e.run("release", "--all", "--daemon", "nothing-runs-here"); r.code != 0 {
+		t.Fatalf("release with no daemon: exit %d", r.code)
+	}
+	e.fails(2, "lease", "--device", "mock-1", "--target-hub="+plain, "--token", "plain-token")
+	// ...and a plain daemon still attaches without a lease.
+	e.ok("tapOn", "Plain", "--device", "mock-1", "--platform", "mock", "--target-hub="+plain, "--token", "plain-token")
+
+	r = e.ok("hub", "stop", "--daemon", "lh")
+	if !strings.Contains(r.stdout, "stopped") {
+		t.Fatalf("hub stop: %s", r.stdout)
+	}
+	e.fails(3, "hub", "stop", "--daemon", "lh")
+}
+
+func regexpMatch(pattern, s string) bool {
+	return regexp.MustCompile(pattern).MatchString(s)
 }

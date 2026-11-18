@@ -85,6 +85,7 @@ overrides the root):
 | --- | --- |
 | `daemon.sock` | unix socket the CLI and library use |
 | `daemon.json` | pid, version, socket path, TCP address, start time — removed on clean exit |
+| `daemon.lock` | locked by the running daemon from before it binds the socket; a second start of the same name fails `DAEMON_UNAVAILABLE` instead of taking the socket (a hub writes `daemon.json` only once its mesh has started) |
 | `devices.json` | devices this daemon booted (ownership survives a crash so `--orphans` can clean up) |
 | `startup.log` | the spawned process's stdout/stderr until it was ready (shown when spawning fails) |
 | `daemon.log` | the daemon's log |
@@ -118,6 +119,10 @@ throws a `MaestroError` carrying all of it.
 | `DEVICE_IN_USE` | 5 | 409 | another daemon holds the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `device stop` on a device the daemon did not boot (use `--force`) |
 | `INTERRUPTED` | 130 | 499 | Ctrl-C / `AbortSignal`; the in-flight step is cancelled on the device |
+| `FORBIDDEN` | 2 | 403 | a remote caller (a TCP client from beyond loopback, or any TCP client of a hub) asked for the host: `runShell`, a host path, `cwd`, a web attach |
+| `PEER_UNAVAILABLE` | 3 | 503 | hub mesh: the hub that owns the device is unreachable; clients retry it |
+| `HUB_NAME_TAKEN`, `HUB_VERSION` | 5 | 409 | hub mesh: a joining hub's name is taken, or it speaks another API version |
+| `LEASE_REQUIRED`, `LEASE_EXPIRED` | 5 | 409 | hub: a mutating request without the device's lease, or with an expired one |
 
 Every failure is the same JSON, on stderr for the CLI and as the body for
 REST:

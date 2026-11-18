@@ -1,4 +1,4 @@
-.PHONY: gen gen-check build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
+.PHONY: gen gen-check cover-changed build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
 
 # Build variables
 # maestro-d is maestro-runner plus the daemon commands.
@@ -79,6 +79,16 @@ test-coverage-check:
 	$(GOTEST) -v -race -coverprofile=coverage.out -covermode=atomic ./...
 	@go tool cover -func=coverage.out | grep total | awk '{print $$3}' | sed 's/%//' | \
 		awk '{if ($$1 < 80) {print "Coverage " $$1 "% is below 80% threshold"; exit 1} else {print "Coverage " $$1 "% meets 80% threshold"}}'
+
+# maestro-d: statement coverage of the lines this branch adds or changes,
+# counting both the unit run and the binaries the e2e tests start (built
+# with -cover through MAESTRO_D_E2E_COVERDIR). Fails below 90%.
+COVER_PKGS=./pkg/daemon/... ./pkg/cli/... ./pkg/simulator/... ./pkg/emulator/... ./pkg/executor/...
+cover-changed:
+	@rm -rf .cover && mkdir -p .cover
+	MAESTRO_D_E2E_COVERDIR=$(CURDIR)/.cover $(GOTEST) -race -coverprofile=coverage.out -covermode=atomic $(COVER_PKGS) $$(test -d pkg/hub && echo ./pkg/hub/...)
+	@if [ -n "$$(ls .cover)" ]; then $(GOCMD) tool covdata textfmt -i=.cover -o=e2e.out; else rm -f e2e.out; fi
+	$(GOCMD) run ./tools/covchanged coverage.out e2e.out
 
 test-fuzz:
 	$(GOTEST) -v -fuzz=. -fuzztime=30s ./...

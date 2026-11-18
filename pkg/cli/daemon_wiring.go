@@ -30,6 +30,17 @@ func daemonDeps() daemon.Deps {
 		NewDriver:          daemonNewDriver,
 		ListDevices:        daemonListDevices,
 		NormalizeHierarchy: NormalizeHierarchy,
+		IOSCatalog:         simulator.ListCatalog,
+		AndroidCatalog:     emulator.ListCatalog,
+		CreateSimulator:    simulator.CreateSimulator,
+		CreateAVD:          emulator.CreateAVD,
+		InstallSystemImage: emulator.InstallSystemImage,
+		DeleteSimulator:    simulator.DeleteSimulator,
+		DeleteAVD:          emulator.DeleteAVD,
+		InstallApp:         daemonInstallApp,
+		UninstallApp:       daemonUninstallApp,
+		AppID:              appIDOf,
+		TVInfo:             physicalTVInfo,
 	}
 }
 
@@ -58,6 +69,9 @@ func guessPlatform(id string) string {
 // so CreateDriver behaves exactly as it does for `test`.
 func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	platform := strings.ToLower(cfg.Platform)
+	if platform == "" && isMockDevice(id) {
+		platform = "mock"
+	}
 	if platform == "" && cfg.Driver != "mock" {
 		platform = guessPlatform(id)
 	}
@@ -173,6 +187,8 @@ func daemonNewDriver(ctx context.Context, id string, cfg daemon.AttachConfig) (c
 			info.Kind = "simulator"
 		case pi.IsSimulator:
 			info.Kind = "emulator"
+		case isTVDriver(driver):
+			info.Kind = "tv"
 		default:
 			info.Kind = "device"
 		}
@@ -195,14 +211,58 @@ func daemonNewDriver(ctx context.Context, id string, cfg daemon.AttachConfig) (c
 	return driver, info, cleanup, nil
 }
 
+// isTVDriver reports whether driver runs a physical Apple TV.
+func isTVDriver(driver core.Driver) bool {
+	tv, ok := driver.(interface{ IsTV() bool })
+	return ok && tv.IsTV()
+}
+
+// envMockDevices lists mock devices for tests (MAESTRO_D_MOCK_DEVICES=
+// mock-1,mock-2). The mock driver attaches any mock-N id but lists none;
+// with this set, those ids are listed as ready mock devices, so lease
+// selectors and id normalization see them. Read only when set.
+const envMockDevices = "MAESTRO_D_MOCK_DEVICES"
+
+// mockDevices returns the listed mock devices, if any.
+func mockDevices() []daemon.DeviceInfo {
+	v := os.Getenv(envMockDevices)
+	if v == "" {
+		return nil
+	}
+	var out []daemon.DeviceInfo
+	for _, id := range strings.Split(v, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out = append(out, daemon.DeviceInfo{ID: id, Platform: "mock", Kind: "device", Name: id, State: "device", Ready: true})
+		}
+	}
+	return out
+}
+
+// isMockDevice reports whether id is one of the listed mock devices.
+func isMockDevice(id string) bool {
+	for _, d := range mockDevices() {
+		if d.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // daemonListDevices adapts `maestro-runner devices` discovery.
 func daemonListDevices(platform string) []daemon.DeviceInfo {
 	platform = strings.ToLower(platform)
-	if platform == "mock" || platform == "web" {
+	mocks := mockDevices()
+	if platform == "mock" {
+		return mocks
+	}
+	if platform == "web" {
 		return nil
 	}
 	entries := collectDevices(platform, true)
-	out := make([]daemon.DeviceInfo, 0, len(entries))
+	out := make([]daemon.DeviceInfo, 0, len(entries)+len(mocks))
+	if platform == "" {
+		out = append(out, mocks...)
+	}
 	for _, e := range entries {
 		out = append(out, daemon.DeviceInfo{
 			ID: e.ID, Platform: e.Platform, Kind: e.Kind, Name: e.Name,

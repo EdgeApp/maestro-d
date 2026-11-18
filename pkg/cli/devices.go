@@ -47,7 +47,7 @@ Examples:
 // public contract — scripts and CI read this shape.
 type DeviceEntry struct {
 	Platform  string `json:"platform"` // android | ios
-	Kind      string `json:"kind"`     // device | emulator | simulator
+	Kind      string `json:"kind"`     // device | emulator | simulator | tv
 	ID        string `json:"id"`       // adb serial or iOS UDID — what --device takes
 	Name      string `json:"name,omitempty"`
 	OSVersion string `json:"osVersion,omitempty"`
@@ -86,10 +86,12 @@ func collectDevices(platform string, includeShutdown bool) []DeviceEntry {
 
 	if platform == "" || platform == "android" {
 		entries = append(entries, androidEntries()...)
+		entries = avdEntries(entries, includeShutdown) // maestro-d: AVD names, shut-down AVDs as avd:<name>
 	}
 	if (platform == "" || platform == "ios") && runtime.GOOS == "darwin" {
 		entries = append(entries, simulatorEntries(includeShutdown)...)
 		entries = append(entries, physicalIOSEntries()...)
+		entries = append(entries, physicalTVEntries(entries, includeShutdown)...)
 	}
 	return entries
 }
@@ -218,7 +220,10 @@ func describeState(r DeviceEntry) string {
 		return r.State
 	}
 	label := "Android"
-	if r.Platform == "ios" {
+	switch {
+	case r.Kind == "tv":
+		label = "tvOS"
+	case r.Platform == "ios":
 		label = "iOS"
 	}
 	return fmt.Sprintf("%s (%s %s)", r.State, label, r.OSVersion)

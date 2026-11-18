@@ -90,6 +90,7 @@ static attach(opts?: ConnectOptions & DeviceAttachOptions): Promise<MaestroDevic
 | `idleTimeout` | seconds idle before the spawned daemon exits (0 = never; default 1800) |
 | `http`, `token` | also listen on TCP (`127.0.0.1:7788`) with a bearer token |
 | `url`, `token` | connect to an existing TCP listener instead of the unix socket (nothing is spawned) |
+| `hub`, `token`, `ca` | connect to the daemon or hub on another machine: `'host[:port]'` (port 7433 by default), `'https://host[:port]'`, or `true` for `localhost:7433`. Nothing is spawned, `name` is ignored, and no working directory is sent (see below). `ca` is PEM text or a file path for a self-signed certificate. Defaults: `$MAESTRO_D_HUB`, `$MAESTRO_D_TOKEN`, `$MAESTRO_D_CA` |
 | `bin` | path to the binary (else `$MAESTRO_D_BIN`, the platform package, `PATH`) |
 | `startTimeout` | ms to wait for the daemon to come up (default 20000) |
 | `log` | `(line) => void` for "Starting daemon …" progress |
@@ -99,17 +100,23 @@ Instance:
 
 | member | |
 | --- | --- |
-| `name`, `info`, `started` | daemon name, its `daemon.json`, whether this call spawned it |
-| `status()` | daemon info plus every device it knows |
+| `name`, `info`, `started` | daemon name (the hub's URL for `hub`), its `daemon.json`, whether this call spawned it |
+| `hub` | true when connected with `hub` / `$MAESTRO_D_HUB` |
+| `status()` | daemon info plus the devices it has attached or booted |
 | `devices({platform?})` | connected devices, booted simulators/emulators, attached sessions |
 | `device(id)` | one device record (`DEVICE_NOT_FOUND`) |
-| `startDevice({platform, name, bootTimeout?})` | boot a simulator/AVD by name; the daemon shuts it down on exit |
+| `catalog({platform?, available?})` | what `createDevice()` can use: `{ios: {runtimes, deviceTypes}, android: {images, profiles}}` |
+| `createDevice({platform, name, type?, runtime?, image?, profile?, dataSize?, installImage?, acceptLicenses?, boot?, bootTimeout?})` | create a simulator or AVD and boot it (unless `boot: false`); recorded as created by maestro-d |
+| `startDevice({platform?, name, bootTimeout?})` | boot a simulator/AVD by name, UDID or `avd:<name>`; `platform` may be left out for a listed device; the daemon shuts it down on exit |
 | `stopDevice(id, {force?})` | shut a device down; devices the daemon did not boot need `force` (`DEVICE_EXTERNAL`) |
-| `attach(opts)` | open a driver and return a `MaestroDevice` (below) |
+| `deleteDevice(id, {force?})` | delete a simulator or AVD (stopping it first); ones maestro-d did not create need `force` (`DEVICE_EXTERNAL`) |
+| `attach(opts)` | open a driver and return a `MaestroDevice` (below); on a hub it needs a lease the client holds — from `lease()` or `maestro-d lease` (see [Leases](#leases-on-a-hub)) |
+| `lease({device \| select, ttlSec?, holder?, attach?})` | on a hub: lease a device and return its handle, attached unless `attach: false` (see [Leases](#leases-on-a-hub)) |
+| `leasing` | true when the daemon is a hub (`info.hub`) and leases its devices |
 | `detach(id)` | close the driver on a device |
 | `events({device?, after?, signal})` | `AsyncIterable<DaemonEvent>` of step/device events (Server-Sent Events) |
 | `shutdown({wait?})` | detach everything, stop what the daemon booted, exit |
-| `close()` | drop idle connections; the daemon keeps running |
+| `close()` | release the leases this process took with `lease()`, then drop idle connections; the daemon keeps running. Returns a promise |
 
 ### `daemon.attach(opts)` → `MaestroDevice`
 
@@ -192,16 +199,30 @@ every platform) / `hierarchyRaw()` → the driver's own XML/JSON (`Buffer`); `st
 `eval(script)` runs JavaScript in the session's engine; `refresh()` re-reads
 the device record; `events({after?, signal})` streams this device's events.
 
+#### Apps and artifacts
+
+| | |
+| --- | --- |
+| `installApp(file, {reinstall?, platform?})` | install an `.apk`, `.app` or `.ipa` without attaching; resolves `{appId}` when the daemon can read it. On a hub the file is uploaded first, unless the hub has it |
+| `uninstallApp(appId)` | remove an app by bundle id or package name |
+| `artifacts()` | the session's report files: `{path, size, modTime}[]` |
+| `artifact(path)` | one of them as a `Buffer` (`outputs/…`, `report.json`, …) |
+
 #### Lifecycle
 
 `detach()` closes the driver; `stop({force?})` also shuts the device down.
+On a hub, `lease` is the handle's lease; `renew({ttlSec?})` restarts its
+fixed window now (default the lease's own window; nothing renews it on its
+own), and `release()` ends it — the hub detaches the device. `detach()`
+leaves the lease held. `release()` on a handle without a lease (a plain
+daemon) does nothing.
 
 #### `CallOptions`
 
 | option | |
 | --- | --- |
 | `wait: false` | return `BUSY` instead of queueing behind a step already running on this device |
-| `cwd` | directory relative paths in the step resolve against (default `process.cwd()`) |
+| `cwd` | directory relative paths in the step resolve against (default `process.cwd()`); not sent to a hub |
 | `signal` | `AbortSignal`; the step is cancelled on the device and the call rejects with `INTERRUPTED` |
 
 ### Results
@@ -224,6 +245,7 @@ interface StepResult {
   artifacts: { screenshotBefore?, screenshotAfter?, viewHierarchy? }
   subSteps?: SubStep[]
   reportDir: string   // where artifacts for this session live
+  outputs?: string[]  // on a hub: files the step's output fields wrote (outputs/…), already fetched back
 }
 ```
 
@@ -255,11 +277,16 @@ class MaestroError extends Error {
 | `INTERNAL` | 4 | 500 | daemon bug |
 | `BUSY` | 5 | 409 | `wait: false` and the device is running a step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon has the device |
-| `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot |
+| `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot, or `deleteDevice` on one maestro-d did not create |
 | `INTERRUPTED` | 130 | 499 | the `signal` fired |
+| `FORBIDDEN` | 2 | 403 | a remote caller asked for the daemon's host: `runShell`, a host path, `cwd`, a web attach |
+| `PEER_UNAVAILABLE` | 3 | 503 | hub mesh: the device's hub is unreachable (retried automatically) |
+| `HUB_NAME_TAKEN`, `HUB_VERSION` | 5 | 409 | hub mesh: a joining hub's name is taken, or its API version differs |
+| `LEASE_REQUIRED`, `LEASE_EXPIRED` | 5 | 409 | hub: the device's lease is missing or expired |
 
 `isMaestroError(err, code?)` narrows in a `catch`. `EXIT_CODES` and
-`HTTP_STATUS` export the table.
+`HTTP_STATUS` export the table, and `codeFromStatus(status)` the code for
+a response that has no envelope (`401` is `USAGE`, `403` `FORBIDDEN`).
 
 ### Environment
 
@@ -269,6 +296,92 @@ class MaestroError extends Error {
 | `MAESTRO_DEVICE` | default device id for `attach()` |
 | `MAESTRO_D_BIN` | path to the Go binary |
 | `MAESTRO_D_HOME` | run-file root (default `~/.maestro-d`); sockets, logs and reports live under `run/<name>/` |
+| `MAESTRO_D_HUB` | connect to this hub (`host[:port]`, `https://host[:port]`) when neither `hub` nor `url` is given |
+| `MAESTRO_D_TOKEN` | bearer token for `hub` / `url` when `token` is not given |
+| `MAESTRO_D_CA` | PEM file of trust roots for an https hub, when `ca` is not given |
+
+### Another machine: `hub`
+
+```js
+const md = await MaestroD.connect({ hub: '192.168.64.1', token: process.env.T })
+const dev = await md.attach({ device: '99FA590E-…' })
+await dev.launchApp('com.apple.Preferences')
+```
+
+Precedence: an explicit `hub` or `url` option, then `$MAESTRO_D_HUB`, then
+the local daemon — so a script that passes only `name`, such as
+`e2e/iosLandscape.e2e.ts`, follows `MAESTRO_D_HUB` unchanged. Against a
+hub, commands send no `?cwd=`, and flows run whole on the hub:
+`flow({file})` packs the file with everything it uses (`maestro-d pack
+--flow`) and posts the bundle, and `run()`/`runYaml()`/`flow({yaml})` pack
+their steps as if they sat in `cwd`. A flow's outputs come back beside it
+(for inline steps, into `cwd`); a `runFlow`/`retry` file in a command is
+sent as a `bundle:` ref the same way.
+The hub treats the script as a remote caller: `runShell` and host paths in
+steps are refused with `FORBIDDEN`.
+
+Files travel with the calls instead. A command's input files (`addMedia`,
+`runScript('x.js')`, an `assertScreenshot` reference, `uploadFile`, …) and
+`attach({appFile})` are packed by the maestro-d binary
+(`$MAESTRO_D_BIN`, the platform package, or `PATH`), uploaded when the hub
+lacks them, and sent as `blob:sha256:<hex>/<basename>` refs; bare values
+count (`addMedia('photo.png')`). A hub attaches no Appium driver:
+`driver: 'appium'`, `appiumUrl` and `extra.capsFile` are `FORBIDDEN`. Output files — `takeScreenshot({path})`,
+an `assertScreenshot` baseline the hub writes because you have none yet, a
+mismatch's `_diff.png` — are fetched back to the path you gave, relative
+to `cwd` or absolute. `pack(paths)`, `upload(...)`, `packFlow(roots)`,
+`uploadBundle(...)` and `fetchBundleOutputs(...)` are exported for callers
+of the REST API.
+
+### Leases on a hub
+
+A hub (`maestro-d hub start`) lends each device to one client at a time;
+`info.hub` names it. Every request for a device must carry that device's
+lease (`LEASE_REQUIRED`, `LEASE_EXPIRED` otherwise). Taking a lease is
+always explicit; once taken, the library sends it for you.
+
+```js
+const md = await MaestroD.connect({ hub: 'hub.lan', token })
+const dev = await md.lease({ select: { platform: 'ios', kind: 'simulator' }, ttlSec: 1800 })
+await dev.launchApp('com.apple.Preferences')   // the lease rides on every call
+await dev.renew({ ttlSec: 1800 })              // only an explicit renew moves its end
+await md.close()                               // releases it
+```
+
+- `lease({device | select, ttlSec, holder, attach})` normalizes `device`
+  through `GET /v1/devices/{id}` (an id the hub does not list is leased as
+  given), takes the lease, and returns the device's handle, **attached**:
+  `attach` defaults to `{}` (the attach options of `attach()`), and
+  `attach: false` only reserves the device. `select` takes the first free
+  device matching `{platform, kind, name, osVersion, hub, boot}`. The lease
+  is a fixed window of `ttlSec` (default 8 hours, or the device's `maxSec`
+  when that is shorter; over the maximum rejects with `USAGE`). Using it
+  never extends it and nothing renews it on its own: at the end of the
+  window the hub detaches the device (a running step rejects with
+  `INTERRUPTED`) and later calls reject with `LEASE_EXPIRED`. It is
+  recorded in `<home>/leases.json`, like `maestro-d lease`, until
+  `release()` or `md.close()`.
+- `attach({device, …})` on a hub uses a lease this client holds — taken in
+  this process, or found in `leases.json` (from `maestro-d lease` in the
+  same home) — and never takes one; without one it rejects with
+  `LEASE_REQUIRED`, naming `md.lease()` and `maestro-d lease --device <id>`.
+  So a script written for a local daemon — `e2e/iosLandscape.e2e.ts` — runs
+  on a hub after `maestro-d lease --device <id>` in the shell.
+- `leases.json` is written through a temporary file and a rename (Node
+  cannot take the CLI's `flock`), so a script and a CLI updating it at the
+  same instant can lose one update; when several processes share a home and
+  lease at once, lease from the shell.
+- Device entries on a hub carry `maxSec`, `machine` and `addresses` (the
+  owning machine's host name, and its hub's advertised address plus its
+  non-loopback IPs).
+- Another client's device rejects with `DEVICE_IN_USE`; a selector with no
+  match with `DEVICE_NOT_FOUND`. On a daemon that is not a hub, `lease()`
+  rejects with `USAGE` and `attach()` works as before.
+
+Over TCP (`hub` or `url`) every command, batch and flow carries an
+`X-Maestro-Request-Id`; a dropped connection, `PEER_UNAVAILABLE` or a
+gateway's 502/504 is retried up to 3 times with the same id, and the
+daemon runs each id once.
 
 ## Recipes
 
@@ -321,6 +434,17 @@ const sim = await d.startDevice({ platform: 'ios', name: 'iPhone 16' })
 const m = await d.attach({ device: sim.id, appFile: 'build/Edge.app' })
 // …
 await d.shutdown() // also shuts the simulator down, since the daemon booted it
+```
+
+**Create and delete a device.**
+
+```js
+const cat = await d.catalog({ platform: 'android' })            // images, profiles
+const avd = await d.createDevice({ platform: 'android', name: 'ci-pixel', dataSize: '8G', boot: false })
+// avd.id === 'avd:ci-pixel'
+const emu = await d.startDevice({ name: avd.id })                // no platform needed; emu.id is the serial
+// …
+await d.deleteDevice(emu.id)                                     // stops the emulator, deletes the AVD
 ```
 
 ## CLI

@@ -13,6 +13,8 @@ package daemon
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
@@ -60,7 +62,34 @@ const (
 	CodeInterrupted Code = "INTERRUPTED"
 	// CodeInternal: a bug in the daemon. Exit 4 / HTTP 500.
 	CodeInternal Code = "INTERNAL"
+	// CodeForbidden: a remote caller asked for something only a local
+	// caller may do — a host path, runShell, ?cwd=, a web attach. Exit 2 /
+	// HTTP 403; details name the denied step and field.
+	CodeForbidden Code = "FORBIDDEN"
+	// CodePeerUnavailable: the hub that owns the device cannot be reached
+	// over the mesh. Exit 3 / HTTP 503; details.hub names it. Clients retry
+	// it with the same request id.
+	CodePeerUnavailable Code = "PEER_UNAVAILABLE"
+	// CodeHubNameTaken: a peer's hello used a name already in the mesh.
+	// Exit 5 / HTTP 409.
+	CodeHubNameTaken Code = "HUB_NAME_TAKEN"
+	// CodeHubVersion: a peer speaks another API version. Exit 5 / HTTP 409.
+	CodeHubVersion Code = "HUB_VERSION"
+	// CodeLeaseRequired: a mutating request on a hub without the device's
+	// lease. Exit 5 / HTTP 409.
+	CodeLeaseRequired Code = "LEASE_REQUIRED"
+	// CodeLeaseExpired: the request's lease has expired or was released.
+	// Exit 5 / HTTP 409.
+	CodeLeaseExpired Code = "LEASE_EXPIRED"
 )
+
+// Codes lists every code, for tables and tests.
+var Codes = []Code{
+	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
+	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
+	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired,
+}
 
 // ExitCode returns the CLI exit status for the code.
 func (c Code) ExitCode() int {
@@ -69,13 +98,13 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached:
+	case CodeUsage, CodeDeviceNotAttached, CodeForbidden:
 		return 2
-	case CodeDaemonUnavailable:
+	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
 	case CodeDeviceError, CodeDeviceNotFound, CodeInternal:
 		return 4
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse:
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
 		return 5
 	case CodeInterrupted:
 		return 130
@@ -92,11 +121,13 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeUsage:
 		return http.StatusBadRequest
-	case CodeDaemonUnavailable:
+	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeDeviceError:
 		return http.StatusBadGateway
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse:
+	case CodeForbidden:
+		return http.StatusForbidden
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
 		return http.StatusConflict
 	case CodeDeviceNotFound, CodeDeviceNotAttached:
 		return http.StatusNotFound
@@ -108,13 +139,32 @@ func (c Code) HTTPStatus() int {
 	return http.StatusInternalServerError
 }
 
+// HeaderErrorCode repeats an error envelope's code as a response header, so
+// a client can tell failures apart on an answer without a body: a HEAD
+// (LEASE_REQUIRED, LEASE_EXPIRED and BUSY are all 409).
+const HeaderErrorCode = "X-Maestro-Error-Code"
+
+// CodeFromHeader returns the code an answer's HeaderErrorCode names, or ""
+// when it names none this client knows.
+func CodeFromHeader(h http.Header) Code {
+	c := Code(h.Get(HeaderErrorCode))
+	for _, k := range Codes {
+		if c == k {
+			return c
+		}
+	}
+	return ""
+}
+
 // CodeFromHTTPStatus recovers a code from a status when a body has none.
 func CodeFromHTTPStatus(status int) Code {
 	switch status {
 	case http.StatusUnprocessableEntity:
 		return CodeCommandFailed
-	case http.StatusBadRequest:
+	case http.StatusBadRequest, http.StatusUnauthorized:
 		return CodeUsage
+	case http.StatusForbidden:
+		return CodeForbidden
 	case http.StatusServiceUnavailable:
 		return CodeDaemonUnavailable
 	case http.StatusBadGateway:
@@ -223,6 +273,10 @@ type StepResult struct {
 	Artifacts  report.CommandArtifacts `json:"artifacts"`
 	SubSteps   []report.Command        `json:"subSteps,omitempty"`
 	ReportDir  string                  `json:"reportDir,omitempty"`
+	// Outputs name the files a remote call's output fields wrote, as
+	// paths under the report directory (outputs/<path>), fetched with
+	// GET …/artifacts/{path}. Absent for local calls.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // ResultFromOutcome converts an executor outcome into the wire result.
@@ -241,8 +295,18 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		Artifacts:  o.Artifacts,
 		SubSteps:   o.SubSteps,
 		ReportDir:  reportDir,
+		Outputs:    o.Outputs,
 	}
-	if o.Error != nil {
+	if o.Forbidden != nil {
+		d := o.Forbidden
+		details := map[string]any{"reason": d.Reason}
+		for k, v := range map[string]string{"step": d.Step, "command": d.Command, "field": d.Field, "path": d.Path} {
+			if v != "" {
+				details[k] = v
+			}
+		}
+		r.Error = &ErrorBody{Code: CodeForbidden, Message: d.Reason, Step: o.Description, Details: details}
+	} else if o.Error != nil {
 		body := &ErrorBody{Code: CodeCommandFailed, Message: o.Error.Message, Step: o.Description}
 		if o.Panicked {
 			body.Code = CodeDeviceError
@@ -283,6 +347,21 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 	return r
 }
 
+// ForRemote rewrites the daemon's own report-directory paths in the
+// result's messages to report-relative ones (outputs/<path>, as the
+// result's outputs and the artifacts route name them), so a remote caller
+// is told the file it can fetch rather than a path on the daemon's host.
+func (r *StepResult) ForRemote(reportDir string) {
+	if reportDir == "" {
+		return
+	}
+	prefix := filepath.Clean(reportDir) + string(filepath.Separator)
+	r.Message = strings.ReplaceAll(r.Message, prefix, "")
+	if r.Error != nil {
+		r.Error.Message = strings.ReplaceAll(r.Error.Message, prefix, "")
+	}
+}
+
 // Err returns the result's failure as an *Error (nil when ok).
 func (r *StepResult) Err() *Error {
 	if r.OK || r.Error == nil {
@@ -300,6 +379,8 @@ type StepsResult struct {
 	Passed  int `json:"passed"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+	// Outputs collects every result's outputs.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // StepsResultFrom summarises a batch; the envelope reflects the first
@@ -308,6 +389,7 @@ func StepsResultFrom(device string, results []StepResult) StepsResult {
 	out := StepsResult{Envelope: Envelope{OK: true}, Device: device, Results: results}
 	for i := range results {
 		r := &results[i]
+		out.Outputs = append(out.Outputs, r.Outputs...)
 		switch {
 		case r.Skipped:
 			out.Skipped++
@@ -327,9 +409,14 @@ func StepsResultFrom(device string, results []StepResult) StepsResult {
 
 // DeviceInfo describes one device the daemon knows about.
 type DeviceInfo struct {
-	ID        string `json:"id"`
+	// ID is the device's id; on a hub it is qualified, <localId>@<hub>.
+	ID string `json:"id"`
+	// Hub and LocalID, on a hub, split ID: the hub that owns the device
+	// and the device's id on that hub's machine.
+	Hub       string `json:"hub,omitempty"`
+	LocalID   string `json:"localId,omitempty"`
 	Platform  string `json:"platform"`       // android | ios | web | mock
-	Kind      string `json:"kind,omitempty"` // device | emulator | simulator
+	Kind      string `json:"kind,omitempty"` // device | emulator | simulator | tv
 	Name      string `json:"name,omitempty"`
 	OSVersion string `json:"osVersion,omitempty"`
 	State     string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
@@ -350,6 +437,23 @@ type DeviceInfo struct {
 	// Owner names the daemon that has the device attached, when it is not
 	// this one (ps / DEVICE_IN_USE).
 	Owner string `json:"owner,omitempty"`
+	// CreatedBy is "maestro-d" for a simulator or AVD that `device create`
+	// made (recorded in <home>/created.json); only those are deleted
+	// without force.
+	CreatedBy string `json:"createdBy,omitempty"`
+	// Lease is the device's lease on a hub, when it is leased.
+	Lease *DeviceLease `json:"lease,omitempty"`
+	// Available is true on a hub for a ready device that is neither leased
+	// nor attached.
+	Available bool `json:"available,omitempty"`
+	// MaxSec, on a hub, is the longest lease window the device takes.
+	MaxSec int `json:"maxSec,omitempty"`
+	// Machine and Addresses, on a hub, name the machine the device is
+	// attached to: its host name, and the owning hub's advertised address
+	// plus the host's non-loopback IPs. A client compares them with its
+	// own to find the devices on its own machine, whichever hub it asked.
+	Machine   string   `json:"machine,omitempty"`
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -390,15 +494,42 @@ type AttachConfig struct {
 
 // BootRequest is the body of POST /v1/devices.
 type BootRequest struct {
-	Platform string `json:"platform"`
-	// Name is an AVD name, a simulator name, or a simulator UDID.
+	// Platform is ios or android. To boot, it may be left out: an avd:<name>
+	// id means android, and a known simulator name or UDID means ios.
+	Platform string `json:"platform,omitempty"`
+	// Name is an AVD name (or avd:<name>), a simulator name, or a simulator
+	// UDID.
 	Name        string `json:"name"`
 	BootTimeout int    `json:"bootTimeout,omitempty"` // seconds
+	// Create, when set, creates the simulator or AVD first.
+	Create *CreateSpec `json:"create,omitempty"`
+	// Boot boots what Create made (default true). Ignored without Create.
+	Boot *bool `json:"boot,omitempty"`
+	// Hub, on a hub, names the hub whose machine boots or creates the
+	// device (default: the one asked, or the suffix of a qualified Name).
+	Hub string `json:"hub,omitempty"`
+}
+
+// CreateSpec describes a simulator (type, runtime) or an AVD (image,
+// profile, dataSize, installImage, acceptLicenses) for `device create`.
+type CreateSpec struct {
+	// Name defaults to BootRequest.Name.
+	Name    string `json:"name,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Image   string `json:"image,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	// DataSize is the AVD's data partition (default 6G, at most 10G).
+	DataSize       string `json:"dataSize,omitempty"`
+	InstallImage   bool   `json:"installImage,omitempty"`
+	AcceptLicenses bool   `json:"acceptLicenses,omitempty"`
 }
 
 // StopDeviceRequest is the body of DELETE /v1/devices/{id}.
 type StopDeviceRequest struct {
 	Force bool `json:"force,omitempty"`
+	// Delete also deletes the simulator or AVD (`?delete=true`).
+	Delete bool `json:"delete,omitempty"`
 }
 
 // StepsRequest is the body of POST /v1/devices/{dev}/steps.
@@ -410,6 +541,10 @@ type StepsRequest struct {
 	ContinueOnError bool   `json:"continueOnError,omitempty"`
 	// Cwd resolves relative paths inside the steps (runFlow file, …).
 	Cwd string `json:"cwd,omitempty"`
+	// Bundle, used instead of Steps or YAML, is an uploaded flow bundle
+	// whose root file is the step list; its relative references resolve
+	// inside the bundle.
+	Bundle *BundleManifest `json:"bundle,omitempty"`
 }
 
 // FlowRequest is the body of POST /v1/devices/{dev}/flows.
@@ -418,6 +553,9 @@ type FlowRequest struct {
 	YAML string            `json:"yaml,omitempty"`
 	Env  map[string]string `json:"env,omitempty"`
 	Cwd  string            `json:"cwd,omitempty"`
+	// Bundle, used instead of File or YAML, is an uploaded flow bundle;
+	// its root file runs as the flow.
+	Bundle *BundleManifest `json:"bundle,omitempty"`
 }
 
 // EvalRequest is the body of POST /v1/devices/{dev}/eval.
@@ -447,6 +585,8 @@ type DeviceResult struct {
 type DevicesResult struct {
 	Envelope
 	Devices []DeviceInfo `json:"devices"`
+	// Unreachable, on a hub, names the peers whose devices are missing.
+	Unreachable []UnreachablePeer `json:"unreachable,omitempty"`
 }
 
 // DataResult wraps an arbitrary JSON payload (state, info, hierarchy).
@@ -479,6 +619,11 @@ type Info struct {
 	ReportsDir string   `json:"reportsDir"`
 	// IdleTimeout is in seconds; 0 = never.
 	IdleTimeout int `json:"idleTimeout"`
+	// TLS is true when the TCP listener serves HTTPS.
+	TLS bool `json:"tls,omitempty"`
+	// Hub is the hub's name when the daemon is a hub (`hub start`): it has
+	// leases, and every TCP caller is remote.
+	Hub string `json:"hub,omitempty"`
 }
 
 // Event is one entry on the /v1/events stream.
@@ -486,7 +631,10 @@ type Event struct {
 	Seq  int64  `json:"seq"`
 	Time string `json:"time"`
 	// Type: step | nestedStep | device.attached | device.detached |
-	// device.booted | device.stopped | daemon.shutdown
+	// device.booted | device.stopped | daemon.shutdown | lease.granted |
+	// lease.released | lease.expired. lease.expired is a lease whose window
+	// ran out; every other end of a lease (a release, its device stopped
+	// or deleted, its attach failing, the hub stopping) is lease.released.
 	Type       string `json:"type"`
 	Device     string `json:"device,omitempty"`
 	Depth      int    `json:"depth,omitempty"`

@@ -30,6 +30,9 @@ const maxCapturedOutput = 64 * 1024
 // device shell is one `adb shell` away from here, and spelling it out keeps the
 // step honest about where the command lands.
 func (fr *FlowRunner) executeRunShell(step *flow.RunShellStep) *core.CommandResult {
+	if denied := fr.policyDeniesShell(step); denied != nil { // maestro-d: caller policy, hook 3
+		return denied
+	}
 	command := strings.TrimSpace(step.Command)
 	if command == "" {
 		return &core.CommandResult{Success: false, Message: "runShell needs a command", Error: fmt.Errorf("empty command")}

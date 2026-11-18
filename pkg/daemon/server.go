@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
@@ -29,18 +32,53 @@ type Config struct {
 	Name string
 	// HTTPAddr optionally opens a TCP listener (127.0.0.1:port).
 	HTTPAddr string
-	// Token, when set, is required as `Authorization: Bearer` on TCP.
+	// Token, when set, is required as `Authorization: Bearer` on TCP. A
+	// listener beyond loopback, and any hub, refuses to start without one.
 	Token string
+	// TLSCert and TLSKey make the TCP listener serve HTTPS.
+	TLSCert, TLSKey string
+	// Hub makes every TCP caller remote, loopback included: only the unix
+	// socket is local. (`hub start` sets it.)
+	Hub bool
+	// HubName names a hub (default: the short host name).
+	HubName string
+	// ShareDevices, on a hub, limits the devices remote callers see and
+	// may lease to these ids or names; empty shares every device but TVs.
+	ShareDevices []string
+	// ShareTVs, on a hub, names the Apple TVs it shares, by id or name. A
+	// TV pairs with several Macs, so it is shared only when named, and
+	// naming it on one hub keeps one owner for it. TVs are left out of
+	// ShareDevices either way.
+	ShareTVs []string
+	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
+	// LeaseMaxDevices sets it per device, by id or name.
+	LeaseMax        time.Duration
+	LeaseMaxDevices []LeaseMax
+	// Advertise, on a hub, is the address peers are told to dial; device
+	// listings carry it in addresses.
+	Advertise string
+	// AllowRemoteShell lets remote callers run runShell.
+	AllowRemoteShell bool
+	// PassEnv names the variables of the daemon's own environment that
+	// sessions import when the daemon does not import its environment
+	// (a hub, or a listener beyond loopback).
+	PassEnv []string
 	// IdleTimeout shuts the daemon down after this much inactivity; 0
 	// disables it.
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
+	// BlobsDir is the blob store's root (default <home>/blobs).
+	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
 	StartArgs []string
 	// Ready, when set, is written a line to once the listeners are up (the
-	// spawner watches startup.log for it).
+	// spawner watches startup.log for it); a hub whose mesh refused it
+	// writes a FAILED line instead.
 	Ready io.Writer
+	// Mesh, on a hub, links it with its peers (pkg/hub): its router fronts
+	// both listeners, and READY waits for its start.
+	Mesh Mesh
 }
 
 // Server is the daemon: registry + attached devices + HTTP handlers.
@@ -48,8 +86,27 @@ type Server struct {
 	cfg      Config
 	deps     Deps
 	registry *Registry
-	hub      *Hub
+	events   *EventBus
 	idle     *idleTimer
+	idem     *idemCache
+	blobs    *BlobStore
+	// leases are a hub's device leases; leaseMu serialises granting and
+	// ending them.
+	leases  *leaseTable
+	leaseMu sync.Mutex
+	// teardowns counts the lease teardowns not finished yet, the
+	// sweeper's and those waiting for work under their lease included:
+	// Shutdown waits for them before it detaches and shuts down devices.
+	teardowns pending
+	// sharedIDs remembers the stable device ids found in the
+	// --share-device pool; shareSeen, other answers for a short while
+	// (shared). shareGen counts forgetShared calls.
+	shareMu   sync.Mutex
+	sharedIDs map[string]bool
+	shareSeen map[string]shareAnswer
+	shareGen  int
+	// idemGrace: how long a dropped TCP request waits for its retry.
+	idemGrace time.Duration
 
 	mu       sync.Mutex
 	attached map[string]*attached
@@ -73,14 +130,28 @@ func New(cfg Config, deps Deps) *Server {
 	if cfg.ReportsDir == "" {
 		cfg.ReportsDir = ReportsDir(cfg.Name)
 	}
+	if cfg.BlobsDir == "" {
+		cfg.BlobsDir = DefaultBlobRoot()
+	}
 	s := &Server{
 		cfg:       cfg,
 		deps:      deps,
 		registry:  NewRegistry(cfg.Name, deps.ListDevices),
-		hub:       NewHub(0),
+		events:    NewEventBus(0),
+		idem:      newIdemCache(),
+		blobs:     NewBlobStore(cfg.BlobsDir),
+		leases:    newLeaseTable(),
+		sharedIDs: map[string]bool{},
+		shareSeen: map[string]shareAnswer{},
+		idemGrace: idemGrace,
 		attached:  map[string]*attached{},
 		attaching: map[string]chan struct{}{},
 		done:      make(chan struct{}),
+	}
+	s.registry.deps = deps
+	s.events.observe = s.forgetShared
+	if cfg.Hub {
+		s.info.Hub = s.hubName()
 	}
 	s.idle = newIdleTimer(cfg.IdleTimeout, func() {
 		logger.Info("Idle for %v, shutting down", cfg.IdleTimeout)
@@ -93,7 +164,38 @@ func New(cfg Config, deps Deps) *Server {
 func (s *Server) Registry() *Registry { return s.registry }
 
 // Handler returns the HTTP handler (for tests and the unix socket).
-func (s *Server) Handler() http.Handler { return s.routes(false) }
+func (s *Server) Handler() http.Handler { return s.listenerHandler(false) }
+
+// TCPHandler returns the handler the TCP listener serves: bearer-token
+// checked, and with remote callers told apart from local ones.
+func (s *Server) TCPHandler() http.Handler { return s.listenerHandler(true) }
+
+// listenerHandler is what a listener serves: the daemon's routes, behind
+// the mesh's router on a hub that has one.
+func (s *Server) listenerHandler(tcp bool) http.Handler {
+	if s.cfg.Mesh != nil {
+		return s.cfg.Mesh.Handler(s.routes(tcp), tcp)
+	}
+	return s.routes(tcp)
+}
+
+// checkListen refuses a TCP listener that would let anyone in: a hub, or a
+// --http address beyond loopback, needs a token; TLS needs both files.
+func (s *Server) checkListen() *Error {
+	if s.cfg.HTTPAddr == "" {
+		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
+			return Errorf(CodeUsage, "--tls-cert/--tls-key need a TCP listener (--http)")
+		}
+		return nil
+	}
+	if s.cfg.Token == "" && (s.cfg.Hub || !isLoopbackListen(s.cfg.HTTPAddr)) {
+		return Errorf(CodeUsage, "listening on %s, beyond loopback, needs --token (MAESTRO_D_TOKEN)", s.cfg.HTTPAddr)
+	}
+	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
+		return Errorf(CodeUsage, "--tls-cert and --tls-key go together")
+	}
+	return nil
+}
 
 // Run listens on the unix socket (and TCP when configured), writes
 // daemon.json, and blocks until the daemon shuts down. Signals SIGINT and
@@ -102,14 +204,40 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := ValidateName(s.cfg.Name); err != nil {
 		return err
 	}
-	if live, _ := LiveInfo(s.cfg.Name); live != nil {
-		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
+	if e := s.checkListen(); e != nil {
+		return e
+	}
+	var tlsConfig *tls.Config
+	if s.cfg.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			return Errorf(CodeUsage, "load --tls-cert/--tls-key: %v", err)
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 	if err := os.MkdirAll(RunDir(s.cfg.Name), 0o700); err != nil {
 		return err
 	}
+	// The run-dir lock, held until Run returns, is what makes this the one
+	// daemon of its name: daemon.json alone is not, since a hub writes it
+	// only once its mesh has started, seconds after it binds the socket.
+	// A second start in that window must not remove the socket.
+	lock, err := lockRunDir(LockPath(s.cfg.Name))
+	if errors.Is(err, errRunLocked) {
+		return Errorf(CodeDaemonUnavailable, "daemon %q is already running or starting (another process holds %s)", s.cfg.Name, LockPath(s.cfg.Name))
+	}
+	if err != nil {
+		return err
+	}
+	defer unlockRunDir(lock)
+	if live, _ := LiveInfo(s.cfg.Name); live != nil {
+		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
+	}
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
+	}
+	if n := s.blobs.Expire(BlobExpiry); n > 0 {
+		logger.Info("Deleted %d blob(s) unused for %v", n, BlobExpiry)
 	}
 	sockPath := SocketPath(s.cfg.Name)
 	_ = os.Remove(sockPath)
@@ -119,12 +247,14 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	_ = os.Chmod(sockPath, 0o600)
 	s.listeners = append(s.listeners, unixLn)
-	s.servers = append(s.servers, &http.Server{Handler: s.routes(false)})
+	s.servers = append(s.servers, &http.Server{Handler: s.listenerHandler(false)})
 
 	httpAddr := ""
 	if s.cfg.HTTPAddr != "" {
 		addr := s.cfg.HTTPAddr
-		if strings.HasPrefix(addr, ":") {
+		// `serve --http :port` means loopback; a hub's --listen :port binds
+		// every interface.
+		if strings.HasPrefix(addr, ":") && !s.cfg.Hub {
 			addr = "127.0.0.1" + addr
 		}
 		tcpLn, err := net.Listen("tcp", addr)
@@ -133,8 +263,11 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
 		httpAddr = tcpLn.Addr().String()
+		if tlsConfig != nil {
+			tcpLn = tls.NewListener(tcpLn, tlsConfig)
+		}
 		s.listeners = append(s.listeners, tcpLn)
-		s.servers = append(s.servers, &http.Server{Handler: s.routes(true)})
+		s.servers = append(s.servers, &http.Server{Handler: s.listenerHandler(true)})
 	}
 
 	s.startedAt = time.Now()
@@ -150,9 +283,19 @@ func (s *Server) Run(ctx context.Context) error {
 		RunDir:      RunDir(s.cfg.Name),
 		ReportsDir:  s.cfg.ReportsDir,
 		IdleTimeout: int(s.cfg.IdleTimeout / time.Second),
+		TLS:         tlsConfig != nil,
 	}
-	if err := WriteInfo(&s.info); err != nil {
-		return err
+	if s.cfg.Hub {
+		s.info.Hub = s.hubName()
+	}
+	// A hub with a mesh writes daemon.json once its mesh has started:
+	// spawners (hub start, the launchd service's wait) treat daemon.json
+	// plus a ping as ready, so they return only after the launch browse
+	// and the first --peer answers, as READY does.
+	if s.cfg.Mesh == nil {
+		if err := WriteInfo(&s.info); err != nil {
+			return err
+		}
 	}
 	// Fresh registry file for this run.
 	s.registry.mu.Lock()
@@ -172,7 +315,41 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	logger.Info("maestro-d %q ready: socket=%s http=%s idle=%v", s.cfg.Name, sockPath, httpAddr, s.cfg.IdleTimeout)
+	logger.Info("maestro-d %q ready: socket=%s http=%s tls=%t idle=%v", s.cfg.Name, sockPath, httpAddr, tlsConfig != nil, s.cfg.IdleTimeout)
+	if httpAddr != "" && !s.importsEnv() {
+		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
+	}
+	if s.cfg.Hub {
+		share := "every device but TVs"
+		if len(s.cfg.ShareDevices) > 0 {
+			share = strings.Join(s.cfg.ShareDevices, ", ")
+		}
+		if len(s.cfg.ShareTVs) > 0 {
+			share += "; TVs " + strings.Join(s.cfg.ShareTVs, ", ")
+		}
+		logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.info.Hub, s.hubLeaseMax(),
+			leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
+		sweepCtx, stopSweep := context.WithCancel(ctx)
+		defer stopSweep()
+		go s.runLeaseSweeper(sweepCtx)
+	}
+	if s.cfg.Mesh != nil {
+		if err := s.cfg.Mesh.Start(ctx, s.info); err != nil {
+			e := asError(err)
+			logger.Error("hub %q: %s", s.info.Hub, e.Message)
+			if s.cfg.Ready != nil {
+				fmt.Fprintf(s.cfg.Ready, "FAILED code=%s %s\n", e.Code, e.Message)
+			}
+			s.Shutdown("mesh refused: " + e.Message)
+			<-s.done
+			return e
+		}
+		if err := WriteInfo(&s.info); err != nil {
+			s.Shutdown("write daemon.json: " + err.Error())
+			<-s.done
+			return err
+		}
+	}
 	if s.cfg.Ready != nil {
 		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
 	}
@@ -202,9 +379,18 @@ func (s *Server) Shutdown(reason string) {
 	s.shutdownOnce.Do(func() {
 		s.shuttingDown.Store(true)
 		s.idle.Stop()
-		s.hub.Publish(Event{Type: "daemon.shutdown", Message: reason})
 		go func() {
 			defer close(s.done)
+			// A hub's leases end first, while the mesh still carries their
+			// events to peers' clients and before daemon.shutdown: requests
+			// under them are cancelled, and every teardown (one that waits
+			// for work that ignores its cancellation too, for a while) is
+			// done before the devices are detached and shut down below.
+			s.endAllLeases()
+			if s.cfg.Mesh != nil {
+				s.cfg.Mesh.Close()
+			}
+			s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 			s.detachAll()
 			s.registry.ShutdownOwned()
 			RemoveRunFiles(s.cfg.Name)
@@ -235,7 +421,7 @@ func (s *Server) detachAll() {
 			defer wg.Done()
 			a.close()
 			s.registry.MarkDetached(a.id)
-			s.hub.Publish(Event{Type: "device.detached", Device: a.id})
+			s.events.Publish(Event{Type: "device.detached", Device: a.id})
 		}(a)
 	}
 	wg.Wait()
@@ -247,39 +433,63 @@ func (s *Server) detachAll() {
 func (s *Server) routes(tcp bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
-	mux.HandleFunc("GET /v1/events", s.hub.ServeSSE)
+	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
+	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
-	mux.HandleFunc("DELETE /v1/devices/{id}", s.handleStopDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/attach", s.handleAttach)
-	mux.HandleFunc("POST /v1/devices/{id}/detach", s.handleDetach)
-	mux.HandleFunc("GET /v1/devices/{id}", s.handleGetDevice)
-	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", s.handleCommand)
-	mux.HandleFunc("POST /v1/devices/{id}/steps", s.handleSteps)
-	mux.HandleFunc("POST /v1/devices/{id}/flows", s.handleFlow)
-	mux.HandleFunc("GET /v1/devices/{id}/screenshot", s.handleScreenshot)
-	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", s.handleHierarchy)
-	mux.HandleFunc("GET /v1/devices/{id}/state", s.handleState)
-	mux.HandleFunc("GET /v1/devices/{id}/info", s.handleInfo)
-	mux.HandleFunc("GET /v1/devices/{id}/vars", s.handleGetVars)
-	mux.HandleFunc("PUT /v1/devices/{id}/vars", s.handleSetVars)
-	mux.HandleFunc("POST /v1/devices/{id}/vars", s.handleSetVars)
-	mux.HandleFunc("POST /v1/devices/{id}/eval", s.handleEval)
+	mux.HandleFunc("POST /v1/leases", s.idempotent(s.handleAcquireLease))
+	mux.HandleFunc("GET /v1/leases", s.handleListLeases)
+	mux.HandleFunc("GET /v1/leases/{lid}", s.handleGetLease)
+	mux.HandleFunc("POST /v1/leases/{lid}/renew", s.handleRenewLease)
+	mux.HandleFunc("DELETE /v1/leases/{lid}", s.handleReleaseLease)
+	// Every device route goes through dev: a remote caller sees only the
+	// shared devices, and on a hub the request carries the device's lease.
+	open, leased := func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseOpen, h) },
+		func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseNeeded, h) }
+	mux.HandleFunc("DELETE /v1/devices/{id}", s.dev(leaseIfHeld, s.handleStopDevice))
+	mux.HandleFunc("POST /v1/devices/{id}/attach", leased(s.handleAttach))
+	mux.HandleFunc("POST /v1/devices/{id}/detach", leased(s.handleDetach))
+	mux.HandleFunc("GET /v1/devices/{id}", open(s.handleGetDevice))
+	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", leased(s.idempotent(s.handleCommand)))
+	mux.HandleFunc("POST /v1/devices/{id}/steps", leased(s.idempotent(s.handleSteps)))
+	mux.HandleFunc("POST /v1/devices/{id}/flows", leased(s.idempotent(s.handleFlow)))
+	mux.HandleFunc("GET /v1/devices/{id}/screenshot", leased(s.handleScreenshot))
+	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", leased(s.handleHierarchy))
+	mux.HandleFunc("GET /v1/devices/{id}/state", leased(s.handleState))
+	mux.HandleFunc("GET /v1/devices/{id}/info", open(s.handleInfo))
+	mux.HandleFunc("GET /v1/devices/{id}/vars", leased(s.handleGetVars))
+	mux.HandleFunc("PUT /v1/devices/{id}/vars", leased(s.handleSetVars))
+	mux.HandleFunc("POST /v1/devices/{id}/vars", leased(s.handleSetVars))
+	mux.HandleFunc("POST /v1/devices/{id}/eval", leased(s.handleEval))
+	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobHead))
+	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobPut))
+	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(s.idempotent(s.handleInstallApp)))
+	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", leased(s.handleUninstallApp))
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts", leased(s.handleListArtifacts))
+	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", leased(s.handleGetArtifact))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeUsage, "no route for %s %s", r.Method, r.URL.Path))
 	})
 	return s.middleware(mux, tcp)
 }
 
+// BearerAuthorized reports whether an Authorization header is let through
+// a TCP listener whose bearer token is token: every header when token is
+// empty (a listener without a token, which checkListen allows only on a
+// loopback address of a plain daemon), else exactly "Bearer <token>",
+// compared in constant time. The daemon and the hub mesh's router both
+// check with it.
+func BearerAuthorized(header, token string) bool {
+	return token == "" || subtle.ConstantTimeCompare([]byte(header), []byte("Bearer "+token)) == 1
+}
+
 func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tcp && s.cfg.Token != "" {
-			if r.Header.Get("Authorization") != "Bearer "+s.cfg.Token {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-				writeErrorStatus(w, http.StatusUnauthorized, Errorf(CodeUsage, "missing or invalid bearer token"))
-				return
-			}
+		if tcp && !BearerAuthorized(r.Header.Get("Authorization"), s.cfg.Token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeErrorStatus(w, http.StatusUnauthorized, Errorf(CodeUsage, "missing or invalid bearer token"))
+			return
 		}
 		if s.shuttingDown.Load() && r.URL.Path != "/v1/status" {
 			writeError(w, Errorf(CodeDaemonUnavailable, "daemon %q is shutting down", s.cfg.Name))
@@ -291,6 +501,12 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 		}
 		s.idle.Touch()
 		w.Header().Set("X-Maestro-Api-Version", APIVersion)
+		clientOutputs := r.Header.Get(HeaderClientOutputs) != ""
+		if tcp {
+			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr, ClientOutputs: clientOutputs}))
+		} else if clientOutputs {
+			r = r.WithContext(withCaller(r.Context(), Caller{ClientOutputs: true}))
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -311,6 +527,7 @@ func writeError(w http.ResponseWriter, e *Error) {
 }
 
 func writeErrorStatus(w http.ResponseWriter, status int, e *Error) {
+	w.Header().Set(HeaderErrorCode, string(e.Code))
 	writeJSON(w, status, FailureEnvelope(e))
 }
 
@@ -335,7 +552,10 @@ func decodeBody(r *http.Request, v any) *Error {
 // Daemon handlers
 
 func (s *Server) statusResult() StatusResult {
-	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.List("")}
+	// The devices this daemon holds, from its records: no live discovery,
+	// which shells out to adb, simctl and emulator and can take seconds,
+	// while clients use status as their liveness ping.
+	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.Held()}
 	if dl := s.idle.Deadline(); !dl.IsZero() {
 		res.IdleShutdownAt = dl.Format(time.RFC3339)
 	}
@@ -346,10 +566,22 @@ func (s *Server) statusResult() StatusResult {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.statusResult())
+	res := s.statusResult()
+	res.Devices = s.visible(r, res.Devices)
+	writeJSON(w, http.StatusOK, res)
 }
 
+// handleShutdown serves POST /v1/shutdown. On a hub only the unix socket
+// may stop the daemon (`maestro-d hub stop` uses it): a TCP caller, which
+// is remote there, and a request a peer forwarded would end every other
+// client's leases and take the hub off the mesh.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Hub && CallerFrom(r.Context()).Remote {
+		e := forbidden("hub %q is stopped from its own machine (maestro-d hub stop), not over TCP", s.hubName())
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -361,10 +593,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 // Device handlers
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	devs := s.registry.List(strings.ToLower(r.URL.Query().Get("platform")))
-	if devs == nil {
-		devs = []DeviceInfo{}
-	}
+	devs := s.visible(r, s.registry.List(strings.ToLower(r.URL.Query().Get("platform"))))
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
@@ -375,6 +604,11 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
 		return
 	}
+	if s.cfg.Hub {
+		devs := []DeviceInfo{info}
+		s.annotate(devs)
+		info = devs[0]
+	}
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
@@ -384,6 +618,14 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
+	if e := s.checkShareBoot(r, req); e != nil {
+		writeError(w, e)
+		return
+	}
+	if req.Create != nil {
+		s.handleCreateDevice(w, r, req)
+		return
+	}
 	s.idle.Hold()
 	defer s.idle.Release()
 	info, err := s.registry.Boot(r.Context(), req)
@@ -391,7 +633,7 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
-	s.hub.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
+	s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
@@ -405,18 +647,33 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("force") == "true" {
 		req.Force = true
 	}
-	// Detach first if we hold it.
-	if a := s.takeAttached(id); a != nil {
-		a.close()
-		s.registry.MarkDetached(id)
-		s.hub.Publish(Event{Type: "device.detached", Device: id})
+	if r.URL.Query().Get("delete") == "true" {
+		req.Delete = true
 	}
+	if req.Delete {
+		s.handleDeleteDevice(w, r, id, req.Force)
+		return
+	}
+	// Detach first if we hold it.
+	s.detachForStop(id)
 	if err := s.registry.Stop(id, req.Force); err != nil {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
-	s.hub.Publish(Event{Type: "device.stopped", Device: id})
+	// On a hub, stopping the device ends its lease.
+	s.endStoppedLease(r.Context(), endStopped, id)
+	s.events.Publish(Event{Type: "device.stopped", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
+}
+
+// detachForStop closes the driver on a device about to be stopped or
+// deleted, if this daemon holds one.
+func (s *Server) detachForStop(id string) {
+	if a := s.takeAttached(id); a != nil {
+		a.close()
+		s.registry.MarkDetached(id)
+		s.events.Publish(Event{Type: "device.detached", Device: id})
+	}
 }
 
 func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
@@ -426,7 +683,14 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	a, e := s.ensureAttached(r.Context(), id, &cfg)
+	if CallerFrom(r.Context()).Remote {
+		if e := checkRemoteAttach(&cfg); e != nil {
+			s.logForbidden(r, e)
+			writeError(w, e)
+			return
+		}
+	}
+	a, e := s.attachLeased(r.Context(), id, &cfg)
 	if e != nil {
 		writeError(w, e)
 		return
@@ -443,7 +707,7 @@ func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
 	}
 	a.close()
 	s.registry.MarkDetached(id)
-	s.hub.Publish(Event{Type: "device.detached", Device: id})
+	s.events.Publish(Event{Type: "device.detached", Device: id})
 	writeJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
@@ -582,6 +846,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cwd := r.URL.Query().Get("cwd")
+	if cwd != "" && CallerFrom(r.Context()).Remote {
+		e := forbidden("?cwd= names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
 	src := "request"
 	if cwd != "" {
 		src = filepath.Join(cwd, "request.yaml")
@@ -599,9 +869,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := a.session.Execute(ctx, step)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+		res.ForRemote(a.reportDir)
+	}
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -616,8 +889,24 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	steps, e := resolveSteps(req)
-	if e != nil {
+	if req.Cwd != "" && CallerFrom(r.Context()).Remote {
+		e := forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
+	var steps []flow.Step
+	var e *Error
+	if req.Bundle != nil {
+		if len(req.Steps) > 0 || req.YAML != "" {
+			writeError(w, Errorf(CodeUsage, "steps: send bundle, steps or yaml, not more than one"))
+			return
+		}
+		if e = req.Bundle.Validate(); e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+	} else if steps, e = resolveSteps(req); e != nil {
 		writeError(w, e)
 		return
 	}
@@ -625,17 +914,37 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release(a)
-	ctx, cancel := s.runCtx(r, a)
+	bundleDir, flowDir := "", ""
+	if req.Bundle != nil {
+		dir, root, e := s.bundleCall(a, req.Bundle)
+		if e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		f, err := flow.ParseFile(root)
+		if err != nil {
+			writeError(w, WrapErr(CodeUsage, err))
+			return
+		}
+		// The root file's own directory, not the bundle's: its relative
+		// runFlow, runScript and addMedia resolve as beside the file.
+		steps, bundleDir, flowDir = f.Steps, dir, filepath.Dir(root)
+	}
+	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
 	outs := a.session.ExecuteAll(ctx, steps, req.ContinueOnError)
 	results := make([]StepResult, 0, len(outs))
 	for _, o := range outs {
-		results = append(results, ResultFromOutcome(a.id, a.reportDir, o))
+		res := ResultFromOutcome(a.id, a.reportDir, o)
+		if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+			res.ForRemote(a.reportDir)
+		}
+		results = append(results, res)
 	}
 	res := StepsResultFrom(a.id, results)
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -650,9 +959,47 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
+	if CallerFrom(r.Context()).Remote {
+		var e *Error
+		switch {
+		case req.Cwd != "":
+			e = forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		case req.File != "":
+			e = forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (bundle or yaml)", req.File).WithDetails("field", "file")
+		}
+		if e != nil {
+			s.logForbidden(r, e)
+			writeError(w, e)
+			return
+		}
+	}
 	var f *flow.Flow
 	var err error
+	if req.Bundle != nil && (req.File != "" || req.YAML != "") {
+		writeError(w, Errorf(CodeUsage, "flows: send bundle, file or yaml, not more than one"))
+		return
+	}
+	bundleDir, flowDir := "", ""
 	switch {
+	case req.Bundle != nil:
+		if e := req.Bundle.Validate(); e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		if !s.acquire(w, r, a) {
+			return
+		}
+		defer s.release(a)
+		dir, root, e := s.bundleCall(a, req.Bundle)
+		if e != nil {
+			s.writeBundleError(w, r, e)
+			return
+		}
+		// For the whole call, hooks included: upstream sets flowDir only
+		// inside executeSubFlow, so onFlowStart and onFlowComplete would
+		// otherwise resolve against the daemon's working directory.
+		bundleDir, flowDir = dir, filepath.Dir(root)
+		f, err = flow.ParseFile(root)
 	case req.File != "":
 		path := req.File
 		if !filepath.IsAbs(path) && req.Cwd != "" {
@@ -681,17 +1028,22 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 			f.Config.Env[k] = v
 		}
 	}
-	if !s.acquire(w, r, a) {
-		return
+	if bundleDir == "" {
+		if !s.acquire(w, r, a) {
+			return
+		}
+		defer s.release(a)
 	}
-	defer s.release(a)
-	ctx, cancel := s.runCtx(r, a)
+	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
 	out := a.session.RunFlow(ctx, *f)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
+		res.ForRemote(a.reportDir)
+	}
 	status := http.StatusOK
 	if !res.OK {
-		status = res.Error.Code.HTTPStatus()
+		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
 	writeJSON(w, status, res)
 }
@@ -699,9 +1051,41 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 // runCtx is the context a step runs under: cancelled when the client goes
 // away or the daemon shuts down.
 func (s *Server) runCtx(r *http.Request, a *attached) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(r.Context())
+	return s.runCtxBundle(r, a, "", "")
+}
+
+// runCtxBundle is runCtx for a call that runs from a materialized bundle:
+// the bundle is one of the policy's roots, and flowDir is the script
+// engine's flow directory for the call.
+func (s *Server) runCtxBundle(r *http.Request, a *attached, bundleDir, flowDir string) (context.Context, context.CancelFunc) {
+	p := s.callerPolicy(r.Context(), a)
+	p.BundleDir, p.FlowDir = bundleDir, flowDir
+	ctx, cancel := context.WithCancel(executor.WithCallerPolicy(r.Context(), p))
 	stop := context.AfterFunc(a.baseCtx(), cancel)
 	return ctx, func() { stop(); cancel() }
+}
+
+// stepStatus is the HTTP status of a step result, logging a policy denial.
+func (s *Server) stepStatus(r *http.Request, res *Error) int {
+	if res == nil {
+		return http.StatusOK
+	}
+	if res.Code == CodeForbidden {
+		s.logForbidden(r, res)
+	}
+	return res.Code.HTTPStatus()
+}
+
+// writeBundleError answers a bad bundle, logging a FORBIDDEN one.
+func (s *Server) writeBundleError(w http.ResponseWriter, r *http.Request, e *Error) {
+	if e.Code == CodeForbidden {
+		s.logForbidden(r, e)
+	}
+	writeError(w, e)
+}
+
+func (s *Server) logForbidden(r *http.Request, e *Error) {
+	logger.Info("FORBIDDEN %s %s from %s: %s", r.Method, r.URL.Path, describeCaller(CallerFrom(r.Context())), e.Message)
 }
 
 // ---------------------------------------------------------------------------

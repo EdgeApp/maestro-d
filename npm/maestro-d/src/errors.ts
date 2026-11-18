@@ -5,13 +5,19 @@ export const EXIT_CODES: Record<ErrorCode, number> = {
   COMMAND_FAILED: 1,
   USAGE: 2,
   DEVICE_NOT_ATTACHED: 2,
+  FORBIDDEN: 2,
   DAEMON_UNAVAILABLE: 3,
+  PEER_UNAVAILABLE: 3,
   DEVICE_ERROR: 4,
   DEVICE_NOT_FOUND: 4,
   INTERNAL: 4,
   BUSY: 5,
   DEVICE_EXTERNAL: 5,
   DEVICE_IN_USE: 5,
+  HUB_NAME_TAKEN: 5,
+  HUB_VERSION: 5,
+  LEASE_REQUIRED: 5,
+  LEASE_EXPIRED: 5,
   INTERRUPTED: 130,
 }
 
@@ -20,22 +26,49 @@ export const HTTP_STATUS: Record<ErrorCode, number> = {
   COMMAND_FAILED: 422,
   USAGE: 400,
   DAEMON_UNAVAILABLE: 503,
+  PEER_UNAVAILABLE: 503,
   DEVICE_ERROR: 502,
+  FORBIDDEN: 403,
   BUSY: 409,
   DEVICE_EXTERNAL: 409,
   DEVICE_IN_USE: 409,
+  HUB_NAME_TAKEN: 409,
+  HUB_VERSION: 409,
+  LEASE_REQUIRED: 409,
+  LEASE_EXPIRED: 409,
   DEVICE_NOT_FOUND: 404,
   DEVICE_NOT_ATTACHED: 404,
   INTERRUPTED: 499,
   INTERNAL: 500,
 }
 
-function codeFromStatus(status: number): ErrorCode {
+/**
+ * The response header that repeats an error envelope's code, so a failure
+ * without a body (a HEAD's: LEASE_REQUIRED, LEASE_EXPIRED and BUSY are all
+ * 409) can be told apart.
+ */
+export const ERROR_CODE_HEADER = 'X-Maestro-Error-Code'
+
+/** The code a response's ERROR_CODE_HEADER names, when it is one this library knows. */
+export function codeFromHeaders(headers: Record<string, string | string[] | undefined>): ErrorCode | undefined {
+  const v = headers[ERROR_CODE_HEADER.toLowerCase()]
+  const code = Array.isArray(v) ? v[0] : v
+  return code !== undefined && Object.prototype.hasOwnProperty.call(EXIT_CODES, code) ? (code as ErrorCode) : undefined
+}
+
+/**
+ * The failure class for an HTTP status whose body carries none (mirrors
+ * CodeFromHTTPStatus): a proxy's error page, a 401 from the token check.
+ */
+export function codeFromStatus(status: number): ErrorCode {
   switch (status) {
     case 422:
       return 'COMMAND_FAILED'
     case 400:
+    case 401:
       return 'USAGE'
+    case 403:
+      return 'FORBIDDEN'
     case 503:
       return 'DAEMON_UNAVAILABLE'
     case 502:
@@ -87,8 +120,11 @@ export class MaestroError extends Error {
     return new MaestroError(body, { cause: options.cause })
   }
 
-  /** Decode a failure response body, falling back on the HTTP status. */
-  static fromResponse(status: number, body: string, result?: StepResult | StepsResult): MaestroError {
+  /**
+   * Decode a failure response body, falling back on the code in the
+   * response's ERROR_CODE_HEADER (`headerCode`), then on the HTTP status.
+   */
+  static fromResponse(status: number, body: string, result?: StepResult | StepsResult, headerCode?: ErrorCode): MaestroError {
     try {
       const parsed = JSON.parse(body) as { error?: ErrorBody }
       if (parsed && parsed.error && parsed.error.code) {
@@ -100,7 +136,7 @@ export class MaestroError extends Error {
     let msg = body.trim()
     if (msg === '') msg = `HTTP ${status}`
     if (msg.length > 200) msg = msg.slice(0, 200) + '…'
-    return MaestroError.of(codeFromStatus(status), `HTTP ${status}: ${msg}`)
+    return MaestroError.of(headerCode ?? codeFromStatus(status), `HTTP ${status}: ${msg}`)
   }
 
   /** The same shape the CLI prints and the REST API returns. */

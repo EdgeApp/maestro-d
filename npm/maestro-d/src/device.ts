@@ -2,14 +2,22 @@
 // method of the same name; each call becomes one step in the device's
 // session, executed by the daemon with the unmodified maestro-runner code.
 
+import { randomUUID } from 'node:crypto'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
 import { MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandParams } from './generated/commands.js'
+import { type FlowBundle, HubFiles, fetchBundleOutputs, packFlow, uploadBundle, uploadPath } from './pack.js'
 import type { Transport } from './transport.js'
 import type {
+  ArtifactInfo,
   DaemonEvent,
   DeviceInfo,
   Envelope,
   HierarchyNode,
+  Lease,
   PlatformInfo,
   Step,
   StepResult,
@@ -23,7 +31,10 @@ export type Scalar = string | number | boolean
 export interface CallOptions {
   /** Return BUSY instead of queueing behind a step already running on the device. */
   wait?: boolean
-  /** Directory relative paths in the step resolve against (default process.cwd()). */
+  /**
+   * Directory relative paths in the step resolve against (default
+   * process.cwd()). Not sent to a hub, which is another machine.
+   */
   cwd?: string
   signal?: AbortSignal
 }
@@ -31,6 +42,11 @@ export interface CallOptions {
 export interface RunOptions extends CallOptions {
   /** Keep going after a failed step; the result still reports `ok: false`. */
   continueOnError?: boolean
+  /**
+   * On a hub: globs (relative to cwd) of files the steps open dynamically,
+   * packed with them.
+   */
+  include?: string[]
 }
 
 export interface FlowOptions extends CallOptions {
@@ -39,6 +55,23 @@ export interface FlowOptions extends CallOptions {
   /** Inline flow YAML, header and all. */
   yaml?: string
   env?: Record<string, string>
+  /**
+   * On a hub: globs (relative to the flow's directory) of files the flow
+   * opens dynamically, packed with it.
+   */
+  include?: string[]
+}
+
+/** Write `yaml` to a temporary root file, run `fn` on it, and remove the directory. */
+async function withTempRoot<T>(yaml: string, fn: (root: string) => Promise<T>): Promise<T> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-inline-'))
+  try {
+    const root = path.join(dir, '.maestro-d-inline.yaml')
+    fs.writeFileSync(root, yaml)
+    return await fn(root)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 /** The typed method for each command. */
@@ -83,13 +116,24 @@ export function buildValue(name: string, value: unknown, fields: Record<string, 
     }
     return null
   }
-  return mergeFields(name, value, fields, spec.scalar)
+  const listField = spec.bareField !== null && spec.bareField !== spec.scalar ? spec.bareField : undefined
+  return mergeFields(name, value, fields, spec.scalar, listField)
 }
 
-/** scalar: the field a bare value maps to, null when the command has none, undefined when unknown. */
-function mergeFields(name: string, value: unknown, fields: Record<string, unknown>, scalar: string | null | undefined): unknown {
+/**
+ * scalar: the field a bare value maps to, null when the command has none,
+ * undefined when unknown. listField: the list field a bare value or list
+ * fills when the command has no scalar (addMedia's files).
+ */
+function mergeFields(
+  name: string,
+  value: unknown,
+  fields: Record<string, unknown>,
+  scalar: string | null | undefined,
+  listField?: string,
+): unknown {
   const bare = value !== undefined && value !== null && !isPlainObject(value) && !Array.isArray(value)
-  if (bare && scalar === null) {
+  if (bare && scalar === null && listField === undefined) {
     throw new TypeError(`${name} does not take a bare value; pass an object of fields`)
   }
   if (Object.keys(fields).length === 0) {
@@ -97,6 +141,9 @@ function mergeFields(name: string, value: unknown, fields: Record<string, unknow
   }
   if (value === undefined) return fields
   if (isPlainObject(value)) return { ...value, ...fields }
+  if (listField !== undefined && (bare || Array.isArray(value))) {
+    return { [listField]: Array.isArray(value) ? value : [value], ...fields }
+  }
   if (Array.isArray(value)) {
     throw new TypeError(`${name}: a list value cannot be combined with options`)
   }
@@ -146,8 +193,15 @@ export class MaestroDevice {
   info: DeviceInfo
   /** Aborts every request made through this handle. */
   readonly signal?: AbortSignal
+  /**
+   * The hub lease this handle holds on the device, if any: from
+   * `MaestroD.lease()`, or the one `attach()` found in leases.json.
+   */
+  lease?: Lease
   private readonly transport: Transport
   private readonly base: string
+  private onRenew?: (lease: Lease) => void
+  private onRelease?: (dev: MaestroDevice, lease: Lease) => void
 
   /** @internal Use `MaestroD.attach()`. */
   constructor(transport: Transport, daemon: { readonly name: string }, info: DeviceInfo, signal?: AbortSignal) {
@@ -174,11 +228,25 @@ export class MaestroDevice {
   async command(name: string, value?: unknown, opts?: Record<string, unknown>): Promise<StepResult> {
     if (typeof name !== 'string' || name === '') throw new TypeError('command name must be a non-empty string')
     const { fields, call } = splitOptions(opts)
-    const body = buildValue(name, value, fields)
-    const path =
-      `${this.base}/commands/${encodeURIComponent(name)}` +
-      query({ cwd: call.cwd ?? process.cwd(), wait: call.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepResult>(path, { method: 'POST', body, signal: this.sig(call) })
+    let body = buildValue(name, value, fields)
+    const cwd = this.transport.hub ? undefined : (call.cwd ?? process.cwd())
+    const url =
+      `${this.base}/commands/${encodeURIComponent(name)}` + query({ cwd, wait: call.wait === false ? 'false' : undefined })
+    // On a hub, upload the input files and name the outputs ourselves; the
+    // outputs are fetched back to the caller's paths, also after a failure
+    // (an assertScreenshot mismatch's diff image).
+    const files = this.transport.hub ? new HubFiles(this.transport, this.base, call.cwd ?? process.cwd(), this.sig(call)) : undefined
+    if (files) body = await files.rewrite(name, body)
+    let res: StepResult
+    try {
+      res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(call), requestId: this.requestId() })
+    } catch (err) {
+      if (files && err instanceof MaestroError && err.result && 'outputs' in err.result) {
+        await files.fetchOutputs(err.result.outputs)
+      }
+      throw err
+    }
+    if (files) await files.fetchOutputs(res.outputs)
     return checkResult(res)
   }
 
@@ -199,10 +267,52 @@ export class MaestroDevice {
   }
 
   private async steps(req: { steps?: Step[]; yaml?: string }, opts: RunOptions): Promise<StepsResult> {
-    const body = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
-    const path = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepsResult>(path, { method: 'POST', body, signal: this.sig(opts) })
+    const url = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
+    if (this.transport.hub) {
+      // The steps' relative references are on this machine: write them to
+      // a temporary root that stands in cwd, pack it with everything it
+      // uses, and post the bundle (a hub refuses host directories).
+      const cwd = opts.cwd ?? process.cwd()
+      const yaml = req.yaml ?? JSON.stringify(req.steps)
+      return withTempRoot(yaml, async (root) => {
+        const bundle = await packFlow([root], { base: cwd, include: opts.include, signal: this.sig(opts) })
+        const body = { bundle: bundle.manifest, continueOnError: opts.continueOnError === true }
+        return this.postBundle<StepsResult>(url, body, bundle, opts)
+      })
+    }
+    const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
+    const res = await this.transport.json<StepsResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
+  }
+
+  /**
+   * Upload a bundle's files, post the call, and fetch its outputs back into
+   * the bundle's directory, also after a failure.
+   */
+  private async postBundle<T extends StepResult | StepsResult>(
+    url: string,
+    body: Record<string, unknown>,
+    bundle: FlowBundle,
+    opts: CallOptions,
+  ): Promise<T> {
+    const signal = this.sig(opts)
+    await uploadBundle(this.transport, this.base, bundle, { signal })
+    let res: T
+    try {
+      res = await this.transport.json<T>(url, { method: 'POST', body, signal, requestId: this.requestId() })
+    } catch (err) {
+      if (err instanceof MaestroError && err.result && 'outputs' in err.result) {
+        await fetchBundleOutputs(this.transport, this.base, bundle.dir, err.result.outputs, signal)
+      }
+      throw err
+    }
+    await fetchBundleOutputs(this.transport, this.base, bundle.dir, res.outputs, signal)
+    return checkResult(res)
+  }
+
+  /** A fresh request id for a step-running call over TCP (kept across retries). */
+  private requestId(): string | undefined {
+    return this.transport.tcp ? randomUUID() : undefined
   }
 
   /**
@@ -211,10 +321,60 @@ export class MaestroDevice {
    */
   async flow(opts: FlowOptions): Promise<StepResult> {
     if (!opts.file && !opts.yaml) throw new TypeError('flow() needs a file or yaml')
+    const url = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
+    if (this.transport.hub) {
+      // The flow is on this machine, not the hub's: pack it with everything
+      // it uses and post the bundle; inline YAML stands in cwd.
+      const cwd = opts.cwd ?? process.cwd()
+      const run = async (root: string, base?: string): Promise<StepResult> => {
+        const bundle = await packFlow([root], { base, env: opts.env, include: opts.include, signal: this.sig(opts) })
+        return this.postBundle<StepResult>(url, { bundle: bundle.manifest, env: opts.env }, bundle, opts)
+      }
+      if (opts.yaml !== undefined) return withTempRoot(opts.yaml, (root) => run(root, cwd))
+      return run(path.resolve(cwd, opts.file as string))
+    }
     const body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
-    const path = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
-    const res = await this.transport.json<StepResult>(path, { method: 'POST', body, signal: this.sig(opts) })
+    const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
     return checkResult(res)
+  }
+
+  // -------------------------------------------------------------------------
+  // Apps and artifacts
+
+  /**
+   * Install an app (.apk, .app or .ipa) without attaching. On a hub the
+   * file is uploaded first, unless the hub already has it. Resolves to the
+   * app id when the daemon can read it.
+   */
+  async installApp(file: string, opts: CallOptions & { reinstall?: boolean; platform?: string } = {}): Promise<{ appId?: string }> {
+    if (typeof file !== 'string' || file === '') throw new TypeError('installApp() takes a file path')
+    let app = path.resolve(opts.cwd ?? process.cwd(), file)
+    if (this.transport.hub) app = (await uploadPath(this.transport, this.base, app, this.sig(opts))).ref
+    const res = await this.transport.json<Envelope & { appId?: string }>(`${this.base}/apps`, {
+      method: 'POST',
+      body: { app, reinstall: opts.reinstall === true || undefined, platform: opts.platform },
+      signal: this.sig(opts),
+      requestId: this.requestId(),
+    })
+    return res.appId !== undefined ? { appId: res.appId } : {}
+  }
+
+  /** Uninstall an app by bundle id or package name. */
+  async uninstallApp(appId: string, opts: CallOptions = {}): Promise<void> {
+    if (typeof appId !== 'string' || appId === '') throw new TypeError('uninstallApp() takes an app id')
+    await this.transport.json<Envelope>(`${this.base}/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', signal: this.sig(opts) })
+  }
+
+  /** The files of the session's report directory (screenshots, outputs/, recordings, logs). */
+  async artifacts(opts: CallOptions = {}): Promise<ArtifactInfo[]> {
+    const res = await this.transport.json<Envelope & { artifacts: ArtifactInfo[] }>(`${this.base}/artifacts`, { signal: this.sig(opts) })
+    return res.artifacts
+  }
+
+  /** One artifact's bytes; `file` is relative to the report directory, as `artifacts()` lists it. */
+  async artifact(file: string, opts: CallOptions = {}): Promise<Buffer> {
+    if (typeof file !== 'string' || file === '') throw new TypeError('artifact() takes a path')
+    return this.transport.bytes(`${this.base}/artifacts/${file.split('/').map(encodeURIComponent).join('/')}`, { signal: this.sig(opts) })
   }
 
   // -------------------------------------------------------------------------
@@ -292,10 +452,82 @@ export class MaestroDevice {
   // -------------------------------------------------------------------------
   // Lifecycle
 
-  /** Close the driver. The device (and daemon) keep running. */
+  /**
+   * Close the driver. The device (and daemon) keep running; on a hub the
+   * lease stays held until `release()`.
+   */
   async detach(opts: CallOptions = {}): Promise<void> {
     await this.transport.json<Envelope>(`${this.base}/detach`, { method: 'POST', signal: this.sig(opts) })
     this.info = { ...this.info, attached: false }
+  }
+
+  /**
+   * @internal Bind a hub lease to this handle: it is sent with every
+   * request for the device until `release()`. Nothing renews it on its
+   * own.
+   */
+  holdLease(
+    lease: Lease,
+    opts: { onRenew?: (lease: Lease) => void; onRelease?: (dev: MaestroDevice, lease: Lease) => void } = {},
+  ): void {
+    this.lease = lease
+    if (opts.onRenew) this.onRenew = opts.onRenew
+    if (opts.onRelease) this.onRelease = opts.onRelease
+    this.transport.leases.set(lease.device, lease.id)
+  }
+
+  /**
+   * Renew the lease explicitly: its window starts again now and lasts
+   * `ttlSec` seconds (default the lease's own window). A lease is a fixed
+   * window that using the device never extends, so a run longer than the
+   * window renews it. Over the device's maximum (`maxSec`) rejects with
+   * USAGE; once the lease is gone, with LEASE_EXPIRED.
+   */
+  async renew(opts: CallOptions & { ttlSec?: number } = {}): Promise<Lease | undefined> {
+    const lease = this.lease
+    if (!lease) return undefined
+    try {
+      const body = opts.ttlSec !== undefined ? { ttlSec: opts.ttlSec } : {}
+      const res = await this.transport.json<Envelope & { lease: Lease }>(`/v1/leases/${encodeURIComponent(lease.id)}/renew`, {
+        method: 'POST',
+        body,
+        signal: this.sig(opts),
+      })
+      if (this.lease === lease) this.lease = res.lease
+      this.onRenew?.(res.lease)
+      return res.lease
+    } catch (err) {
+      if (err instanceof MaestroError && err.code === 'LEASE_EXPIRED') this.forgetLease()
+      throw err
+    }
+  }
+
+  /**
+   * End this handle's lease: the hub detaches the device and it is free for
+   * others. Does nothing when the handle holds no lease (a daemon that is
+   * not a hub has none). The lease is forgotten (here and in leases.json)
+   * only once the hub has ended it, or answers that it already ended: a
+   * release that fails keeps it, so a later release() or `maestro-d
+   * release` can try again.
+   */
+  async release(opts: CallOptions = {}): Promise<void> {
+    const lease = this.lease
+    if (!lease) return
+    try {
+      await this.transport.json<Envelope>(`/v1/leases/${encodeURIComponent(lease.id)}`, { method: 'DELETE', signal: this.sig(opts) })
+    } catch (err) {
+      if (!(err instanceof MaestroError && err.code === 'LEASE_EXPIRED')) throw err
+    }
+    if (this.lease?.id === lease.id) this.forgetLease()
+    this.info = { ...this.info, attached: false }
+  }
+
+  private forgetLease(): void {
+    const lease = this.lease
+    if (!lease) return
+    this.lease = undefined
+    if (this.transport.leases.get(lease.device) === lease.id) this.transport.leases.delete(lease.device)
+    this.onRelease?.(this, lease)
   }
 
   /**

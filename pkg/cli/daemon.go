@@ -98,8 +98,22 @@ func printJSONStdout(v any) {
 	printJSON(os.Stdout, v)
 }
 
-// connectDaemon dials the named daemon, spawning it unless --no-spawn.
+// connectDaemon dials the named daemon, spawning it unless --no-spawn. With
+// --target-hub (or MAESTRO_D_HUB) it returns a TCP client for that daemon
+// or hub instead, and never spawns.
 func connectDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
+	c, err := dialDaemon(ctx, o, spawn)
+	if err != nil {
+		return nil, err
+	}
+	wireLeases(c, o)
+	return c, nil
+}
+
+func dialDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
+	if o.Target != "" {
+		return connectTarget(o)
+	}
 	opts := daemon.SpawnOptions{
 		NoSpawn:      !spawn || o.NoSpawn,
 		IdleTimeout:  o.IdleTimeout,
@@ -141,10 +155,10 @@ func resolveDevice(ctx context.Context, c *daemon.Client, o *daemonOpts) (string
 	case 1:
 		return attached[0], nil
 	case 0:
-		return "", daemon.Errorf(daemon.CodeUsage, "no device attached to daemon %q; pass --device ID (and --platform / --team-id … for the first command)", o.Name)
+		return "", daemon.Errorf(daemon.CodeUsage, "no device attached to %s; pass --device ID (and --platform / --team-id … for the first command)", targetLabel(o))
 	}
-	return "", daemon.Errorf(daemon.CodeUsage, "daemon %q has %d devices attached; pass --device one of: %s",
-		o.Name, len(attached), strings.Join(attached, ", "))
+	return "", daemon.Errorf(daemon.CodeUsage, "%s has %d devices attached; pass --device one of: %s",
+		targetLabel(o), len(attached), strings.Join(attached, ", "))
 }
 
 // ensureAttached attaches the device with the invocation's flags when the
@@ -157,6 +171,13 @@ func ensureAttached(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 			return nil, err
 		}
 	}
+	return attachIfNeeded(ctx, c, o, id, info)
+}
+
+// attachIfNeeded is ensureAttached with the device's record already read
+// (nil when the daemon does not list it).
+func attachIfNeeded(ctx context.Context, c *daemon.Client, o *daemonOpts, id string, info *daemon.DeviceInfo) (*daemon.DeviceInfo, error) {
+	var err error
 	if info != nil && info.Attached {
 		if o.Attach.AppID != "" && info.AppID != "" && o.Attach.AppID != info.AppID {
 			progress("warning: %s is attached with --app-id %s; ignoring --app-id %s (detach to change it)", id, info.AppID, o.Attach.AppID)
@@ -169,7 +190,11 @@ func ensureAttached(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 		progress("Attaching %s …", id)
 	}
 	start := time.Now()
-	info, err = c.Attach(ctx, id, o.Attach)
+	cfg := o.Attach
+	if err := uploadAttachFiles(ctx, c, o, id, &cfg); err != nil {
+		return nil, err
+	}
+	info, err = c.Attach(ctx, id, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +215,22 @@ func session(ctx context.Context, o *daemonOpts) (*daemon.Client, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := ensureAttached(ctx, c, o, id); err != nil {
+	if id, _, err = leaseAndAttach(ctx, c, o, id); err != nil {
 		return nil, "", err
 	}
 	return c, id, nil
+}
+
+// leaseAndAttach sends the device's lease on file, if this client holds
+// one (see lease.go; it never takes one: on a hub, without a lease the
+// attach fails LEASE_REQUIRED), then attaches the device if needed.
+func leaseAndAttach(ctx context.Context, c *daemon.Client, o *daemonOpts, id string) (string, *daemon.DeviceInfo, error) {
+	lid, info, err := heldLease(ctx, c, o, id)
+	if err != nil {
+		return id, nil, err
+	}
+	info, err = attachIfNeeded(ctx, c, o, lid, info)
+	return lid, info, err
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +388,16 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		fmt.Fprintln(w, "No devices.")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+	// A hub's listing carries lease state: show who holds each device.
+	leases := false
+	for _, d := range devs {
+		leases = leases || d.Lease != nil || d.Available
+	}
+	if leases {
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", "NAME")
+	} else {
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+	}
 	for _, d := range devs {
 		state := d.State
 		if d.Busy {
@@ -371,6 +417,17 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		if d.BootedBy == daemon.BootedByDaemon {
 			name += " [booted by daemon]"
 		}
+		if leases {
+			lease := "-"
+			switch {
+			case d.Lease != nil:
+				lease = fmt.Sprintf("%s (%s)", daemon.HolderName(d.Lease.Holder), untilExpiry(d.Lease.ExpiresAt))
+			case d.Available:
+				lease = "available"
+			}
+			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", d.ID, d.Platform, d.Kind, state, att, lease, strings.TrimSpace(name))
+			continue
+		}
 		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", d.ID, d.Platform, d.Kind, state, att, strings.TrimSpace(name))
 	}
 }
@@ -385,6 +442,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
+		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
 	}, oneShotCommands()...)
 }
 
@@ -500,7 +558,17 @@ API (--http), or to attach a device up front:
 	}),
 }
 
-var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4])
+var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
+	strFlag("tls-cert", "Serve HTTPS on --http with this PEM certificate (with --tls-key)", []string{"MAESTRO_D_TLS_CERT"},
+		func(o *daemonOpts, v string) { o.TLSCert = v }),
+	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
+		func(o *daemonOpts, v string) { o.TLSKey = v }),
+	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import when --http listens beyond loopback (repeatable); no other one is imported",
+		apply: func(o *daemonOpts, v string) error {
+			o.PassEnv = append(o.PassEnv, v)
+			return nil
+		}},
+})
 
 var daemonServeCommand = &cli.Command{
 	Name:            "serve",
@@ -528,6 +596,9 @@ var daemonServeCommand = &cli.Command{
 			Name:        o.Name,
 			HTTPAddr:    o.HTTPAddr,
 			Token:       o.Token,
+			TLSCert:     o.TLSCert,
+			TLSKey:      o.TLSKey,
+			PassEnv:     o.PassEnv,
 			IdleTimeout: idle,
 			ReportsDir:  daemon.ReportsDir(o.Name),
 			StartArgs:   os.Args[1:],
@@ -574,43 +645,49 @@ var daemonStopCommand = &cli.Command{
 				return nil
 			}
 		}
-		timeout := 30 * time.Second
-		if o.StartTimeout > 0 {
-			timeout = time.Duration(o.StartTimeout) * time.Second
-		}
-		var stopped []string
-		for _, name := range names {
-			client, err := daemon.Dial(name)
-			if err != nil {
-				return err
-			}
-			if client == nil {
-				if o.stopAll {
-					continue
-				}
-				return daemon.Errorf(daemon.CodeDaemonUnavailable, "daemon %q is not running", name)
-			}
-			if err := client.Shutdown(ctx); err != nil {
-				if de, ok := err.(*daemon.Error); !ok || de.Code != daemon.CodeDaemonUnavailable {
-					return err
-				}
-			}
-			if !daemon.WaitForExit(client.Info, timeout) {
-				return daemon.Errorf(daemon.CodeDaemonUnavailable, "daemon %q (pid %d) did not exit within %v", name, client.Info.PID, timeout)
-			}
-			stopped = append(stopped, name)
-			if !o.JSON {
-				fmt.Printf("daemon %q stopped\n", name)
-			}
-		}
-		if o.JSON {
-			printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
-		}
-		return nil
+		return stopDaemons(ctx, o, names, "daemon")
 	}),
 }
 
-var statusFlags = flagSet(daemonSelectFlags)
+// stopDaemons shuts the named daemons down and waits for them to exit; with
+// --all, one that is not running is skipped.
+func stopDaemons(ctx context.Context, o *daemonOpts, names []string, what string) error {
+	timeout := 30 * time.Second
+	if o.StartTimeout > 0 {
+		timeout = time.Duration(o.StartTimeout) * time.Second
+	}
+	var stopped []string
+	for _, name := range names {
+		client, err := daemon.Dial(name)
+		if err != nil {
+			return err
+		}
+		if client == nil {
+			if o.stopAll {
+				continue
+			}
+			return daemon.Errorf(daemon.CodeDaemonUnavailable, "%s %q is not running", what, name)
+		}
+		if err := client.Shutdown(ctx); err != nil {
+			if de, ok := err.(*daemon.Error); !ok || de.Code != daemon.CodeDaemonUnavailable {
+				return err
+			}
+		}
+		if !daemon.WaitForExit(client.Info, timeout) {
+			return daemon.Errorf(daemon.CodeDaemonUnavailable, "%s %q (pid %d) did not exit within %v", what, name, client.Info.PID, timeout)
+		}
+		stopped = append(stopped, name)
+		if !o.JSON {
+			fmt.Printf("%s %q stopped\n", what, name)
+		}
+	}
+	if o.JSON {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
+	}
+	return nil
+}
+
+var statusFlags = flagSet(daemonSelectFlags, targetFlags)
 
 var daemonStatusCommand = &cli.Command{
 	Name:            "status",
@@ -619,7 +696,13 @@ var daemonStatusCommand = &cli.Command{
 	Description:     flagsDoc("", statusFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(statusFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-		client, err := daemon.Dial(o.Name)
+		var client *daemon.Client
+		var err error
+		if o.Target != "" {
+			client, err = connectTarget(o)
+		} else {
+			client, err = daemon.Dial(o.Name)
+		}
 		if err != nil {
 			return err
 		}
@@ -637,8 +720,15 @@ var daemonStatusCommand = &cli.Command{
 		d := st.Daemon
 		fmt.Printf("daemon %q: pid %d, version %s, up since %s\n", d.Name, d.PID, d.Version, d.StartedAt)
 		fmt.Printf("  socket:  %s\n", d.SocketPath)
+		if d.Hub != "" {
+			fmt.Printf("  hub:     %s (leases on)\n", d.Hub)
+		}
 		if d.HTTPAddr != "" {
-			fmt.Printf("  http:    http://%s\n", d.HTTPAddr)
+			scheme := "http"
+			if d.TLS {
+				scheme = "https"
+			}
+			fmt.Printf("  %-8s %s://%s\n", scheme+":", scheme, d.HTTPAddr)
 		}
 		fmt.Printf("  reports: %s\n", d.ReportsDir)
 		if d.IdleTimeout > 0 {
@@ -702,11 +792,11 @@ var daemonPsCommand = &cli.Command{
 }
 
 var (
-	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1])
-	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], []dflag{
+	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags)
+	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		intFlag("boot-timeout", "Seconds to wait for boot (default 180)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
-	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], []dflag{
+	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
 		boolFlag("force", "Shut down even if the daemon did not boot it", nil, func(o *daemonOpts, v bool) { o.force = v }),
 		boolFlag("orphans", "Shut down devices left behind by dead daemons", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
 	})
@@ -714,7 +804,7 @@ var (
 
 var daemonDeviceCommand = &cli.Command{
 	Name:  "device",
-	Usage: "List, boot and shut down devices, simulators and emulators",
+	Usage: "List, create, boot, shut down and delete devices, simulators and emulators",
 	Subcommands: []*cli.Command{
 		{
 			Name:            "list",
@@ -728,35 +818,39 @@ var daemonDeviceCommand = &cli.Command{
 				if err != nil {
 					return err
 				}
-				devs, err := client.Devices(ctx, o.Attach.Platform)
+				res, err := client.DeviceList(ctx, o.Attach.Platform)
 				if err != nil {
 					return err
 				}
 				if o.JSON {
-					printJSON(os.Stdout, daemon.DevicesResult{Envelope: daemon.Envelope{OK: true}, Devices: devs})
+					res.Envelope = daemon.Envelope{OK: true}
+					printJSON(os.Stdout, res)
 					return nil
 				}
-				printDevices(os.Stdout, devs)
+				printDevices(os.Stdout, res.Devices)
+				for _, u := range res.Unreachable {
+					fmt.Fprintf(os.Stderr, "unreachable: hub %s (%s)\n", u.Hub, u.Error)
+				}
 				return nil
 			}),
 		},
 		{
 			Name:      "start",
-			Usage:     "Boot a simulator (by name or UDID) or emulator (by AVD name) through the daemon",
+			Usage:     "Boot a simulator (by name or UDID) or emulator (by AVD name or avd:<name>) through the daemon",
 			ArgsUsage: "<name-or-udid>",
 			Description: flagsDoc(`The daemon remembers what it booted and shuts it down again when it
 stops (or on 'device stop'). Devices that were already running are
 never shut down without --force.
 
+--platform may be left out: avd:<name> means android, and a name or
+UDID that 'device list' shows picks that device's platform.
+
   maestro-d device start "iPhone 15 Pro" --platform ios
-  maestro-d device start Pixel_7_API_33 --platform android`, deviceStartFlags),
+  maestro-d device start avd:Pixel_7_API_33`, deviceStartFlags),
 			SkipFlagParsing: true,
 			Action: withArgs(deviceStartFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 				if len(args) != 1 {
-					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device start <name-or-udid> --platform ios|android")
-				}
-				if o.Attach.Platform == "" {
-					return daemon.Errorf(daemon.CodeUsage, "--platform ios|android is required to boot a device")
+					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device start <name-or-udid> [--platform ios|android]")
 				}
 				client, err := connectDaemon(ctx, o, true)
 				if err != nil {
@@ -765,7 +859,7 @@ never shut down without --force.
 				if !o.JSON {
 					progress("Booting %s …", args[0])
 				}
-				dev, err := client.StartDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: args[0], BootTimeout: o.StartTimeout})
+				dev, err := client.StartDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: args[0], BootTimeout: o.StartTimeout, Hub: o.manage.hub})
 				if err != nil {
 					return err
 				}
@@ -821,10 +915,13 @@ daemons that are no longer alive.`, deviceStopFlags),
 				return nil
 			}),
 		},
+		deviceCatalogCommand,
+		deviceCreateCommand,
+		deviceDeleteCommand,
 	},
 }
 
-var attachCmdFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags)
+var attachCmdFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags)
 
 var daemonAttachCommand = &cli.Command{
 	Name:      "attach",
@@ -845,7 +942,7 @@ explicitly to control the flags or to pay the driver start-up cost early.
 		if err != nil {
 			return err
 		}
-		dev, err := ensureAttached(ctx, client, o, o.Device)
+		_, dev, err := leaseAndAttach(ctx, client, o, o.Device)
 		if err != nil {
 			return err
 		}
@@ -862,7 +959,7 @@ explicitly to control the flags or to pay the driver start-up cost early.
 	}),
 }
 
-var detachFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag), []dflag{
+var detachFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag), targetFlags, []dflag{
 	boolFlag("all", "Detach every device", nil, func(o *daemonOpts, v bool) { o.stopAll = v }),
 })
 
@@ -913,8 +1010,9 @@ var daemonDetachCommand = &cli.Command{
 	}),
 }
 
-var runFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, []dflag{
+var runFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags, []dflag{
 	boolFlag("continue-on-error", "Keep running remaining steps after a failure (step lists only)", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	includeFlag,
 })
 
 var daemonRunCommand = &cli.Command{
@@ -926,6 +1024,12 @@ var daemonRunCommand = &cli.Command{
 and flow-scoped env. A bare YAML list of steps runs step by step in the
 session; with --continue-on-error every step runs and the exit code
 reflects the first failure. '-' reads stdin.
+
+With --target-hub the file runs whole on the device's host: it is packed
+with everything it uses (as 'maestro-d pack --flow', plus --include), the
+files the hub lacks are uploaded, and the files its output fields write
+(takeScreenshot, …) are fetched back beside the flow, where a local run
+writes them.
 
   maestro-d run login.yaml -e USER=alice
   printf -- '- launchApp\n- tapOn: Login\n' | maestro-d run -`, runFlags),
@@ -950,6 +1054,9 @@ reflects the first failure. '-' reads stdin.
 		if err != nil {
 			return err
 		}
+		if o.Target != "" {
+			return runBundle(ctx, o, client, id, src, data, cwd)
+		}
 		if isStepList(data) {
 			res, err := client.Steps(ctx, id, daemon.StepsRequest{YAML: string(data), ContinueOnError: o.force, Cwd: cwd}, !o.NoWait)
 			return emitSteps(o, res, err)
@@ -965,6 +1072,50 @@ reflects the first failure. '-' reads stdin.
 	}),
 }
 
+// runBundle runs a flow file or step list on a targeted daemon: the file is
+// on this machine, not the target's, so it is packed with its closure and
+// uploaded, and posted as a bundle (with no working directory: a remote
+// caller may not name one). stdin is packed as a root that sits in cwd.
+func runBundle(ctx context.Context, o *daemonOpts, client *daemon.Client, id, src string, data []byte, cwd string) error {
+	opts := packFlowOpts{Env: o.Attach.Env, Include: o.pack.include}
+	root := src
+	if src == "-" {
+		tmp, err := os.MkdirTemp("", "maestro-d-stdin-")
+		if err != nil {
+			return daemon.WrapErr(daemon.CodeUsage, err)
+		}
+		defer os.RemoveAll(tmp)
+		root = filepath.Join(tmp, "stdin.yaml")
+		if err := os.WriteFile(root, data, 0o644); err != nil {
+			return daemon.WrapErr(daemon.CodeUsage, err)
+		}
+		opts.Base = cwd
+	}
+	b, err := packFlow([]string{root}, opts)
+	if err != nil {
+		return err
+	}
+	if err := uploadBundle(ctx, client, id, b, false, o.JSON); err != nil {
+		return err
+	}
+	if isStepList(data) {
+		res, err := client.Steps(ctx, id, daemon.StepsRequest{Bundle: &b.Manifest, ContinueOnError: o.force}, !o.NoWait)
+		if res != nil {
+			if ferr := fetchBundleOutputs(ctx, client, id, b.Dir, res.Outputs, o.JSON); ferr != nil && err == nil {
+				err = ferr
+			}
+		}
+		return emitSteps(o, res, err)
+	}
+	res, err := client.Flow(ctx, id, daemon.FlowRequest{Bundle: &b.Manifest, Env: o.Attach.Env}, !o.NoWait)
+	if res != nil {
+		if ferr := fetchBundleOutputs(ctx, client, id, b.Dir, res.Outputs, o.JSON); ferr != nil && err == nil {
+			err = ferr
+		}
+	}
+	return emitStep(o, res, err)
+}
+
 // isStepList reports whether YAML is a bare list of steps (no config
 // header), which `run` executes step by step instead of as a flow.
 func isStepList(data []byte) bool {
@@ -978,8 +1129,8 @@ func isStepList(data []byte) bool {
 	return node.Kind == yaml.SequenceNode && !strings.Contains(string(data), "\n---")
 }
 
-var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, []dflag{
-	strFlag("out", "Write the screenshot to this file (default screenshot-<time>.png; '-' for stdout)", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
+var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags, []dflag{
+	strFlag("out", "Write the screenshot to this file (default screenshot-<time>.png; '-' for stdout); for artifacts, download them into this directory", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
 	boolFlag("raw", "Hierarchy as the driver's raw XML/JSON instead of the normalized tree", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	boolFlag("compact", "Hierarchy as a flat, greppable listing (as `hierarchy --compact`)", nil, func(o *daemonOpts, v bool) { o.compact = v }),
 	strFlag("find", "Hierarchy elements matching a substring (as `hierarchy --find`)", nil, func(o *daemonOpts, v string) { o.find = v }),
@@ -987,20 +1138,21 @@ var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), att
 
 var daemonGetCommand = &cli.Command{
 	Name:      "get",
-	Usage:     "Read device state: screenshot, hierarchy, state, info, vars",
-	ArgsUsage: "screenshot | hierarchy | state | info | vars",
+	Usage:     "Read device state: screenshot, hierarchy, state, info, vars, artifacts",
+	ArgsUsage: "screenshot | hierarchy | state | info | vars | artifacts",
 	Description: flagsDoc(`  maestro-d get screenshot -o now.png
   maestro-d get hierarchy | jq '.. | .text? // empty'
   maestro-d get hierarchy --find "Sign in"
   maestro-d get state      # foreground app, orientation, …
   maestro-d get info       # platform, OS version, device name, app version
-  maestro-d get vars       # session variables (from -e and copyTextFrom/outputs)`, getFlags),
+  maestro-d get vars       # session variables (from -e and copyTextFrom/outputs)
+  maestro-d get artifacts  # the session's report files; --out DIR downloads them`, getFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(getFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-		what := args[0]
-		if len(args) != 1 || !map[string]bool{"screenshot": true, "hierarchy": true, "state": true, "info": true, "vars": true}[what] {
-			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d get screenshot|hierarchy|state|info|vars")
+		if len(args) != 1 || !map[string]bool{"screenshot": true, "hierarchy": true, "state": true, "info": true, "vars": true, "artifacts": true}[args[0]] {
+			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d get screenshot|hierarchy|state|info|vars|artifacts")
 		}
+		what := args[0]
 		client, id, err := session(ctx, o)
 		if err != nil {
 			return err
@@ -1066,6 +1218,8 @@ var daemonGetCommand = &cli.Command{
 				return err
 			}
 			printJSON(os.Stdout, v)
+		case "artifacts":
+			return getArtifacts(ctx, client, o, id)
 		case "vars":
 			vars, err := client.Vars(ctx, id)
 			if err != nil {
@@ -1088,7 +1242,7 @@ var daemonGetCommand = &cli.Command{
 	}),
 }
 
-var setFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags)
+var setFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags)
 
 var daemonSetCommand = &cli.Command{
 	Name:            "set",
@@ -1123,7 +1277,7 @@ var daemonSetCommand = &cli.Command{
 	}),
 }
 
-var evalFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags)
+var evalFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags)
 
 var daemonEvalCommand = &cli.Command{
 	Name:      "eval",
@@ -1205,4 +1359,40 @@ var daemonCommandsCommand = &cli.Command{
 		}
 		return nil
 	}),
+}
+
+// getArtifacts lists the session's report files, or downloads them all
+// into --out DIR, keeping their relative paths.
+func getArtifacts(ctx context.Context, client *daemon.Client, o *daemonOpts, id string) error {
+	res, err := client.Artifacts(ctx, id)
+	if err != nil {
+		return err
+	}
+	if o.outPath == "" {
+		if o.JSON {
+			printJSON(os.Stdout, res)
+			return nil
+		}
+		for _, a := range res.Artifacts {
+			fmt.Printf("%10d  %s\n", a.Size, a.Path)
+		}
+		return nil
+	}
+	dir, _ := filepath.Abs(o.outPath)
+	for _, a := range res.Artifacts {
+		if target := filepath.Join(dir, filepath.FromSlash(a.Path)); filepath.IsAbs(filepath.FromSlash(a.Path)) || !strings.HasPrefix(target, dir+string(filepath.Separator)) {
+			return daemon.Errorf(daemon.CodeInternal, "artifact path %q leaves %s", a.Path, dir)
+		}
+		if err := fetchArtifact(ctx, client, id, a.Path, filepath.Join(dir, filepath.FromSlash(a.Path))); err != nil {
+			return err
+		}
+	}
+	if o.JSON {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "dir": dir, "artifacts": res.Artifacts})
+		return nil
+	}
+	for _, a := range res.Artifacts {
+		fmt.Println(filepath.Join(dir, filepath.FromSlash(a.Path)))
+	}
+	return nil
 }

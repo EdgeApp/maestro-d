@@ -74,6 +74,12 @@ export type ErrorCode =
   | 'DEVICE_NOT_ATTACHED'
   | 'INTERRUPTED'
   | 'INTERNAL'
+  | 'FORBIDDEN'
+  | 'PEER_UNAVAILABLE'
+  | 'HUB_NAME_TAKEN'
+  | 'HUB_VERSION'
+  | 'LEASE_REQUIRED'
+  | 'LEASE_EXPIRED'
 
 export interface ErrorBody {
   code: ErrorCode
@@ -148,6 +154,12 @@ export interface StepResult extends Envelope {
   artifacts: CommandArtifacts
   subSteps?: SubStep[]
   reportDir?: string
+  /**
+   * Files a hub call's output fields wrote, as `outputs/<path>` under the
+   * report directory (`device.artifact(path)`). Absent for local calls; on
+   * a hub the library fetches them back to the paths you gave.
+   */
+  outputs?: string[]
 }
 
 export interface StepsResult extends Envelope {
@@ -156,6 +168,16 @@ export interface StepsResult extends Envelope {
   passed: number
   failed: number
   skipped: number
+  /** Every result's `outputs`. */
+  outputs?: string[]
+}
+
+/** One file of a session's report directory. */
+export interface ArtifactInfo {
+  /** Relative to the report directory, with / separators. */
+  path: string
+  size: number
+  modTime: string
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +198,12 @@ export interface HierarchyNode {
 }
 
 export interface DeviceInfo {
+  /** On a hub, qualified: `<localId>@<hub>`. */
   id: string
+  /** On a hub: the hub that owns the device. */
+  hub?: string
+  /** On a hub: the device's id on its own hub's machine. */
+  localId?: string
   /** android | ios | web | mock */
   platform: string
   /** device | emulator | simulator */
@@ -196,6 +223,85 @@ export interface DeviceInfo {
   busy?: boolean
   /** Name of the other daemon holding the device, when listing conflicts. */
   owner?: string
+  /** 'maestro-d' for a simulator or AVD `createDevice()` made; only those delete without `force`. */
+  createdBy?: string
+  /** On a hub: the device's lease, when it is leased. */
+  lease?: DeviceLease
+  /** On a hub: true for a ready device that is neither leased nor attached. */
+  available?: boolean
+  /** On a hub: the longest lease window the device takes, in seconds. */
+  maxSec?: number
+  /** On a hub: the host name of the machine the device is attached to. */
+  machine?: string
+  /** On a hub: the owning hub's advertised address, then that machine's non-loopback IPs. */
+  addresses?: string[]
+}
+
+/** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
+export interface HubStatus {
+  name: string
+  version: string
+  apiVersion: string
+  /** The --advertise address, when set. */
+  addr?: string
+  listen?: string
+  tls?: boolean
+  /** False with --no-mdns. */
+  mdns: boolean
+  peers: HubPeer[]
+}
+
+/** One peer of a hub. */
+export interface HubPeer {
+  name?: string
+  addr?: string
+  /** linked | down | stopped | connecting | refused */
+  state: string
+  /** outbound (this hub dialed) | inbound */
+  direction?: string
+  rttMs?: number
+  /** How many devices a linked peer shares. */
+  devices?: number
+  since?: string
+  error?: string
+}
+
+/** The lease state a hub's device listings carry. */
+export interface DeviceLease {
+  holder?: string
+  /** RFC 3339: the end of the lease's fixed window. */
+  expiresAt: string
+}
+
+/** A hub's lease on one device (`POST /v1/leases`). */
+export interface Lease {
+  /** Sent as X-Maestro-Lease. */
+  id: string
+  device: string
+  holder?: string
+  /** RFC 3339: the end of the window. Using the lease never moves it; only `renew()` does. */
+  expiresAt: string
+  /** The window's length in seconds. */
+  ttlSec: number
+  /** The device's maximum window in seconds. */
+  maxSec?: number
+  /** True when the hub booted the device for this lease; it shuts it down again when the lease ends. */
+  booted?: boolean
+}
+
+/**
+ * Picks a device on a hub by its properties: platform and kind exactly,
+ * name as the device's name or id, osVersion as the version or a prefix of
+ * it ('26' matches '26.5'), hub as the hub's name.
+ */
+export interface LeaseSelector {
+  platform?: string
+  kind?: string
+  name?: string
+  osVersion?: string
+  hub?: string
+  /** Let a shut-down simulator or AVD be picked; the hub boots it for the lease. */
+  boot?: boolean
 }
 
 /** Options for opening a driver on a device (`maestro-d attach`). */
@@ -236,17 +342,84 @@ export interface AttachOptions {
   outputDir?: string
   /** Base directory for relative paths in steps. */
   flowDir?: string
-  /** Driver-specific extras: headed, browser, windowSize, userDataDir, androidTcpForward, capsFile, newCommandTimeout. */
+  /**
+   * Driver-specific extras: headed, browser, windowSize, userDataDir, androidTcpForward, capsFile, newCommandTimeout.
+   * A hub refuses capsFile, driver appium and appiumUrl as FORBIDDEN: Appium attaches only over the unix socket.
+   */
   extra?: Record<string, unknown>
 }
 
 export interface BootOptions {
-  /** ios | android */
-  platform: string
-  /** Simulator / AVD name, e.g. 'iPhone 16'. */
+  /**
+   * ios | android. May be left out: an `avd:<name>` id means android, and a
+   * name or UDID the daemon lists picks that device's platform.
+   */
+  platform?: string
+  /** Simulator name or UDID, AVD name or `avd:<name>`, e.g. 'iPhone 16'. */
   name: string
   /** Seconds. */
   bootTimeout?: number
+}
+
+/** Options for `createDevice()`: a simulator (`type`, `runtime`) or an AVD (`image`, `profile`, …). */
+export interface CreateDeviceOptions {
+  platform: 'ios' | 'android' | string
+  /** Name of the new simulator or AVD. */
+  name: string
+  /** iOS device type name or id (default: the newest iPhone the runtime supports). */
+  type?: string
+  /** iOS runtime, e.g. 'iOS-26-5' or '26.5' (default: the newest installed). */
+  runtime?: string
+  /** Android system image package (default: the newest installed google_apis image for the host's ABI). */
+  image?: string
+  /** Android hardware profile (default 'pixel_8'). */
+  profile?: string
+  /** Android data partition size (default '6G', at most '10G'). */
+  dataSize?: string
+  /** Download a missing Android image with sdkmanager; needs `acceptLicenses`. */
+  installImage?: boolean
+  acceptLicenses?: boolean
+  /** Boot it once created (default true). */
+  boot?: boolean
+  /** Seconds. */
+  bootTimeout?: number
+}
+
+/** One iOS simulator runtime in the catalog. */
+export interface CatalogRuntime {
+  id: string
+  name: string
+  version: string
+  build?: string
+  available: boolean
+  deviceTypes?: string[]
+}
+
+/** One iPhone or iPad simulator type in the catalog. */
+export interface CatalogDeviceType {
+  id: string
+  name: string
+  productFamily: string
+  minRuntimeVersion?: string
+}
+
+/** One Android system image in the catalog. */
+export interface CatalogImage {
+  /** e.g. 'system-images;android-35;google_apis;arm64-v8a' */
+  id: string
+  api: string
+  tag: string
+  abi: string
+  description?: string
+  installed: boolean
+}
+
+/** What `createDevice()` can make (`GET /v1/catalog`). */
+export interface CatalogResult extends Envelope {
+  ios?: { runtimes: CatalogRuntime[]; deviceTypes: CatalogDeviceType[] }
+  android?: { images: CatalogImage[]; profiles: string[] }
+  /** Why a platform's catalog is missing, when no platform was asked for. */
+  errors?: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +438,10 @@ export interface DaemonInfo {
   reportsDir: string
   /** Seconds; 0 = never. */
   idleTimeout: number
+  /** True when the TCP listener serves HTTPS. */
+  tls?: boolean
+  /** The hub's name when the daemon is a hub: it leases its devices. */
+  hub?: string
 }
 
 export interface StatusResult extends Envelope {

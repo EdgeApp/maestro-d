@@ -9,27 +9,32 @@ import (
 	"time"
 )
 
-// Hub fans events out to SSE subscribers and keeps a small ring buffer so a
+// EventBus fans events out to SSE subscribers and keeps a small ring buffer so a
 // client that reconnects with Last-Event-ID can catch up.
-type Hub struct {
+type EventBus struct {
 	mu      sync.Mutex
 	seq     int64
 	ring    []Event
 	ringCap int
 	subs    map[chan Event]string // channel → device filter ("" = all)
+	// observe, when set, sees each event before it is published.
+	observe func(Event)
 }
 
-// NewHub creates a hub keeping the last ringCap events.
-func NewHub(ringCap int) *Hub {
+// NewEventBus creates an event bus keeping the last ringCap events.
+func NewEventBus(ringCap int) *EventBus {
 	if ringCap <= 0 {
 		ringCap = 512
 	}
-	return &Hub{ringCap: ringCap, subs: map[chan Event]string{}}
+	return &EventBus{ringCap: ringCap, subs: map[chan Event]string{}}
 }
 
 // Publish stamps and broadcasts an event. Slow subscribers drop events
 // rather than block the step that produced them.
-func (h *Hub) Publish(ev Event) {
+func (h *EventBus) Publish(ev Event) {
+	if h.observe != nil {
+		h.observe(ev)
+	}
 	h.mu.Lock()
 	h.seq++
 	ev.Seq = h.seq
@@ -54,7 +59,7 @@ func (h *Hub) Publish(ev Event) {
 
 // Subscribe returns a channel of events (optionally for one device) and
 // the events after afterSeq still in the ring buffer.
-func (h *Hub) Subscribe(device string, afterSeq int64) (chan Event, []Event, func()) {
+func (h *EventBus) Subscribe(device string, afterSeq int64) (chan Event, []Event, func()) {
 	ch := make(chan Event, 256)
 	h.mu.Lock()
 	h.subs[ch] = device
@@ -73,7 +78,7 @@ func (h *Hub) Subscribe(device string, afterSeq int64) (chan Event, []Event, fun
 }
 
 // Recent returns the buffered events after afterSeq.
-func (h *Hub) Recent(device string, afterSeq int64) []Event {
+func (h *EventBus) Recent(device string, afterSeq int64) []Event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []Event
@@ -86,7 +91,13 @@ func (h *Hub) Recent(device string, afterSeq int64) []Event {
 }
 
 // ServeSSE streams events as text/event-stream until the client leaves.
-func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request) {
+func (h *EventBus) ServeSSE(w http.ResponseWriter, r *http.Request) {
+	h.ServeSSEView(w, r, nil)
+}
+
+// ServeSSEView is ServeSSE with each event passed through view first: an
+// event it returns false for is not sent. nil sends every event.
+func (h *EventBus) ServeSSEView(w http.ResponseWriter, r *http.Request, view func(Event) (Event, bool)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -107,6 +118,12 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	write := func(ev Event) bool {
+		if view != nil {
+			var ok bool
+			if ev, ok = view(ev); !ok {
+				return true
+			}
+		}
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return true
