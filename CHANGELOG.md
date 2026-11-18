@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- added: The core of live screen streaming and recording. A device's own H.264 video and its AAC or LPCM audio are wrapped in fragmented MP4 as they arrive, with no decoding or re-encoding on the host: a pure-Go muxer writes `avc3` video (parameter sets in band, so a rotation needs no new init segment), `mp4a` AAC and LPCM as the source delivers it, `ipcm` for integer samples and `fpcm` for floating point, one fragment per sample. One capture session per device feeds every viewer and recorder: a viewer or recording that joins late starts at the moment it joins (the frames since the latest keyframe arrive first, a millisecond apart, so the picture is whole at once and nothing from before the join plays), a viewer that falls behind is dropped rather than slowing the device, and a device that starts capturing on demand stops 10 s after its last viewer leaves. Recordings end with their duration and a seek index (`mehd`, `mfra`), so a browser's `<video>` knows their length and can seek. A requested frame rate is 3–60 fps, 15 by default.
+
 ## 3.0.1 (2026-11-18)
 
 - added: Every daemon sweeps its home half a minute after it starts and then hourly, and `maestro-d gc [--dry-run] [--json] [--include-build-cache]` runs the same sweep on demand. It deletes blobs unused for 24 hours (was 7 days, and only at daemon start), report directories idle for 3 days, orphaned Chrome profiles idle for a day, and the run directories of daemons gone for 7 days. It never removes the run directory of an installed hub service or one that still records simulators its daemon booted. `MAESTRO_D_HOUSEKEEPING_INTERVAL` overrides the hour.

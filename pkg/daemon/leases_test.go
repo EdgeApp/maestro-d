@@ -218,13 +218,14 @@ func (d *stubbornDriver) Execute(step flow.Step) *core.CommandResult {
 	return d.Driver.Execute(step)
 }
 
-// waitFor polls cond until it holds, failing the test after 5 s.
+// waitFor polls cond until it holds, failing the test after 20 s: CI runs
+// many packages at once under -race, and a teardown can take seconds there.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 5s")
+			t.Fatal("condition not met within 20s")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
