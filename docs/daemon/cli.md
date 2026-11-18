@@ -349,6 +349,7 @@ maestro-d attach --device mock-1 --platform mock      # a fake device for trying
 | `get state` | foreground app, orientation, … |
 | `get info` | platform, OS version, device name, app version |
 | `get vars` | session variables |
+| `stream [--fps N] [--audio] [--duration S] [-o FILE\|-]` | the device's live screen as fragmented MP4, to stdout (refused when stdout is a terminal) or a file, until Ctrl-C, `--duration` or the daemon ends it (exit 0 and a whole file); prints `stream: <codecs> fps=<fps> audio=<bool>` to stderr. See [streaming.md](streaming.md) |
 | `get artifacts [-o DIR]` | the session's report files (screenshots, `outputs/`, recordings, report); `-o DIR` downloads them all into `DIR`, keeping their paths |
 | `set KEY=VALUE …` | set session variables |
 | `eval 'SCRIPT'` | run JavaScript in the session engine and print the value; `output.X` assignments persist |
@@ -358,6 +359,8 @@ printf -- '- launchApp\n- tapOn: Login\n' | maestro-d run -
 maestro-d run flows/login.yaml -e USER=alice
 maestro-d get hierarchy | jq '.. | .text? // empty'
 maestro-d get hierarchy --find "Sign in"
+maestro-d stream --fps 30 --duration 10 -o screen.mp4
+maestro-d stream | ffplay -
 maestro-d set USER=alice PIN=1234
 maestro-d eval 'maestro.copiedText'
 ```

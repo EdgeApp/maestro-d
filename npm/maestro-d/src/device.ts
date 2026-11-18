@@ -22,6 +22,8 @@ import type {
   Step,
   StepResult,
   StepsResult,
+  StreamOptions,
+  VideoStream,
 } from './types.js'
 
 /** A bare command value: `tapOn('Login')`, `swipe('UP')`, `setDarkMode(true)`. */
@@ -441,6 +443,32 @@ export class MaestroDevice {
     const res = await this.transport.json<Envelope & { device: DeviceInfo }>(this.base, { signal: this.sig(opts) })
     this.info = res.device
     return res.device
+  }
+
+  /**
+   * The device's live screen as fragmented MP4 (`GET …/stream`): read
+   * `body` until the daemon ends it (detach, capture lost) or `signal`
+   * fires, which ends it cleanly. It never takes the device's step lock,
+   * so commands run beside it. A device without screen capture rejects
+   * with CAPTURE_UNAVAILABLE (`details.reason` says why).
+   */
+  async stream(opts: StreamOptions = {}): Promise<VideoStream> {
+    const q = query({
+      fps: opts.fps === undefined ? undefined : String(opts.fps),
+      audio: opts.audio === undefined ? undefined : String(opts.audio),
+    })
+    const res = await this.transport.stream(`${this.base}/stream${q}`, { signal: this.sig(opts) })
+    const header = (name: string): string => {
+      const v = res.headers[name]
+      return (Array.isArray(v) ? v[0] : v) ?? ''
+    }
+    const fps = header('x-maestro-fps')
+    return {
+      fps: fps === 'device' ? 'device' : Number(fps),
+      audio: header('x-maestro-audio') === 'true',
+      codecs: header('x-maestro-codecs'),
+      body: res.body,
+    }
   }
 
   /** Step events for this device. Ends when `signal` fires. */

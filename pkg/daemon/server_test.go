@@ -526,7 +526,7 @@ func TestCodes_Table(t *testing.T) {
 		{CodeDeviceError, 4, 502}, {CodeBusy, 5, 409}, {CodeDeviceExternal, 5, 409}, {CodeDeviceInUse, 5, 409},
 		{CodeDeviceNotFound, 4, 404}, {CodeDeviceNotAttached, 2, 404}, {CodeInterrupted, 130, 499}, {CodeInternal, 4, 500},
 		{CodeForbidden, 2, 403}, {CodePeerUnavailable, 3, 503}, {CodeHubNameTaken, 5, 409}, {CodeHubVersion, 5, 409},
-		{CodeLeaseRequired, 5, 409}, {CodeLeaseExpired, 5, 409},
+		{CodeLeaseRequired, 5, 409}, {CodeLeaseExpired, 5, 409}, {CodeCaptureUnavailable, 4, 503},
 	}
 	if len(cases)-1 != len(Codes) {
 		t.Fatalf("the table covers %d codes, Codes has %d", len(cases)-1, len(Codes))

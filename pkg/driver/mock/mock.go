@@ -3,9 +3,14 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"      // maestro-d: fake screen capture
+	"github.com/devicelab-dev/maestro-runner/pkg/capture/fake" // maestro-d
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
@@ -17,6 +22,12 @@ type Driver struct {
 
 	// Internal state
 	stepCount int
+
+	// maestro-d: the fake capture session (created on first use) and the
+	// --record recorder on it.
+	capMu    sync.Mutex
+	session  *capture.Session
+	recorder *capture.Recorder
 }
 
 // Config configures mock driver behavior.
@@ -167,4 +178,57 @@ func needsElement(step flow.Step) bool {
 		return true
 	}
 	return false
+}
+
+// maestro-d: screen capture. The mock streams and records the fake source
+// (pkg/capture/fake): an embedded 640x360 H.264 clip with AAC audio,
+// looped at the requested frame rate.
+
+// Capture returns the mock's on-demand capture session.
+func (d *Driver) Capture() (*capture.Session, error) {
+	d.capMu.Lock()
+	defer d.capMu.Unlock()
+	if d.session == nil {
+		d.session = capture.NewSession(fake.New())
+	}
+	return d.session, nil
+}
+
+// StartScreenRecording records the capture session into a temporary file.
+func (d *Driver) StartScreenRecording() error {
+	s, _ := d.Capture()
+	d.capMu.Lock()
+	defer d.capMu.Unlock()
+	if d.recorder != nil {
+		return errors.New("a recording is already running")
+	}
+	r, err := capture.NewRecorder(s, os.TempDir(), capture.Options{FPS: capture.DefaultFPS, Audio: true})
+	if err != nil {
+		return err
+	}
+	d.recorder = r
+	return nil
+}
+
+// StopScreenRecording finalizes the recording at hostPath.
+func (d *Driver) StopScreenRecording(hostPath string) error {
+	d.capMu.Lock()
+	r := d.recorder
+	d.recorder = nil
+	d.capMu.Unlock()
+	if r == nil {
+		return errors.New("no recording is running")
+	}
+	return r.Stop(hostPath)
+}
+
+// Close ends the capture session, if one was made.
+func (d *Driver) Close() {
+	d.capMu.Lock()
+	s := d.session
+	d.session = nil
+	d.capMu.Unlock()
+	if s != nil {
+		s.Close()
+	}
 }

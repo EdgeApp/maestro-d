@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,8 +22,10 @@ var (
 )
 
 // Recorder writes a session's stream to an MP4 file: the init segment and
-// fragments go to a temporary file as they arrive (the same bytes a stream
-// sends), and Stop finalizes it so a player knows its length and can seek.
+// fragments go to a temporary file as they arrive (the bytes a stream
+// sends, but each track's newest fragment is held until that track's next
+// one, so it is written with its real duration), and Stop finalizes it so
+// a player knows its length and can seek.
 type Recorder struct {
 	sub  *Subscriber
 	f    *os.File
@@ -33,6 +36,7 @@ type Recorder struct {
 	// Written by the loop goroutine, read after done.
 	offset   int64
 	index    map[uint32][]fmp4.IndexEntry
+	held     map[uint32]Chunk // each track's newest fragment, not yet written
 	writeErr error
 
 	stopMu  sync.Mutex
@@ -67,6 +71,7 @@ func NewRecorder(s *Session, tmpDir string, opts Options) (*Recorder, error) {
 		mux:   NewMux(sub.Options()),
 		done:  make(chan struct{}),
 		index: map[uint32][]fmp4.IndexEntry{},
+		held:  map[uint32]Chunk{},
 	}
 	startLoop(r.loop)
 	return r, nil
@@ -101,20 +106,50 @@ func (r *Recorder) loop() {
 		chunks, _ := r.mux.Flush()
 		r.write(chunks)
 	}
+	// The last fragment of each track keeps its estimated duration.
+	for _, id := range []uint32{fmp4.VideoTrackID, fmp4.AudioTrackID} {
+		if c, ok := r.held[id]; ok {
+			delete(r.held, id)
+			r.put(c)
+		}
+	}
 }
 
-// write appends chunks to the file and indexes their keyframes and audio.
+// write retimes chunks and appends them to the file. The muxer can only
+// estimate a sample's duration from the gap before it (clamped to a
+// second), so a sample after a still screen overlapped the next one or
+// left a hole; holding each track's newest fragment until the next one
+// arrives writes the real gap instead.
 func (r *Recorder) write(chunks []Chunk) {
 	for _, c := range chunks {
-		if !c.Init && (c.Track == fmp4.AudioTrackID || c.Key) {
-			r.index[c.Track] = append(r.index[c.Track], fmp4.IndexEntry{Time: c.Time, MoofOffset: uint64(r.offset)})
+		if c.Init {
+			r.put(c)
+			continue
 		}
-		n, err := r.f.Write(c.Data)
-		r.offset += int64(n)
-		if err != nil {
-			r.writeErr = err
-			return
+		prev, ok := r.held[c.Track]
+		r.held[c.Track] = c
+		if !ok {
+			continue
 		}
+		if gap := c.Time - prev.Time; c.Time > prev.Time && gap <= math.MaxUint32 {
+			fmp4.SetSampleDuration(prev.Data, uint32(gap))
+		}
+		r.put(prev)
+	}
+}
+
+// put appends one chunk to the file and indexes its keyframes and audio.
+func (r *Recorder) put(c Chunk) {
+	if r.writeErr != nil {
+		return
+	}
+	if !c.Init && (c.Track == fmp4.AudioTrackID || c.Key) {
+		r.index[c.Track] = append(r.index[c.Track], fmp4.IndexEntry{Time: c.Time, MoofOffset: uint64(r.offset)})
+	}
+	n, err := r.f.Write(c.Data)
+	r.offset += int64(n)
+	if err != nil {
+		r.writeErr = err
 	}
 }
 

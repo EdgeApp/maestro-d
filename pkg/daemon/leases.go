@@ -1033,6 +1033,22 @@ func (g *leaseGate) Write(p []byte) (int, error) {
 	return g.w.Write(p)
 }
 
+// Flush sends what the handler wrote so far (a stream's init segment and
+// each fragment): without it no leased route could flush. Like a write, it
+// holds mu, and once the gate is closed it does nothing.
+func (g *leaseGate) Flush() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return
+	}
+	g.startLocked()
+	_ = http.NewResponseController(g.w).Flush()
+}
+
+// Unwrap lets http.ResponseController reach the request's writer.
+func (g *leaseGate) Unwrap() http.ResponseWriter { return g.w }
+
 // gatedBody is the request body behind a leaseGate: unread once closed.
 // reading, while set, is closed when the Read in progress returns.
 type gatedBody struct {

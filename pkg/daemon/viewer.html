@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>maestro-d viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd; font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #screen { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  video { max-width: 100%; max-height: 100%; background: #000; }
+  #bar { display: flex; gap: 12px; align-items: center; padding: 6px 12px; background: #1c1c1c; border-top: 1px solid #333; }
+  #status { flex: 1; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.error { color: #f77; }
+  button { font: inherit; padding: 2px 12px; }
+</style>
+</head>
+<body>
+<div id="screen"><video id="video" muted autoplay playsinline></video></div>
+<div id="bar"><span id="status">connecting…</span><button id="unmute" hidden>Unmute</button></div>
+<script>
+'use strict'
+// maestro-d viewer: plays GET /v1/devices/<id>/stream through Media Source
+// Extensions. Everything it needs comes from the URL fragment (#device=…
+// &token=…&lease=…&fps=…&audio=…), which the browser never sends to a
+// server, so the token stays out of every log.
+const params = new URLSearchParams(location.hash.slice(1))
+const device = params.get('device') || ''
+const token = params.get('token') || ''
+const lease = params.get('lease') || ''
+const fps = params.get('fps') || '15'
+const wantAudio = params.get('audio') === 'true'
+// A changed fragment (another device or token) starts over.
+window.addEventListener('hashchange', () => location.reload())
+const RECONNECT_MS = 3000
+
+const video = document.getElementById('video')
+const statusEl = document.getElementById('status')
+const unmute = document.getElementById('unmute')
+
+let state = { playing: false, fps: '', audio: 'no audio', error: '' }
+
+function setError(reason) {
+  state = { playing: false, fps: '', audio: 'no audio', error: reason }
+  render()
+}
+
+function frames() {
+  if (typeof video.getVideoPlaybackQuality === 'function') return video.getVideoPlaybackQuality().totalVideoFrames
+  return video.webkitDecodedFrameCount || 0
+}
+
+function render() {
+  if (state.error) {
+    statusEl.textContent = 'error: ' + state.error
+    statusEl.className = 'error'
+    return
+  }
+  statusEl.className = ''
+  if (!state.playing) {
+    statusEl.textContent = 'connecting…'
+    return
+  }
+  const audio = state.audio === 'no audio' ? 'no audio' : video.muted ? 'muted' : 'audio on'
+  const size = video.videoWidth ? video.videoWidth + '×' + video.videoHeight : '…'
+  statusEl.textContent = ['playing', size, state.fps + ' fps', frames() + ' frames', video.currentTime.toFixed(1) + ' s', audio].join(' · ')
+}
+setInterval(render, 250)
+
+unmute.addEventListener('click', () => {
+  video.muted = false
+  unmute.hidden = true
+  video.play().catch(() => {})
+  render()
+})
+
+// errorReason reads a failure envelope's details.reason, else its code.
+async function errorReason(res) {
+  try {
+    const body = await res.json()
+    const e = body && body.error
+    if (e) return (e.details && e.details.reason) || e.code || ('HTTP ' + res.status)
+  } catch (_) {}
+  return 'HTTP ' + res.status
+}
+
+// pcm:begin
+// isPCM says whether a stream's codecs carry LPCM audio, ipcm (integer) or
+// fpcm (floating point): iOS sends either, and browsers decode neither.
+function isPCM(codecs) {
+  return codecs.split(',').some((c) => c.trim() === 'ipcm' || c.trim() === 'fpcm')
+}
+// pcm:end
+
+// open asks for the stream; with audio it falls back to video only when
+// the stream's audio is LPCM (isPCM) or its codecs are not playable.
+async function open(audio) {
+  const headers = { 'X-Maestro-Api-Version': '1' }
+  if (token) headers.Authorization = 'Bearer ' + token
+  if (lease) headers['X-Maestro-Lease'] = lease
+  const ctl = new AbortController()
+  const url = '/v1/devices/' + encodeURIComponent(device) + '/stream?fps=' + encodeURIComponent(fps) + '&audio=' + audio
+  const res = await fetch(url, { headers, signal: ctl.signal, cache: 'no-store' })
+  if (!res.ok) return { error: await errorReason(res) }
+  const codecs = res.headers.get('X-Maestro-Codecs') || ''
+  const mime = 'video/mp4; codecs="' + codecs + '"'
+  const playable = window.MediaSource && MediaSource.isTypeSupported(mime)
+  if (audio && (isPCM(codecs) || !playable)) {
+    ctl.abort()
+    return open(false)
+  }
+  if (!playable) {
+    ctl.abort()
+    return { error: 'unsupported codecs ' + codecs }
+  }
+  return { res, mime, ctl, fps: res.headers.get('X-Maestro-Fps') || fps, audio: res.headers.get('X-Maestro-Audio') === 'true' }
+}
+
+// live:begin
+// Playback runs a little behind the newest frame: Chrome resumes after
+// running dry only with about half a second buffered. Further behind than
+// CATCH_UP_S it plays at CATCH_UP_RATE until it is within CAUGHT_UP_S;
+// further behind than JUMP_S it seeks.
+const CATCH_UP_S = 1
+const CAUGHT_UP_S = 0.6
+const CATCH_UP_RATE = 1.5
+const JUMP_S = 3
+// liveStep decides how playback keeps up with the newest buffered range
+// [start, end) at time t and rate: { seek } to jump, and { rate } for the
+// playback rate. A seek restarts decoding at the keyframe before it, and
+// the picture holds until that catches up; seeking whenever playback was
+// half a second behind did that again and again on a 60 fps iPhone (each
+// catch-up left it behind again), so a short lag is played away faster
+// instead, and only a long one (a reconnect, a still screen's single long
+// frame) seeks.
+function liveStep(start, end, t, rate) {
+  if (t < start) return { seek: start, rate: 1 }
+  const behind = end - t
+  if (behind > JUMP_S) return { seek: Math.max(start, end - CAUGHT_UP_S), rate: 1 }
+  if (behind > CATCH_UP_S) return { rate: CATCH_UP_RATE }
+  if (behind < CAUGHT_UP_S) return { rate: 1 }
+  return { rate }
+}
+// live:end
+
+// retimer:begin
+// makeRetimer re-cuts a stream's bytes into whole boxes and passes them to
+// emit, holding each track's newest fragment back until that track's next
+// one arrives, then writing the real gap between the two as the held
+// sample's duration. The daemon can only estimate a sample's duration from
+// the gap before it, and Media Source Extensions treat a sample that
+// starts more than twice the previous sample's duration after it as a
+// discontinuity: every track then drops frames until its next keyframe,
+// which an Android device sends seconds apart, so playback froze. Exact
+// durations never trip that rule, and leave no holes in the buffered
+// ranges. A fragment it cannot read passes through unchanged; flush
+// passes on what is held when the stream ends.
+function makeRetimer(emit) {
+  let buf = new Uint8Array(0)
+  let moof = null
+  const held = new Map()
+  const u32 = (b, o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0
+  const type = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3])
+  const concat = (a, b) => {
+    const out = new Uint8Array(a.length + b.length)
+    out.set(a)
+    out.set(b, a.length)
+    return out
+  }
+  // child finds the first box of type t between start and end.
+  const child = (b, start, end, t) => {
+    for (let o = start; o + 8 <= end; ) {
+      const n = u32(b, o)
+      if (n < 8 || o + n > end) return null
+      if (type(b, o + 4) === t) return { at: o, end: o + n }
+      o += n
+    }
+    return null
+  }
+  // sample reads a one-sample fragment's track, decode time and where its
+  // trun keeps the sample's duration, or null.
+  const sample = (f) => {
+    const traf = child(f, 8, u32(f, 0), 'traf')
+    if (!traf) return null
+    const tfhd = child(f, traf.at + 8, traf.end, 'tfhd')
+    const tfdt = child(f, traf.at + 8, traf.end, 'tfdt')
+    const trun = child(f, traf.at + 8, traf.end, 'trun')
+    if (!tfhd || !tfdt || !trun) return null
+    const time = f[tfdt.at + 8] === 1 ? u32(f, tfdt.at + 12) * 4294967296 + u32(f, tfdt.at + 16) : u32(f, tfdt.at + 12)
+    const flags = u32(f, trun.at + 8) & 0xffffff
+    if (u32(f, trun.at + 12) !== 1 || !(flags & 0x100)) return null
+    const durAt = trun.at + 16 + (flags & 0x1 ? 4 : 0) + (flags & 0x4 ? 4 : 0)
+    return { track: u32(f, tfhd.at + 12), time, durAt }
+  }
+  const fragment = (f) => {
+    const s = sample(f)
+    if (!s) return emit(f)
+    const prev = held.get(s.track)
+    if (prev) {
+      const gap = s.time - prev.time
+      if (gap > 0 && gap < 4294967296) {
+        const at = prev.durAt
+        prev.bytes[at] = gap >>> 24
+        prev.bytes[at + 1] = (gap >>> 16) & 0xff
+        prev.bytes[at + 2] = (gap >>> 8) & 0xff
+        prev.bytes[at + 3] = gap & 0xff
+      }
+      emit(prev.bytes)
+    }
+    held.set(s.track, { bytes: f, time: s.time, durAt: s.durAt })
+  }
+  return {
+    push(chunk) {
+      buf = buf.length ? concat(buf, chunk) : chunk
+      let o = 0
+      while (buf.length - o >= 8) {
+        const n = u32(buf, o)
+        if (n < 8) throw new Error('bad box in the stream')
+        if (buf.length - o < n) break
+        const box = buf.slice(o, o + n)
+        o += n
+        const t = type(box, 4)
+        if (t === 'moof') moof = box
+        else if (t === 'mdat' && moof) {
+          fragment(concat(moof, box))
+          moof = null
+        } else emit(box)
+      }
+      buf = buf.slice(o)
+    },
+    flush() {
+      for (const h of held.values()) emit(h.bytes)
+      held.clear()
+    },
+  }
+}
+// retimer:end
+
+// play:begin
+// play appends the response's chunks to a SourceBuffer until it ends, and
+// always cancels the response before it returns, so a reconnect never
+// leaves the old request open (the daemon would keep writing into it, and
+// a browser allows only six connections to one host). It stops with an
+// error when playback fails: an append the buffer refuses, a decode error
+// (video.error) or a MediaSource that is no longer open.
+async function play(s) {
+  const ms = new MediaSource()
+  let failed = ''
+  const playbackError = () => {
+    if (video.error) return 'playback failed: ' + (video.error.message || 'media error ' + video.error.code)
+    if (ms.readyState !== 'open') return 'playback failed: the media source is ' + ms.readyState
+    return ''
+  }
+  // fail records why playback stopped and cancels the response, which
+  // ends a read still waiting for the next chunk.
+  const fail = (why) => {
+    if (!failed) failed = why || playbackError() || 'playback failed'
+    s.ctl.abort()
+  }
+  const onMediaError = () => fail(playbackError())
+  const live = { id: 0 }
+  try {
+    video.src = URL.createObjectURL(ms)
+    await new Promise((resolve) => ms.addEventListener('sourceopen', resolve, { once: true }))
+    video.addEventListener('error', onMediaError)
+    ms.addEventListener('sourceended', onMediaError)
+    ms.addEventListener('sourceclose', onMediaError)
+    // 'segments' mode: each fragment plays at its own time (the device's
+    // clock, from 0 at the stream's start), so playback keeps real time
+    // however sparse the frames are. The retimer gives every sample its real
+    // duration (an Android device sends no frames while its screen is still,
+    // so one sample can last seconds), which keeps the buffered range whole.
+    const sb = ms.addSourceBuffer(s.mime)
+    const queue = []
+    // pump appends everything queued in one go.
+    const pump = () => {
+      if (sb.updating || queue.length === 0 || ms.readyState !== 'open') return
+      let data = queue[0]
+      if (queue.length > 1) {
+        data = new Uint8Array(queue.reduce((n, b) => n + b.length, 0))
+        let o = 0
+        for (const b of queue) {
+          data.set(b, o)
+          o += b.length
+        }
+      }
+      queue.length = 0
+      try {
+        sb.appendBuffer(data)
+      } catch (err) {
+        if (err.name === 'QuotaExceededError' && video.currentTime > 2) {
+          queue.unshift(data)
+          sb.remove(0, video.currentTime - 1)
+        } else {
+          throw err
+        }
+      }
+    }
+    const retimer = makeRetimer((b) => {
+      queue.push(b)
+    })
+    // seekLive keeps playback at the live edge of the newest buffered range
+    // (liveStep), never while a seek is still under way.
+    const seekLive = () => {
+      const b = sb.buffered
+      if (b.length === 0 || video.seeking) return
+      const step = liveStep(b.start(b.length - 1), b.end(b.length - 1), video.currentTime, video.playbackRate)
+      if (step.rate !== video.playbackRate) video.playbackRate = step.rate
+      if (step.seek !== undefined) video.currentTime = step.seek
+    }
+    live.id = setInterval(() => {
+      if (ms.readyState !== 'open') fail(playbackError())
+      else seekLive()
+    }, 250)
+    sb.addEventListener('updateend', () => {
+      if (failed) return
+      try {
+        // Stay at the live edge, and keep the buffer short.
+        if (sb.buffered.length > 0) {
+          seekLive()
+          const start = sb.buffered.start(0)
+          if (!sb.updating && video.currentTime - start > 30) {
+            sb.remove(start, video.currentTime - 10)
+            return
+          }
+        }
+        pump()
+      } catch (err) {
+        fail('playback failed: ' + ((err && err.message) || err))
+      }
+    })
+    state = { playing: true, fps: s.fps, audio: s.audio ? 'audio' : 'no audio', error: '' }
+    unmute.hidden = !s.audio || !video.muted
+    const reader = s.res.body.getReader()
+    let started = false
+    for (;;) {
+      let r
+      try {
+        r = await reader.read()
+      } catch (err) {
+        if (failed) throw new Error(failed)
+        throw err
+      }
+      if (!failed && playbackError()) fail(playbackError())
+      if (failed) throw new Error(failed)
+      if (r.done) break
+      retimer.push(r.value)
+      pump()
+      if (!started) {
+        started = true
+        video.play().catch(() => {})
+      }
+    }
+    retimer.flush()
+    pump()
+  } finally {
+    clearInterval(live.id)
+    video.removeEventListener('error', onMediaError)
+    ms.removeEventListener('sourceended', onMediaError)
+    ms.removeEventListener('sourceclose', onMediaError)
+    s.ctl.abort()
+  }
+}
+// play:end
+
+async function run() {
+  if (!device) {
+    setError('no device: open this page as /v1/viewer#device=<id>&token=<token>')
+    return
+  }
+  for (;;) {
+    try {
+      const s = await open(wantAudio)
+      if (s.error) {
+        setError(s.error)
+      } else {
+        await play(s)
+      }
+    } catch (err) {
+      setError(String((err && err.message) || err))
+    }
+    // The response ended (or failed): try again in a while.
+    await new Promise((resolve) => setTimeout(resolve, RECONNECT_MS))
+  }
+}
+run()
+</script>
+</body>
+</html>

@@ -2,9 +2,13 @@ package mock
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
@@ -170,4 +174,56 @@ func TestNeedsElement(t *testing.T) {
 			t.Errorf("needsElement(%T) = %v, want %v", c.step, got, c.want)
 		}
 	}
+}
+
+// maestro-d, U25: the mock implements core.Capturer with the fake source
+// (one on-demand session, until Close) and core.ScreenRecorder through it.
+func TestCaptureAndScreenRecorder(t *testing.T) {
+	var _ core.Capturer = (*Driver)(nil)
+	var _ core.ScreenRecorder = (*Driver)(nil)
+	d := New(Config{})
+	s, err := d.Capture()
+	if err != nil || s == nil || s.Mode() != capture.OnDemand || !s.FPSControl() {
+		t.Fatalf("Capture: %v %v", s, err)
+	}
+	if again, _ := d.Capture(); again != s {
+		t.Fatal("a second Capture made another session")
+	}
+	sub, err := s.Subscribe(capture.Options{FPS: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case p := <-sub.Packets():
+		if p.Kind != capture.VideoConfig || p.Video.Width != 640 || p.Video.Height != 360 {
+			t.Fatalf("first packet %v %+v", p.Kind, p.Video)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no packets")
+	}
+	sub.Close()
+
+	if err := d.StopScreenRecording(filepath.Join(t.TempDir(), "x.mp4")); err == nil {
+		t.Fatal("stop without a start")
+	}
+	if err := d.StartScreenRecording(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartScreenRecording(); err == nil {
+		t.Fatal("a second start")
+	}
+	time.Sleep(1200 * time.Millisecond)
+	out := filepath.Join(t.TempDir(), "rec.mp4")
+	if err := d.StopScreenRecording(out); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(out); err != nil || len(data) < 1000 || string(data[4:8]) != "ftyp" {
+		t.Fatalf("recording: %d bytes %v", len(data), err)
+	}
+	d.Close()
+	d.Close()
+	if s2, _ := d.Capture(); s2 == s {
+		t.Fatal("Close kept the session")
+	}
+	d.Close()
 }

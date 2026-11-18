@@ -67,13 +67,14 @@ type daemonOpts struct {
 	stopAll bool             // stop/detach --all
 	force   bool             // device stop --force, run --continue-on-error, get hierarchy --raw
 	orphans bool             // device stop --orphans
-	outPath string           // get screenshot -o
+	outPath string           // get screenshot -o, stream -o
 	compact bool             // get hierarchy --compact
 	find    string           // get hierarchy --find
 	manage  deviceManageOpts // device catalog / create
 	pack    packOpts         // pack --flow, and a targeted run
 	hub     hubOpts          // hub start
 	lease   leaseOpts        // lease, and the lease a targeted command takes
+	stream  streamOpts       // stream
 }
 
 // hubOpts are hub start's switches.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture" // maestro-d: Capturer
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
@@ -253,6 +254,16 @@ type ScreenRecorder interface {
 	// StopScreenRecording finishes the recording and writes an MP4 to
 	// hostPath. Called only after a successful StartScreenRecording.
 	StopScreenRecording(hostPath string) error
+}
+
+// maestro-d: Capturer is an optional interface drivers implement to give
+// the device's screen capture session (streams and recordings). Reach it
+// through Unwrap, as wrappers (FlutterDriver) do not forward it.
+type Capturer interface {
+	// Capture returns the device's capture session, or a
+	// *capture.Unavailable error naming why there is none. It never starts
+	// an always-on source; drivers do that at creation.
+	Capture() (*capture.Session, error)
 }
 
 // FlowAware is an optional interface drivers can implement to inspect the

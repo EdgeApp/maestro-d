@@ -48,6 +48,8 @@ type attached struct {
 	// BUSY without queueing.
 	busy    sync.Mutex
 	inFlite int32
+	// stopCapture ends the device.capture events (watchCapture).
+	stopCapture func()
 }
 
 var unsafePath = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -177,6 +179,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	a.release = func() { s.releaseReportDir(reportKey, blobDir, daemonOwned && discard) }
 	s.registry.MarkAttached(info)
 	s.events.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
+	a.stopCapture = s.watchCapture(id, driver)
 	logger.Info("Attached device %s (report %s)", id, reportDir)
 	keep = true
 	return a, nil
@@ -198,6 +201,9 @@ func (a *attached) baseCtx() context.Context { return a.base }
 // close ends the session, tears the driver down and ends the session's
 // use of its report directory.
 func (a *attached) close() {
+	if a.stopCapture != nil {
+		a.stopCapture()
+	}
 	a.cancel()
 	a.session.Close()
 	discardDriver(a.id, a.cleanup)

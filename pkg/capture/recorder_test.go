@@ -529,3 +529,103 @@ func TestRecorder_ShortRecordingWithoutAudioConfig(t *testing.T) {
 		t.Errorf("an audio stream without an audio config: %+v", res.Streams)
 	}
 }
+
+// gappy emits video at irregular gaps (jitter and a 9.2 s still screen)
+// and AAC audio with one 60 ms gap, then waits.
+type gappy struct{ emitted chan struct{} }
+
+var gappyVideo = []time.Duration{0, 66, 67, 33, 100, 9200, 100, 66} // ms since the previous frame
+
+func (gappy) Mode() capture.Mode { return capture.OnDemand }
+func (gappy) FPSControl() bool   { return true }
+func (s gappy) Run(ctx context.Context, _ capture.Options, emit func(capture.Packet)) error {
+	format, frames, err := fake.ParseClip(fake.Clip())
+	if err != nil {
+		return err
+	}
+	emit(capture.Packet{Kind: capture.VideoConfig, Video: format})
+	emit(capture.Packet{Kind: capture.AudioConfig, Audio: &capture.AudioFormat{Codec: capture.CodecAAC, SampleRate: 48000, Channels: 2, ASC: fake.ASC()}})
+	aac := fake.AACFrames()
+	at, apts := 2*time.Second, 2*time.Second
+	for k, gap := range gappyVideo {
+		at += gap * time.Millisecond
+		for ; apts <= at && apts < 2*time.Second+600*time.Millisecond; apts += 1024 * time.Second / 48000 {
+			if k == 3 {
+				apts += 60 * time.Millisecond // once
+			}
+			emit(capture.Packet{Kind: capture.Audio, PTS: apts, Data: aac[0]})
+		}
+		emit(capture.Packet{Kind: capture.Video, PTS: at, Key: frames[k].Key, Data: frames[k].Data})
+	}
+	close(s.emitted)
+	<-ctx.Done()
+	return nil
+}
+
+// fileSamples lists each track's (decode time, duration) in file order.
+func fileSamples(t *testing.T, file []byte) map[uint32][][2]uint64 {
+	t.Helper()
+	out := map[uint32][][2]uint64{}
+	for off := 0; off+8 <= len(file); {
+		n := int(binary.BigEndian.Uint32(file[off:]))
+		if n < 8 || off+n > len(file) {
+			t.Fatalf("bad box at %d", off)
+		}
+		if string(file[off+4:off+8]) == "moof" {
+			track := binary.BigEndian.Uint32(file[off+44:])
+			out[track] = append(out[track], [2]uint64{binary.BigEndian.Uint64(file[off+60:]), uint64(binary.BigEndian.Uint32(file[off+88:]))})
+		}
+		off += n
+	}
+	return out
+}
+
+// Review 2.harness-review.4: a recording writes each sample with its real
+// duration, the gap to its track's next sample, not the muxer's estimate
+// from the gap before it (clamped to a second): a 9.2 s still screen is
+// one 9.2 s frame, with no overlap and no hole. The index and the length
+// are unchanged by it.
+func TestRecorder_RealDurations(t *testing.T) {
+	src := gappy{emitted: make(chan struct{})}
+	s := capture.NewSession(src)
+	defer s.Close()
+	r, err := capture.NewRecorder(s, t.TempDir(), capture.Options{Audio: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait(t, src.emitted)
+	time.Sleep(100 * time.Millisecond)
+	dest := filepath.Join(t.TempDir(), "gaps.mp4")
+	if err := r.Stop(dest); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples := fileSamples(t, file)
+	video, audio := samples[1], samples[2]
+	if len(video) != len(gappyVideo) || len(audio) < 10 {
+		t.Fatalf("%d video, %d audio samples", len(video), len(audio))
+	}
+	for track, ss := range samples {
+		for i := 0; i+1 < len(ss); i++ {
+			if ss[i][1] != ss[i+1][0]-ss[i][0] {
+				t.Errorf("track %d sample %d: duration %d, gap %d", track, i, ss[i][1], ss[i+1][0]-ss[i][0])
+			}
+		}
+	}
+	// The still screen's frame lasts 9.2 s (90 kHz).
+	if got := video[4][1]; got != 9200*90 {
+		t.Errorf("still frame duration %d, want %d", got, 9200*90)
+	}
+	// The index still points at every keyframe's moof, and the audio's.
+	for _, e := range mfraEntries(t, file, 2) {
+		if tfdtAt(t, file, e[1]) != e[0] {
+			t.Errorf("audio tfra entry %v does not point at its moof", e)
+		}
+	}
+	if res := probetest.Probe(t, dest); res.Duration() < 9.5 {
+		t.Errorf("ffprobe duration %.3f s", res.Duration())
+	}
+}

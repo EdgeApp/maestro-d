@@ -189,3 +189,31 @@ func TestFragment_Audio(t *testing.T) {
 		t.Errorf("first PCM fragment = %+v", info)
 	}
 }
+
+// Review 2.harness-review.4: SetSampleDuration rewrites a fragment's
+// duration in place and refuses bytes that are not one of the muxer's
+// fragments.
+func TestSetSampleDuration(t *testing.T) {
+	video, frames := clip(t, fixtureClip)
+	m, err := fmp4.NewMuxer(video, nil, 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := m.Video(time.Second, true, frames[0].Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fmp4.SetSampleDuration(f.Bytes, 828000) {
+		t.Fatal("refused the muxer's fragment")
+	}
+	if got := readFragment(t, f.Bytes); got.duration != 828000 || got.tfdt != 0 || !bytes.Equal(got.data, f.Bytes[len(f.Bytes)-int(got.size):]) {
+		t.Errorf("after SetSampleDuration: %+v", got)
+	}
+	init := append([]byte(nil), m.Init()...)
+	for _, b := range [][]byte{nil, f.Bytes[:90], init} {
+		before := append([]byte(nil), b...)
+		if fmp4.SetSampleDuration(b, 1) || !bytes.Equal(b, before) {
+			t.Errorf("SetSampleDuration changed %d bytes that are no fragment", len(b))
+		}
+	}
+}

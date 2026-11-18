@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -498,5 +501,249 @@ func TestQualifyWriter_UnwrapsForTheResponseController(t *testing.T) {
 	resp.Body.Close()
 	if err := <-got; err != nil {
 		t.Fatalf("full duplex through a qualifyWriter: %v", err)
+	}
+}
+
+// U20: a screen stream goes on a bulk link, and like an event stream it
+// takes no bulk slot: with five streams from a peer's device open, four
+// bulk downloads from it still flow, and the streams go on.
+func TestBulk_ScreenStreams(t *testing.T) {
+	for _, c := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/v1/devices/x/stream", true},
+		{http.MethodGet, "/v1/devices/x@hub-a/stream", true},
+		{http.MethodGet, "/v1/devices/x/streams", false},
+		{http.MethodGet, "/v1/devices/x/stream/y", false},
+		{http.MethodPost, "/v1/devices/x/stream", false},
+		{http.MethodGet, "/v1/stream", false},
+	} {
+		if got := needsBulk(httptest.NewRequest(c.method, c.path, nil)); got != c.want {
+			t.Errorf("needsBulk(%s %s) = %t", c.method, c.path, got)
+		}
+		if got := isScreenStream(Request{Method: c.method, Path: c.path}); got != c.want {
+			t.Errorf("isScreenStream(%s %s) = %t", c.method, c.path, got)
+		}
+	}
+
+	_, b := twoHubs(t)
+	c := b.client()
+	ctx := context.Background()
+	lr, err := c.AcquireLease(ctx, daemon.LeaseRequest{Device: "a1@hub-a", Attach: &daemon.AttachConfig{Platform: "mock"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetLease("a1@hub-a", lr.Lease.ID)
+	sctx, stop := context.WithCancel(ctx)
+	defer stop()
+	const streams = bulkPerPeer + 1
+	var bytesIn [streams]atomic.Int64
+	var wg sync.WaitGroup
+	errs := make(chan error, streams)
+	for i := 0; i < streams; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := c.Stream(sctx, "a1@hub-a", daemon.StreamOptions{FPS: 30}, writerFunc(func(p []byte) (int, error) {
+				bytesIn[i].Add(int64(len(p)))
+				return len(p), nil
+			}))
+			errs <- err
+		}(i)
+	}
+	flowing := func() bool {
+		for i := range bytesIn {
+			if bytesIn[i].Load() == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !flowing() {
+		if time.Now().After(deadline) {
+			t.Fatalf("not every stream flows: %v", b.logs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := b.logged("bulk link to hub-a for GET /v1/devices/a1@hub-a/stream"); n != streams {
+		t.Fatalf("%d streams on bulk links, want %d", n, streams)
+	}
+	var shots sync.WaitGroup
+	shotErrs := make(chan error, bulkPerPeer)
+	dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dcancel()
+	for i := 0; i < bulkPerPeer; i++ {
+		shots.Add(1)
+		go func() {
+			defer shots.Done()
+			png, err := c.Screenshot(dctx, "a1@hub-a")
+			if err == nil && len(png) == 0 {
+				err = io.ErrUnexpectedEOF
+			}
+			shotErrs <- err
+		}()
+	}
+	shots.Wait()
+	close(shotErrs)
+	for err := range shotErrs {
+		if err != nil {
+			t.Fatalf("a bulk download beside %d streams: %v", streams, err)
+		}
+	}
+	before := make([]int64, streams)
+	for i := range bytesIn {
+		before[i] = bytesIn[i].Load()
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for i := range bytesIn {
+		for bytesIn[i].Load() == before[i] {
+			if time.Now().After(deadline) {
+				t.Fatalf("stream %d stalled", i)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	stop()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("a stream ended with %v", err)
+		}
+	}
+}
+
+// Review 1.harness-review.4: a screen stream never falls back to the
+// control link. A peer without an address, one whose address has not
+// answered a bulk dial (it joined from behind NAT), and one whose bulk
+// dial fails each refuse it with PEER_UNAVAILABLE, details.reason
+// peer-not-dialable; a screenshot from the same peer still runs on the
+// control link.
+func TestBulk_ScreenStreamRefusedWithoutABulkLink(t *testing.T) {
+	stream := Request{Method: http.MethodGet, Path: "/v1/devices/x@hub-x/stream"}
+	_, err := (&Mesh{}).exchange(context.Background(), &Link{peer: "hub-x"}, stream, true)
+	if e, ok := err.(*daemon.Error); !ok || e.Code != daemon.CodePeerUnavailable || e.Details["reason"] != ReasonPeerNotDialable ||
+		!strings.Contains(e.Message, "hub hub-x is not dialable from this hub for screen streams (it has no address this hub can dial)") {
+		t.Fatalf("no address: %v", err)
+	}
+
+	setupHome(t)
+	hole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hole.Close()
+	quick := func(c *Config, _ *daemon.Config) { c.DialTimeout, c.BulkRetry = time.Second, time.Hour }
+	a := startHub(t, "hub-a", testDevices("a"), quick)
+	startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), quick,
+		func(c *Config, _ *daemon.Config) { c.Advertise = hole.Addr().String() })
+	waitLinked(t, a, "hub-b")
+	c := a.client()
+	ctx := context.Background()
+	lr, err := c.AcquireLease(ctx, daemon.LeaseRequest{Device: "b1@hub-b", Attach: &daemon.AttachConfig{Platform: "mock"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetLease("b1@hub-b", lr.Lease.ID)
+	refused := func(what, why string) {
+		t.Helper()
+		var got bytes.Buffer
+		_, err := c.Stream(ctx, "b1@hub-b", daemon.StreamOptions{FPS: 15}, &got)
+		e, ok := err.(*daemon.Error)
+		if !ok || e.Code != daemon.CodePeerUnavailable || e.Details["reason"] != ReasonPeerNotDialable || e.Details["hub"] != "hub-b" ||
+			!strings.Contains(e.Message, "hub hub-b is not dialable from this hub for screen streams ("+why) || got.Len() != 0 {
+			t.Fatalf("%s: %v (%d bytes)", what, err, got.Len())
+		}
+	}
+	refused("an address that has not answered", "its address has not answered a bulk dial")
+	if png, err := c.Screenshot(ctx, "b1@hub-b"); err != nil || len(png) == 0 {
+		t.Fatalf("a screenshot on the control link: %d %v", len(png), err)
+	}
+	// Wait for the first probe to fail, then make the address of the
+	// current link look dialable: the stream's own bulk dial fails, and it
+	// is refused.
+	deadline := time.Now().Add(10 * time.Second)
+	for a.logged("bulk links to hub-b at "+hole.Addr().String()+" fail") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no failed probe: %v", a.logs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	l := waitLinked(t, a, "hub-b")
+	l.dialable.Store(true)
+	refused("a failed bulk dial", "its bulk link failed: ")
+	if l.dialable.Load() || a.logged("bulk link to hub-b: ") != 1 || a.logged("refusing the screen stream") != 1 {
+		t.Fatalf("a failed bulk dial for a stream: dialable %v, %v", l.dialable.Load(), a.logs)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// U21: a qualifyWriter passes a video/mp4 body through byte for byte,
+// streamed, even when it happens to hold JSON or SSE-looking bytes.
+func TestQualifyWriter_PassesVideoThrough(t *testing.T) {
+	rec := httptest.NewRecorder()
+	q := &qualifyWriter{w: rec, hub: "h"}
+	q.Header().Set("Content-Type", "video/mp4")
+	chunks := [][]byte{
+		{0, 0, 0, 16, 'f', 't', 'y', 'p', 1, 2, 3, 4, 5, 6, 7, 8},
+		[]byte("data: {\"device\":\"mock-1\",\"id\":\"x\"}\n"),
+		[]byte(`{"ok":true,"device":{"id":"mock-1"}}`),
+		{0xff, 0x00, '\n', '\n'},
+	}
+	var want []byte
+	for _, c := range chunks {
+		if _, err := q.Write(c); err != nil {
+			t.Fatal(err)
+		}
+		q.Flush()
+		if !rec.Flushed {
+			t.Fatal("not flushed")
+		}
+		want = append(want, c...)
+		if got := rec.Body.Bytes(); string(got) != string(want) {
+			t.Fatalf("after %d bytes the body is %q", len(want), got)
+		}
+	}
+	q.finish()
+	if got := rec.Body.Bytes(); string(got) != string(want) || rec.Code != http.StatusOK {
+		t.Fatalf("body %q status %d", got, rec.Code)
+	}
+}
+
+// U18 on a hub: its router serves the viewer without a token, path-exactly;
+// every other route still needs one.
+func TestRouter_ViewerWithoutToken(t *testing.T) {
+	setupHome(t)
+	h := startHub(t, "hub-v", testDevices("v"))
+	get := func(method, path string) (*http.Response, string) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "http://"+h.addr+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, string(body)
+	}
+	resp, body := get(http.MethodGet, "/v1/viewer")
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(body, "<video") {
+		t.Fatalf("viewer through the hub: %d %v", resp.StatusCode, resp.Header)
+	}
+	if strings.Contains(body, "v1@hub-v") || strings.Contains(body, testToken) {
+		t.Fatal("the page carries device data")
+	}
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/viewer/x"}, {http.MethodGet, "/v1/viewerx"}, {http.MethodPost, "/v1/viewer"},
+		{http.MethodGet, "/v1/hub"}, {http.MethodGet, "/v1/devices"}, {http.MethodGet, "/v1/devices/v1/stream"},
+	} {
+		if resp, _ := get(c.method, c.path); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s without a token: %d", c.method, c.path, resp.StatusCode)
+		}
 	}
 }

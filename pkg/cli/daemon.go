@@ -441,7 +441,7 @@ func daemonCommands() []*cli.Command {
 	return append([]*cli.Command{
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
-		daemonRunCommand, daemonGetCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
+		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
 		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
 		gcCommand,
 	}, oneShotCommands()...)

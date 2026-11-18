@@ -199,6 +199,49 @@ every platform) / `hierarchyRaw()` → the driver's own XML/JSON (`Buffer`); `st
 `eval(script)` runs JavaScript in the session's engine; `refresh()` re-reads
 the device record; `events({after?, signal})` streams this device's events.
 
+#### Screen streams
+
+`stream({fps?, audio?, signal?})` → `Promise<VideoStream>`: the device's
+live screen as fragmented MP4 (`GET …/stream`), on a connection of its own.
+
+```ts
+interface VideoStream {
+  fps: number | 'device'           // the running rate; 'device' when the device picks it (iOS)
+  audio: boolean                   // the stream has an audio track
+  codecs: string                   // 'avc3.640028', 'avc3.640028,mp4a.40.2', …: MediaSource's codecs
+  body: ReadableStream<Uint8Array> // an init segment, then one fragment per frame
+}
+```
+
+`fps` is 3 to 60 (default 15; anything else rejects `USAGE`); `audio: true`
+asks for the device's audio. A device's capture is shared, so a second
+stream joins it at its running rate. Aborting `signal` ends `body`
+cleanly, after the last whole fragment (the body only ever holds whole
+MP4 boxes, a `moof` with its `mdat`); the daemon ends it when the device
+is detached or its capture stops. Cancelling `body` (`body.cancel()`, a
+`break` out of a `for await` over it, or a `pipeline` that fails) closes
+the connection too. Each fragment's duration is an estimate (the gap
+before it): to play the body through Media Source Extensions, retime it
+as the daemon's `/v1/viewer` page does (`makeRetimer` in
+`pkg/daemon/viewer.html`: hold each track's newest fragment and write the
+real gap to the next as its duration), or a still Android screen gives a
+discontinuity. A stream takes no step lock: commands
+run beside it. A device without screen capture rejects with
+`CAPTURE_UNAVAILABLE`, `details.reason` naming why
+(`unsupported-platform`, `simulator`, `no-frames`, …). On a hub the
+handle's lease goes with it.
+
+```js
+import { createWriteStream } from 'node:fs'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+
+const ac = new AbortController()
+setTimeout(() => ac.abort(), 10_000)
+const video = await m.stream({ fps: 30, signal: ac.signal })
+await pipeline(Readable.fromWeb(video.body), createWriteStream('screen.mp4'))
+```
+
 #### Apps and artifacts
 
 | | |
@@ -275,6 +318,7 @@ class MaestroError extends Error {
 | `DEVICE_ERROR` | 4 | 502 | the driver failed (device disconnected, driver crashed) |
 | `DEVICE_NOT_FOUND` | 4 | 404 | no such device id |
 | `INTERNAL` | 4 | 500 | daemon bug |
+| `CAPTURE_UNAVAILABLE` | 4 | 503 | `stream()`: the device has no screen capture, or it failed or sent no frames; `details.reason` says why |
 | `BUSY` | 5 | 409 | `wait: false` and the device is running a step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon has the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot, or `deleteDevice` on one maestro-d did not create |

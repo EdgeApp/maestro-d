@@ -1987,7 +1987,7 @@ func CreateDriver(cfg *RunConfig) (core.Driver, func(), error) {
 			Platform: cfg.Platform,
 			DeviceID: getFirstDevice(cfg),
 		})
-		return driver, func() {}, nil
+		return driver, driver.Close, nil // maestro-d: ends the mock's capture session
 	}
 
 	switch platform {

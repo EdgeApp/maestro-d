@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -2788,3 +2789,72 @@ func TestShared_TVOnPlainDaemon(t *testing.T) {
 		t.Fatal("a plain daemon hid a TV")
 	}
 }
+
+// U19: leaseGate flushes (every leased route on a hub can stream) and
+// lets http.ResponseController reach the request's writer; once closed,
+// Flush does nothing. A leased stream on a hub sends its init segment at
+// once, and a stream without the lease is LEASE_REQUIRED.
+func TestLeases_GateFlushesAStream(t *testing.T) {
+	var _ http.Flusher = (*leaseGate)(nil)
+	rec := httptest.NewRecorder()
+	g := &leaseGate{w: rec, header: http.Header{}}
+	if g.Unwrap() != rec {
+		t.Fatal("Unwrap does not return the request's writer")
+	}
+	g.Header().Set("X-Test", "1")
+	g.Flush()
+	if !rec.Flushed || rec.Header().Get("X-Test") != "1" {
+		t.Fatalf("Flush: flushed %t header %v", rec.Flushed, rec.Header())
+	}
+	closed := httptest.NewRecorder()
+	gc := &leaseGate{w: closed, header: http.Header{}, closed: true}
+	gc.Flush()
+	if closed.Flushed {
+		t.Fatal("a closed gate flushed")
+	}
+
+	env := newHubEnv(t, Config{})
+	src := newStepSource()
+	src.tiny = true // a few hundred bytes in all: nothing but a flush sends them
+	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
+		sess := capture.NewSession(src)
+		return &capDriver{Driver: mock.New(mock.Config{Platform: "mock", DeviceID: id}), sess: sess},
+			DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}, sess.Close, nil
+	}
+	env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := make(chan []byte, 1)
+	done := make(chan error, 1)
+	src.next <- true // one keyframe, then nothing until the test ends
+	go func() {
+		_, err := env.remote.Stream(ctx, "mock-1", StreamOptions{}, writerFunc(func(p []byte) (int, error) {
+			select {
+			case first <- append([]byte(nil), p...):
+			default:
+			}
+			return len(p), nil
+		}))
+		done <- err
+	}()
+	select {
+	case b := <-first:
+		if len(b) < 8 || string(b[4:8]) != "ftyp" {
+			t.Fatalf("first bytes % x", b[:min(len(b), 16)])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leased stream's init segment was not flushed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("stream ended with %v", err)
+	}
+	other := NewHTTPClient(env.remote.BaseURL(), "t", nil)
+	if _, err := other.Stream(context.Background(), "mock-1", StreamOptions{}, io.Discard); codeOf(t, err) != CodeLeaseRequired {
+		t.Fatalf("without the lease: %v", err)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

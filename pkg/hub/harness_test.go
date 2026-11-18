@@ -69,6 +69,8 @@ type testHub struct {
 	seen sync.Map // path → count
 	// lists counts the daemon's live device discoveries.
 	lists atomic.Int32
+	// driver, when set, makes the drivers of the devices attached after.
+	driver atomic.Pointer[func(id string) (core.Driver, func())]
 
 	logMu sync.Mutex
 	logs  []string
@@ -211,8 +213,12 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 	deps := daemon.Deps{
 		Version: "test",
 		NewDriver: func(ctx context.Context, id string, cfg daemon.AttachConfig) (core.Driver, daemon.DriverInfo, func(), error) {
-			d := mock.New(mock.Config{Platform: "mock", DeviceID: id})
-			return d, daemon.DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}, func() {}, nil
+			info := daemon.DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}
+			if f := h.driver.Load(); f != nil {
+				d, cleanup := (*f)(id)
+				return d, info, cleanup, nil
+			}
+			return mock.New(mock.Config{Platform: "mock", DeviceID: id}), info, func() {}, nil
 		},
 		ListDevices: func(platform string) []daemon.DeviceInfo {
 			h.lists.Add(1)

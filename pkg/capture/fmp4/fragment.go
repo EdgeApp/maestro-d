@@ -196,6 +196,25 @@ func toTimescale(d time.Duration, timescale uint32) uint64 {
 	return sec*uint64(timescale) + (rem*uint64(timescale)+uint64(time.Second)/2)/uint64(time.Second)
 }
 
+// sampleDurationAt is where moofMdat's trun keeps the sample's duration:
+// past moof's header, mfhd, traf's header, tfhd, tfdt (version 1) and
+// trun's header, sample_count and data_offset.
+const sampleDurationAt = 8 + 16 + 8 + 16 + 20 + 12 + 4 + 4
+
+// SetSampleDuration rewrites the duration (in its track's timescale) of a
+// fragment this package wrote, in place: a consumer that holds a sample
+// until the next one of its track arrives can write the real gap instead
+// of the estimate. It reports false, changing nothing, for bytes that are
+// not such a fragment.
+func SetSampleDuration(fragment []byte, ticks uint32) bool {
+	if len(fragment) < sampleDurationAt+4 || string(fragment[4:8]) != "moof" ||
+		string(fragment[sampleDurationAt-16:sampleDurationAt-12]) != "trun" {
+		return false
+	}
+	copy(fragment[sampleDurationAt:], u32(ticks))
+	return true
+}
+
 // moofMdat builds a one-sample fragment.
 func moofMdat(seq, track uint32, tfdt uint64, duration, flags uint32, data []byte) []byte {
 	const (

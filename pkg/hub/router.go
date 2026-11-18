@@ -119,6 +119,12 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.acceptLink(w, r)
 		return
 	}
+	// The viewer page carries no device data and takes its token from its
+	// URL fragment: served here without one, path-exactly.
+	if daemon.IsViewerRequest(r) && fwd == "" {
+		rt.serveLocal(w, r)
+		return
+	}
 	if rt.tcp && !m.clientAuthorized(r) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeError(w, http.StatusUnauthorized, daemon.Errorf(daemon.CodeUsage, "missing or invalid bearer token"))
@@ -1043,6 +1049,10 @@ func principal(r *http.Request, self string) string {
 	return r.RemoteAddr
 }
 
+// relayWriteTimeout bounds each write of a relayed screen stream to its
+// client: daemon.StreamWriteTimeout, shortened by tests.
+var relayWriteTimeout = daemon.StreamWriteTimeout
+
 // forward sends r to hub h and copies the answer back.
 func (rt *router) forward(w http.ResponseWriter, r *http.Request, h string) {
 	m := rt.m
@@ -1080,6 +1090,11 @@ func (rt *router) forward(w http.ResponseWriter, r *http.Request, h string) {
 		if r.Context().Err() != nil {
 			return
 		}
+		var refused *daemon.Error
+		if errors.As(err, &refused) {
+			writeError(w, 0, refused)
+			return
+		}
 		writeError(w, 0, daemon.Errorf(daemon.CodePeerUnavailable, "hub %s: %v", h, err).WithDetails("hub", h))
 		return
 	}
@@ -1095,11 +1110,31 @@ func (rt *router) forward(w http.ResponseWriter, r *http.Request, h string) {
 	}
 	w.WriteHeader(res.Status)
 	flusher, _ := w.(http.Flusher)
+	// A screen stream's writes each get the deadline the owner's stream
+	// route gives its own (the owner's writes go to a link, which has
+	// none). A client that stops reading then fails a write here instead
+	// of holding it, and closing res.Body closes the bulk link, so the
+	// owner's handler, waiting on the link's flow window, returns and
+	// frees its lease. The deadline is cleared for the connection's next
+	// request.
+	stream := isScreenStream(req)
+	rc := http.NewResponseController(w)
+	if stream {
+		defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+	}
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := res.Body.Read(buf)
 		if n > 0 {
+			if stream {
+				if derr := rc.SetWriteDeadline(time.Now().Add(relayWriteTimeout)); derr != nil && !errors.Is(derr, http.ErrNotSupported) {
+					return
+				}
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
+				if stream {
+					m.logf("relayed stream %s from %s ended: %v", req.Path, h, werr)
+				}
 				return
 			}
 			if flusher != nil {

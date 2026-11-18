@@ -37,6 +37,8 @@ type FlowRunner struct {
 	waitForIdleTimeout int
 	// Active runFlow timeout label (e.g. "3s") for enriching sub-step errors
 	runFlowTimeout string
+	// maestro-d: startRecording/stopRecording through screen capture (recording.go)
+	rec stepRecording
 }
 
 // Run executes the flow and returns the result.
@@ -154,6 +156,7 @@ func (fr *FlowRunner) Run() FlowResult {
 
 	// Mark flow as started
 	fr.flowWriter.Start()
+	defer func() { _ = fr.finishRecording() }() // maestro-d: a recording left running ends with the flow
 
 	// Declared before the recording defer below so that defer can read the
 	// outcome — a recording kept only on failure cannot know, at the time it
@@ -546,6 +549,9 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 
 	case *flow.AssertScreenshotStep:
 		result = fr.executeAssertScreenshot(s)
+
+	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
+		result = fr.executeRecordingStep(step)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -1427,6 +1433,9 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.AssertScreenshotStep:
 		fr.script.ExpandStep(step)
 		result = fr.executeAssertScreenshot(s)
+	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
+		fr.script.ExpandStep(step)
+		result = fr.executeRecordingStep(step)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
