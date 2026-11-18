@@ -9,10 +9,10 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/devicelab-dev/maestro-runner/pkg/tracelog"
 )
 
 // Client communicates with UIAutomator2 server.
@@ -22,6 +22,8 @@ type Client struct {
 	sessionID  string
 	socketPath string
 	logger     *log.Logger
+	traced     bool      // SetLogPath was given a trace; bodies are redacted only then
+	traceFile  io.Closer // the trace's file, closed by Close
 }
 
 // NewClient creates a client using Unix socket (Linux/Mac).
@@ -54,23 +56,19 @@ func NewClientTCP(port int) *Client {
 	}
 }
 
-// createLogger creates a logger that writes to /tmp/maestro-client.log (default)
+// createLogger is the default request trace: none. A session that asks for
+// one (MAESTRO_D_ANDROID_TRACE=1) gets it through SetLogPath.
 func createLogger() *log.Logger {
-	return createLoggerWithPath("/tmp/maestro-client.log")
+	return tracelog.Discard()
 }
 
-// createLoggerWithPath creates a logger that writes to the specified path
-func createLoggerWithPath(path string) *log.Logger {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return log.New(io.Discard, "", 0)
-	}
-	return log.New(f, "", log.Ltime|log.Lmicroseconds)
-}
-
-// SetLogPath sets the log file path for HTTP request timing
+// SetLogPath traces each request's timing and redacted body to path,
+// capped at tracelog.MaxBytes.
 func (c *Client) SetLogPath(path string) {
-	c.logger = createLoggerWithPath(path)
+	if l, f := tracelog.Open(path, tracelog.MaxBytes); l != nil {
+		c.closeTrace()
+		c.logger, c.traceFile, c.traced = l, f, true
+	}
 }
 
 // SessionID returns the current session ID.
@@ -95,7 +93,9 @@ func (c *Client) request(method, path string, body interface{}) ([]byte, error) 
 			return nil, fmt.Errorf("marshal request: %w", err)
 		}
 		reqBody = bytes.NewReader(data)
-		bodyStr = string(data)
+		if c.traced {
+			bodyStr = tracelog.Redact(data)
+		}
 		if len(bodyStr) > 100 {
 			bodyStr = bodyStr[:100] + "..."
 		}
@@ -240,7 +240,17 @@ func (c *Client) DeleteSession() error {
 
 // Close ends the session and cleans up.
 func (c *Client) Close() error {
+	defer c.closeTrace()
 	return c.DeleteSession()
+}
+
+// closeTrace closes the trace file, if any; later requests trace nowhere.
+func (c *Client) closeTrace() {
+	if c.traceFile != nil {
+		_ = c.traceFile.Close()
+		c.traceFile, c.traced = nil, false
+		c.logger = tracelog.Discard()
+	}
 }
 
 // SetImplicitWait sets the implicit wait timeout for element finding.

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/flutter"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/maestro"
+	"github.com/devicelab-dev/maestro-runner/pkg/tracelog"
 	"github.com/devicelab-dev/maestro-runner/pkg/uiautomator2"
 )
 
@@ -198,10 +198,8 @@ func createUIAutomator2Driver(cfg *RunConfig, dev *device.AndroidDevice, info de
 		client = uiautomator2.NewClientTCP(dev.LocalPort())
 	}
 
-	// Set log path to report folder
-	if cfg.OutputDir != "" {
-		client.SetLogPath(filepath.Join(cfg.OutputDir, "client.log"))
-	}
+	// Trace requests into the report folder only when asked to.
+	traceAndroidClient(client.SetLogPath, cfg.OutputDir)
 
 	// 4. Create session
 	printSetupStep("Creating session...")
@@ -429,9 +427,7 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 		wsClient = maestro.NewClientTCP(dev.DeviceLabDriverLocalPort())
 	}
 
-	if cfg.OutputDir != "" {
-		wsClient.SetLogPath(filepath.Join(cfg.OutputDir, "client.log"))
-	}
+	traceAndroidClient(wsClient.SetLogPath, cfg.OutputDir)
 
 	printSetupStep("Connecting WebSocket...")
 	if err := wsClient.Connect(); err != nil {
@@ -548,4 +544,12 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 	}
 
 	return driver, cleanup, nil
+}
+
+// traceAndroidClient points an Android driver client's trace at the
+// session's output directory when MAESTRO_D_ANDROID_TRACE=1.
+func traceAndroidClient(setLogPath func(string), outputDir string) {
+	if path := tracelog.Path(outputDir); path != "" {
+		setLogPath(path)
+	}
 }

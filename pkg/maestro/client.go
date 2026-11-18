@@ -9,12 +9,13 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/tracelog"
 )
 
 const (
@@ -40,10 +41,11 @@ type Client struct {
 	events sync.Map // map[string]EventHandler
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	logger *log.Logger
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	logger    *log.Logger
+	traceFile io.Closer // the trace's file, closed by Close
 }
 
 // NewClient creates a client that connects via Unix socket.
@@ -64,21 +66,28 @@ func NewClientTCP(port int) *Client {
 	}
 }
 
+// newLogger is the default trace: none. A session that asks for one
+// (MAESTRO_D_ANDROID_TRACE=1) gets it through SetLogPath.
 func newLogger() *log.Logger {
-	f, err := os.OpenFile("/tmp/devicelab-driver-client.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return log.New(io.Discard, "", 0)
-	}
-	return log.New(f, "", log.Ltime|log.Lmicroseconds)
+	return tracelog.Discard()
 }
 
-// SetLogPath sets the log file path.
+// SetLogPath traces method names and ids to path, capped at
+// tracelog.MaxBytes.
 func (c *Client) SetLogPath(path string) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
+	if l, f := tracelog.Open(path, tracelog.MaxBytes); l != nil {
+		c.closeTrace()
+		c.logger, c.traceFile = l, f
 	}
-	c.logger = log.New(f, "", log.Ltime|log.Lmicroseconds)
+}
+
+// closeTrace closes the trace file, if any; later calls trace nowhere.
+func (c *Client) closeTrace() {
+	if c.traceFile != nil {
+		_ = c.traceFile.Close()
+		c.traceFile = nil
+		c.logger = tracelog.Discard()
+	}
 }
 
 // Connect dials the WebSocket server and starts the read loop.
@@ -164,6 +173,8 @@ func (c *Client) CallWithTimeout(method string, params interface{}, timeout time
 	case resp := <-ch:
 		elapsed := time.Since(start)
 		if resp.Error != nil {
+			// The driver's error text names the element or app, never typed
+			// input; it is what a trace is read for.
 			c.logger.Printf("← %s id=%d [%v] ERR: %s", method, id, elapsed, resp.Error.Message)
 			return nil, resp.Error
 		}
@@ -253,11 +264,14 @@ func (c *Client) dispatch(data []byte) {
 		return
 	}
 
-	c.logger.Printf("unknown frame: %s", string(data))
+	// An unknown frame may carry anything, typed text included: its size
+	// only.
+	c.logger.Printf("unknown frame (%d bytes)", len(data))
 }
 
 // Close cleanly shuts down the connection.
 func (c *Client) Close() error {
+	defer c.closeTrace()
 	if c.cancel != nil {
 		c.cancel()
 	}
