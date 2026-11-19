@@ -932,7 +932,7 @@ var daemonAttachCommand = &cli.Command{
 	Description: flagsDoc(`Attaching is what the first one-shot command does implicitly; do it
 explicitly to control the flags or to pay the driver start-up cost early.
 
-  maestro-d attach --device 29271FDH200ABP --app-file app.apk
+  maestro-d attach --device FAKEPIXEL0002 --app-file app.apk
   maestro-d attach --device 00008110-… --platform ios --team-id ABCDE12345 --app-id co.example.app
   maestro-d attach --device mock-1 --platform mock`, attachCmdFlags),
 	SkipFlagParsing: true,

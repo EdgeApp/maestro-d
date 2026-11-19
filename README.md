@@ -15,7 +15,7 @@ CLI command, a REST route and a JavaScript method — no flow file, no relaunchi
 the app, no re-attaching the driver.
 
 ```sh
-maestro-d launchApp co.edgesecure.app --device 29271FDH200ABP   # ~4s: spawns the daemon, attaches
+maestro-d launchApp co.edgesecure.app --device FAKEPIXEL0002   # ~4s: spawns the daemon, attaches
 maestro-d tapOn "Create account"                                # ~1s
 maestro-d assertVisible "Write these words down" --timeout 5000 # ~1s
 maestro-d get screenshot -o step.png
@@ -69,7 +69,7 @@ curl -N "http://127.0.0.1:7788/v1/events"      # server-sent step and device eve
 ```js
 import { MaestroD } from 'maestro-d'
 
-const m = await MaestroD.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' })
+const m = await MaestroD.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' })
 await m.launchApp({ clearState: true })
 await m.tapOn({ text: 'Get started' })
 try {

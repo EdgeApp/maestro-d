@@ -14,8 +14,8 @@ call one at a time:
 
 | surface | example | docs |
 | --- | --- | --- |
-| CLI | `maestro-d tapOn Login --device 29271FDH200ABP` | [cli.md](cli.md) |
-| REST | `POST /v1/devices/29271FDH200ABP/commands/tapOn` with body `"Login"` | [rest.md](rest.md) |
+| CLI | `maestro-d tapOn Login --device FAKEPIXEL0002` | [cli.md](cli.md) |
+| REST | `POST /v1/devices/FAKEPIXEL0002/commands/tapOn` with body `"Login"` | [rest.md](rest.md) |
 | JavaScript | `await device.tapOn('Login')` | [js.md](js.md) |
 
 The [command reference](commands.md) lists every command with its fields;
@@ -165,7 +165,7 @@ REST:
     "message": "Element not found: text=\"Login\" (timeout 15000ms)",
     "step": "tapOn: text=\"Login\"",
     "details": {
-      "reportDir": "/Users/me/.maestro-d/run/default/reports/29271FDH200ABP/20260910-101500",
+      "reportDir": "…/reports/FAKEPIXEL0002/20260910-101500",
       "screenshot": "assets/flow-000/cmd-003-after.png",
       "hierarchy": "assets/flow-000/cmd-003-hierarchy.xml"
     }
@@ -193,7 +193,7 @@ Or from npm, which brings the binary along: `npm install maestro-d`
 
 ```sh
 maestro-d devices                                   # what this machine can see
-maestro-d attach --device 29271FDH200ABP --app-id co.edgesecure.app
+maestro-d attach --device FAKEPIXEL0002 --app-id co.edgesecure.app
 maestro-d launchApp                                 # uses the attach --app-id
 maestro-d tapOn "Get started"
 maestro-d get screenshot -o now.png
@@ -205,7 +205,7 @@ The same session from JavaScript:
 
 ```js
 import { MaestroD } from 'maestro-d'
-const m = await MaestroD.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' })
+const m = await MaestroD.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' })
 await m.launchApp()
 await m.tapOn('Get started')
 await fs.promises.writeFile('now.png', await m.screenshot())

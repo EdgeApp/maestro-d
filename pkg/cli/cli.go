@@ -148,7 +148,7 @@ func Execute() {
 		Description: `MaestroD is maestro-runner plus a persistent daemon: every YAML
 command is also a CLI command, a REST route and a JavaScript method.
 
-  maestro-d launchApp co.example.app --device 29271FDH200ABP
+  maestro-d launchApp co.example.app --device FAKEPIXEL0002
   maestro-d tapOn Login
   maestro-d assertVisible "Welcome" --timeout 5000
   maestro-d commands            # list every one-shot command
