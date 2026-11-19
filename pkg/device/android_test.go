@@ -2,6 +2,7 @@ package device
 
 import (
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -11,6 +12,12 @@ import (
 // skipIfNoDevice skips the test if no device is connected.
 func skipIfNoDevice(t *testing.T) {
 	t.Helper()
+	// maestro-d: these tests drive whichever phone adb sees first (start and
+	// stop UIAutomator2, remove forwards, install and uninstall), which on a
+	// shared machine is a phone other sessions hold. Opt in to run them.
+	if os.Getenv("MAESTRO_D_ANDROID_DEVICE_TESTS") != "1" {
+		t.Skip("real-device test: set MAESTRO_D_ANDROID_DEVICE_TESTS=1 to run it on the first adb device")
+	}
 	cmd := exec.Command("adb", "devices")
 	out, err := cmd.Output()
 	if err != nil {

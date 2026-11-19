@@ -52,6 +52,7 @@ never copies their code.
 | `pkg/driver/uiautomator2/recording.go`, `pkg/driver/devicelab/recording.go` | Rewritten (screenrecord, with its three-minute cap and on-device file, is the defect being replaced): `SetCapture`, `Capture` (`core.Capturer`), `StartScreenRecording`/`StopScreenRecording` (`core.ScreenRecorder`) through a `capture.Recorder` on the session, and `recordingStep`, the answer when a recording step reaches the driver without capture | whole file |
 | `pkg/driver/uiautomator2/driver.go`, `pkg/driver/devicelab/driver.go` | A `screen capture.DriverCapture` field and its import, and the two `startRecording`/`stopRecording` cases in `Execute` merged into one calling `recordingStep`, all marked `// maestro-d` | 6 |
 | `pkg/driver/uiautomator2/commands.go`, `pkg/driver/devicelab/commands.go` | The `startRecording`/`stopRecording` step functions (`screenrecord` on the device) removed, with a `// maestro-d` note: the executor runs those steps through the driver's capture | −40 |
+| `pkg/device/android_test.go` | One `// maestro-d` check at the start of `skipIfNoDevice`: the real-device tests (UIAutomator2 start and stop, forwards, install and uninstall on the first adb device) skip unless `MAESTRO_D_ANDROID_DEVICE_TESTS=1`, so `go test` never drives a phone other sessions hold | 7 |
 
 Everything else is new:
 
@@ -80,6 +81,7 @@ Everything else is new:
 | `pkg/execbound/` | `Run`: a command under a time bound, killed at the bound, with a short `WaitDelay` so a killed wrapper's child cannot hold the wait; the adb props read and the simctl device-types read use it |
 | `pkg/simulator/catalog.go` | The simctl runtime and device-type catalog and the default runtime and iPhone type |
 | `pkg/emulator/catalog.go`, `avdmanager.go`, `avd_serials.go` | The sdkmanager/avdmanager catalog, AVD create/delete, image install, data partition size, and `RunningAVDsBySerial` |
+| `pkg/device/props.go` | `ListDevicesWithProps`: `adb devices -l` with transport ids, and each ready device's name, model and Android version, read in one bounded `adb shell` call per connection and cached |
 | `tools/covchanged/` | `make cover-changed`'s changed-line coverage report |
 | `pkg/cli/daemon_e2e_test.go` | Binary-level test against the mock driver |
 | `npm/maestro-d/` | The JavaScript library |
