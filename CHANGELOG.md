@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 3.0.1 (2026-11-18)
+
+- added: Every daemon sweeps its home half a minute after it starts and then hourly, and `maestro-d gc [--dry-run] [--json] [--include-build-cache]` runs the same sweep on demand. It deletes blobs unused for 24 hours (was 7 days, and only at daemon start), report directories idle for 3 days, orphaned Chrome profiles idle for a day, and the run directories of daemons gone for 7 days. It never removes the run directory of an installed hub service or one that still records simulators its daemon booted. `MAESTRO_D_HOUSEKEEPING_INTERVAL` overrides the hour.
+- added: `discardReports` (`--discard-reports`, JS `discardReports`) deletes a session's report directory at detach.
+- changed: Daemon sessions write `report.json` and `junit-report.xml` only, no `report.html` or `allure-results/`; `maestro-runner test` still writes every format. Detach removes the app copies and flow bundles a session unpacked into its report directory.
+- changed: The Android drivers trace nothing by default. With `MAESTRO_D_ANDROID_TRACE=1` they write `client.log` into the session's report directory, truncated at 50 MB, with typed and pasted text redacted. Previously every request, typed text included, was appended to `/tmp/maestro-client.log` or `/tmp/devicelab-driver-client.log` without limit.
+- fixed: iOS test runs no longer leave their result bundles behind. WebDriverAgent's session log grew in the build cache's `DerivedData/Logs/Test` for as long as WDA ran (one reached 2.1 GB); each run now writes its own result bundle and deletes it when it stops. The devicelab runner no longer makes a new folder under `~/Library/Developer/Xcode/DerivedData` for every run, and builds skip the unused index store.
+- fixed: iOS runner build caches unused for 30 days are pruned (real-device builds only once this machine has compiled one for the same team since).
+- fixed: A web session's temporary Chrome profile (about 22 MB) is deleted when the session closes, or when Chrome fails to start.
+- changed: `BlobStore.Expire` is removed; the housekeeping sweep expires blobs.
+
 ## 3.0.0 (2026-11-18)
 
 - added: Hubs: `maestro-d hub start` runs a daemon that shares this machine's devices with clients on the network and lends each device to one client at a time. Leases are fixed windows (`maestro-d lease`, `renew`, `release`; 8 hours by default, `--lease-max` for the hub or one device), using a device past its window fails `LEASE_EXPIRED`, and using one without a lease fails `LEASE_REQUIRED`. `--share-device` limits what the hub shares, `--token`/`--token-file` and `--tls-cert` secure it, and `hub service install` runs it as a macOS LaunchAgent.
