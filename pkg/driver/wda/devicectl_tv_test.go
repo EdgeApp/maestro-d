@@ -14,7 +14,7 @@ import (
 const devicectlTVList = `{"result":{"devices":[
  {"connectionProperties":{"pairingState":"paired","tunnelState":"connected","tunnelIPAddress":"fd00::1"},
   "deviceProperties":{"name":"Lab TV","osVersionNumber":"26.3","developerModeStatus":"enabled"},
-  "hardwareProperties":{"platform":"tvOS","reality":"physical","udid":"tv-1"}},
+  "hardwareProperties":{"platform":"tvOS","productType":"AppleTV14,1","reality":"physical","udid":"tv-1"}},
  {"connectionProperties":{"pairingState":"paired","tunnelState":"disconnected"},
   "deviceProperties":{"name":"Hall TV","osVersionNumber":"27.2.1","developerModeStatus":"enabled"},
   "hardwareProperties":{"platform":"tvOS","reality":"physical","udid":"tv-2"}},
@@ -40,7 +40,7 @@ func TestParseDevicectlTVs(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []DevicectlTV{
-		{UDID: "tv-1", Name: "Lab TV", OSVersion: "26.3", Paired: true, Reachable: true, Tunnel: true},
+		{UDID: "tv-1", Name: "Lab TV", Model: "AppleTV14,1", OSVersion: "26.3", Paired: true, Reachable: true, Tunnel: true},
 		{UDID: "tv-2", Name: "Hall TV", OSVersion: "27.2.1", Paired: true, Reachable: true},
 		{UDID: "tv-4", Name: "Away", OSVersion: "26.6.1", Paired: true},
 		{UDID: "tv-3", Name: "Den", OSVersion: "26.1", Reachable: true},

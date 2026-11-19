@@ -271,6 +271,7 @@ func closeWrite(c net.Conn) {
 // physical device that the runner and setup need.
 type DevicectlDevice struct {
 	Name      string
+	Model     string // the product type, e.g. "iPad14,3"
 	OSVersion string
 	// TunnelIP is the CoreDevice tunnel address, "" unless the tunnel is
 	// connected.
@@ -332,6 +333,7 @@ func parseDevicectlDetails(data []byte) (DevicectlDevice, error) {
 	r := doc.Result
 	dev := DevicectlDevice{
 		Name:      r.DeviceProperties.Name,
+		Model:     r.HardwareProperties.ProductType,
 		OSVersion: r.DeviceProperties.OSVersionNumber,
 	}
 	if r.ConnectionProperties.TunnelState == "connected" {

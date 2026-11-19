@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- added: Device listings (`GET /v1/devices`, `maestro-d device list`, `maestro-runner devices --json`, JS `devices()`, and every hub's) carry each ready Android phone's name, model and Android version, read once per adb connection, and running emulators carry their model and Android version beside their AVD name. Every entry gains `model` (`ro.product.model`), which `device list` shows after the name.
+- added: Device listings (`GET /v1/devices`, `maestro-d device list`, `maestro-runner devices --json`, JS `devices()`, and every hub's) carry each ready Android phone's name, model and Android version, read once per adb connection, and running emulators carry their model and Android version beside their AVD name. Every entry gains `model`: `ro.product.model` on Android, the product type (`iPhone14,2`) on iOS phones and Apple TVs, and the device type's model identifier on simulators. `device list` shows it after the name.
 
 ## 3.2.0 (2026-11-20)
 

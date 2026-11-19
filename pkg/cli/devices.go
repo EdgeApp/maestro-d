@@ -49,7 +49,7 @@ type DeviceEntry struct {
 	Kind      string `json:"kind"`     // device | emulator | simulator | tv
 	ID        string `json:"id"`       // adb serial or iOS UDID — what --device takes
 	Name      string `json:"name,omitempty"`
-	Model     string `json:"model,omitempty"` // maestro-d: e.g. "Pixel 8"
+	Model     string `json:"model,omitempty"` // maestro-d: e.g. "Pixel 8", "iPhone14,2"
 	OSVersion string `json:"osVersion,omitempty"`
 	State     string `json:"state"` // device | offline | unauthorized | Booted | Shutdown
 	// Ready is true when a run could target this entry as-is. An offline or
@@ -113,6 +113,7 @@ func androidEntries() []DeviceEntry {
 }
 
 func simulatorEntries(includeShutdown bool) []DeviceEntry {
+	simulator.WarmModels() // maestro-d: start reading device types beside the device list
 	sims, err := simulator.ListIOSSimulators()
 	if err != nil {
 		return nil
@@ -128,6 +129,7 @@ func simulatorEntries(includeShutdown bool) []DeviceEntry {
 			Kind:      "simulator",
 			ID:        s.UDID,
 			Name:      s.Name,
+			Model:     simulator.ModelIdentifier(s.DeviceType), // maestro-d
 			OSVersion: s.OSVersion,
 			State:     s.State,
 			Ready:     booted,
@@ -164,6 +166,7 @@ func physicalIOSEntries() []DeviceEntry {
 		// is the most common reason a connected phone won't work.
 		if info, infoErr := getPhysicalDeviceInfo(udid, nil); infoErr == nil {
 			entry.Name = info.Name
+			entry.Model = info.Model // maestro-d
 			entry.OSVersion = info.OSVersion
 		} else {
 			entry.State = "connected (not paired — unlock the device and trust this computer)"

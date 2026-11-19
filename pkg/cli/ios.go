@@ -33,6 +33,7 @@ type simulatorInfo struct {
 // iosDeviceInfo holds iOS device information (simulator or physical).
 type iosDeviceInfo struct {
 	Name        string
+	Model       string // maestro-d: the product type, e.g. "iPhone14,2"
 	OSVersion   string
 	IsSimulator bool
 }
@@ -365,7 +366,7 @@ func isIOSSimulator(udid string) bool {
 // go-ios. known is what devicectl already said about the device (the WDA
 // runner asks it while reaching WDA), or nil to ask it here if needed.
 func getPhysicalDeviceInfo(udid string, known *wdadriver.DevicectlLookup) (*iosDeviceInfo, error) {
-	entry, err := goios.GetDevice(udid)
+	entry, err := goiosGetDevice(udid) // maestro-d: a seam over goios.GetDevice
 	if err != nil {
 		// usbmuxd does not list every paired device (an iPad on a USB-C
 		// network link is reachable only through CoreDevice), so ask
@@ -385,10 +386,10 @@ func getPhysicalDeviceInfo(udid string, known *wdadriver.DevicectlLookup) (*iosD
 		if name == "" {
 			name = "iOS Device"
 		}
-		return &iosDeviceInfo{Name: name, OSVersion: dev.OSVersion, IsSimulator: false}, nil
+		return &iosDeviceInfo{Name: name, Model: dev.Model, OSVersion: dev.OSVersion, IsSimulator: false}, nil // maestro-d: Model
 	}
 
-	values, err := goios.GetValues(entry)
+	values, err := goiosGetValues(entry) // maestro-d: a seam over goios.GetValues
 	if err != nil {
 		return nil, fmt.Errorf("failed to get device info: %w", err)
 	}
@@ -403,6 +404,7 @@ func getPhysicalDeviceInfo(udid string, known *wdadriver.DevicectlLookup) (*iosD
 
 	return &iosDeviceInfo{
 		Name:        name,
+		Model:       values.Value.ProductType, // maestro-d
 		OSVersion:   values.Value.ProductVersion,
 		IsSimulator: false,
 	}, nil
@@ -677,7 +679,7 @@ func autoDetectIOSDevices(count int) ([]string, error) {
 // over usbmux. Unlike findConnectedDevice it does not stop at the first one —
 // the `devices` command needs the whole list.
 func listPhysicalIOSUDIDs() ([]string, error) {
-	list, err := goios.ListDevices()
+	list, err := goiosListDevices() // maestro-d: a seam over goios.ListDevices
 	if err != nil {
 		return nil, fmt.Errorf("failed to list devices: %w", err)
 	}

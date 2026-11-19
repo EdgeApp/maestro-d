@@ -39,6 +39,7 @@ type simctlDevice struct {
 	UDID        string `json:"udid"`
 	State       string `json:"state"`
 	IsAvailable bool   `json:"isAvailable"`
+	DeviceType  string `json:"deviceTypeIdentifier"` // maestro-d
 }
 
 // ListSimulators returns all available iOS simulators.
@@ -74,6 +75,7 @@ func ListSimulators() ([]SimulatorDevice, error) {
 				OSVersion:   osVersion,
 				State:       dev.State,
 				IsAvailable: dev.IsAvailable,
+				DeviceType:  dev.DeviceType, // maestro-d
 			})
 		}
 	}
