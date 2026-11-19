@@ -77,6 +77,7 @@ Everything else is new:
 | `pkg/cli/hub.go`, `hub_service.go`, `lease.go`, `lease_lock_*.go` | `hub start`/`stop`/`status` and the mesh flags; `hub service install`/`uninstall`/`status` (the macOS LaunchAgent); `lease`, `renew` and `release`, and `<home>/leases.json` (under an advisory `flock`; none on Windows) |
 | `pkg/cli/pack.go`, `bundle.go`, `remote_files.go`, `install.go` | `pack` and `pack --flow` (a flow's dependency closure as a bundle), the upload of a targeted command's input files, flow files and whole `run` bundles and the fetch of their outputs, `install`/`uninstall` and the daemon's install, uninstall and app-id hooks |
 | `pkg/cli/device_manage.go`, `devices_avd.go` | `device catalog`/`create`/`delete`; AVD names and `avd:<name>` entries in device listings |
+| `pkg/execbound/` | `Run`: a command under a time bound, killed at the bound, with a short `WaitDelay` so a killed wrapper's child cannot hold the wait; the adb props read and the simctl device-types read use it |
 | `pkg/simulator/catalog.go` | The simctl runtime and device-type catalog and the default runtime and iPhone type |
 | `pkg/emulator/catalog.go`, `avdmanager.go`, `avd_serials.go` | The sdkmanager/avdmanager catalog, AVD create/delete, image install, data partition size, and `RunningAVDsBySerial` |
 | `tools/covchanged/` | `make cover-changed`'s changed-line coverage report |
