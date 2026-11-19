@@ -283,9 +283,13 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 		name = strings.TrimPrefix(name, AVDPrefix)
 	}
 
-	// Already running? A running emulator is listed under its AVD name.
+	// Already running? A running emulator is listed under its AVD name. An
+	// avd:<name> request names an AVD, so only an emulator matches it by
+	// name: phones are named too.
+	avdOnly := platform == "android" && strings.HasPrefix(req.Name, AVDPrefix)
 	for _, d := range r.Live(platform) {
-		if d.Ready && (d.ID == req.Name || strings.EqualFold(d.Name, name)) {
+		byName := strings.EqualFold(d.Name, name) && (!avdOnly || d.Kind == "emulator" || emulator.IsEmulator(d.ID))
+		if d.Ready && (d.ID == req.Name || byName) {
 			logger.Info("device start: %s already running as %s", req.Name, d.ID)
 			return d, nil
 		}
@@ -332,7 +336,7 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 		info.Kind = "emulator"
 	}
 	if live, ok := r.findLive(platform, id); ok {
-		info.Name, info.OSVersion, info.State, info.Ready = live.Name, live.OSVersion, live.State, live.Ready
+		info.Name, info.Model, info.OSVersion, info.State, info.Ready = live.Name, live.Model, live.OSVersion, live.State, live.Ready
 	}
 	r.mu.Lock()
 	if rec, ok := r.records[id]; ok {

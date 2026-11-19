@@ -209,7 +209,10 @@ export interface DeviceInfo {
   platform: string
   /** device | emulator | simulator */
   kind?: string
+  /** An Android phone's user-set name (else its model), an emulator's AVD name, an iOS device's or simulator's name. */
   name?: string
+  /** Hardware model: `ro.product.model` on Android (`Pixel 8`). */
+  model?: string
   osVersion?: string
   state?: string
   ready: boolean

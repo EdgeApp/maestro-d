@@ -411,6 +411,12 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 			att = "by " + d.Owner
 		}
 		name := d.Name
+		switch {
+		case name == "":
+			name = d.Model
+		case d.Model != "" && d.Model != d.Name:
+			name += " (" + d.Model + ")"
+		}
 		if d.OSVersion != "" {
 			name += " " + d.OSVersion
 		}

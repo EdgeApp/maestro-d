@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/devicelab-dev/maestro-runner/pkg/device"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 	"github.com/urfave/cli/v2"
 )
@@ -50,6 +49,7 @@ type DeviceEntry struct {
 	Kind      string `json:"kind"`     // device | emulator | simulator | tv
 	ID        string `json:"id"`       // adb serial or iOS UDID — what --device takes
 	Name      string `json:"name,omitempty"`
+	Model     string `json:"model,omitempty"` // maestro-d: e.g. "Pixel 8"
 	OSVersion string `json:"osVersion,omitempty"`
 	State     string `json:"state"` // device | offline | unauthorized | Booted | Shutdown
 	// Ready is true when a run could target this entry as-is. An offline or
@@ -84,20 +84,17 @@ func runDevices(c *cli.Context) error {
 func collectDevices(platform string, includeShutdown bool) []DeviceEntry {
 	var entries []DeviceEntry
 
-	if platform == "" || platform == "android" {
-		entries = append(entries, androidEntries()...)
-		entries = avdEntries(entries, includeShutdown) // maestro-d: AVD names, shut-down AVDs as avd:<name>
-	}
+	android := startAndroidEntries(platform, includeShutdown) // maestro-d: Android is listed beside iOS
 	if (platform == "" || platform == "ios") && runtime.GOOS == "darwin" {
 		entries = append(entries, simulatorEntries(includeShutdown)...)
 		entries = append(entries, physicalIOSEntries()...)
 		entries = append(entries, physicalTVEntries(entries, includeShutdown)...)
 	}
-	return entries
+	return append(android(), entries...) // maestro-d
 }
 
 func androidEntries() []DeviceEntry {
-	found, err := device.ListDevices()
+	found, err := listAndroidDevices() // maestro-d: with name, model and Android version
 	if err != nil {
 		return nil
 	}
@@ -110,6 +107,7 @@ func androidEntries() []DeviceEntry {
 			State:    d.State,
 			Ready:    d.State == "device",
 		})
+		applyAndroidProps(&entries[len(entries)-1], d) // maestro-d
 	}
 	return entries
 }

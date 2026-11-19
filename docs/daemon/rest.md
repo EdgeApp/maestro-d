@@ -299,15 +299,23 @@ not), emulator AVDs — merged with what this and other daemons hold.
 {
   "ok": true, "exitCode": 0,
   "devices": [
-    { "id": "FAKEPIXEL0002", "platform": "android", "kind": "device", "name": "Pixel 7", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/FAKEPIXEL0002/20260910-100000" },
+    { "id": "FAKEPIXEL0002", "platform": "android", "kind": "device", "name": "Lab Pixel", "model": "Pixel 7", "osVersion": "15", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/FAKEPIXEL0002/20260910-100000" },
     { "id": "FAKE-SIM-UDID-0001", "platform": "ios", "kind": "simulator", "name": "iPhone 13 Pro", "osVersion": "26.0", "state": "Shutdown", "ready": false, "attached": false },
     { "id": "FAKE-IOS-UDID-0001", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" },
-    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "state": "device", "ready": true, "attached": false },
+    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "model": "sdk_gphone64_arm64", "osVersion": "15", "state": "device", "ready": true, "attached": false },
     { "id": "avd:ci-pixel", "platform": "android", "kind": "emulator", "name": "ci-pixel", "state": "Shutdown", "ready": false, "attached": false, "createdBy": "maestro-d" },
     { "id": "00000000000000000000000000000000000000a1", "platform": "ios", "kind": "tv", "name": "Lab TV", "osVersion": "26.3", "state": "connected", "ready": true, "attached": false }
   ]
 }
 ```
+
+`name`, `model` and `osVersion` describe the hardware. An Android phone's
+`name` is its user-set device name, or its model when it has none; `model` is
+`ro.product.model` and `osVersion` is `ro.build.version.release`, read once
+per adb connection (a phone that has not finished booting lists its model as
+its name until a read 30 s later finds its user-set name). A
+device that is offline or unauthorized lists without them, and so does every
+device of a hub running an older maestro-d.
 
 A running emulator's `name` is its AVD name. An AVD that is not running is
 listed once, as `avd:<name>`; booting it returns the emulator's serial.
