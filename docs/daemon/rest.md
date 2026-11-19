@@ -446,7 +446,8 @@ curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
 | `typingFrequency` | `--typing-frequency` | |
 | `commandTimeout` | `--command-timeout` | ms |
 | `alertMonitor` | `--alert-monitor` | default true |
-| `outputDir` | `--output-dir` | report directory; default `<reportsDir>/<id>/<timestamp>` |
+| `outputDir` | `--output-dir` | report directory; default `<reportsDir>/<id>/<timestamp>`. One you name is never deleted, and is shared only among sessions of one daemon |
+| `discardReports` | `--discard-reports` | delete the daemon-owned report directory at detach; by default it stays and the housekeeping sweep deletes it 3 days after its last write |
 | `flowDir` | | directory relative paths in steps resolve against |
 | `extra` | | any other `test` flag by its long name, e.g. `{"caps": "…", "headed": true}` |
 
@@ -820,8 +821,8 @@ Every daemon keeps a content-addressed store at
 that targets a daemon on another machine uploads each file a step, an
 install or an attach needs, then names it `blob:sha256:<hex>/<basename>`.
 The routes are per device, so on a mesh they reach the device's owner; the
-device need not be attached. Blobs unused for 7 days are deleted when the
-daemon starts. `{sha256}` must be 64 lowercase hex digits, or the request
+device need not be attached. Blobs unused for 24 hours are deleted by the
+housekeeping sweep, half a minute after daemon start and then hourly. `{sha256}` must be 64 lowercase hex digits, or the request
 is `FORBIDDEN` before any file is opened.
 
 ### `HEAD /v1/devices/{id}/blobs/{sha256}`

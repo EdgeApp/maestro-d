@@ -38,9 +38,9 @@ import (
 // HeaderUploadOffset reports how many bytes of a blob the daemon holds.
 const HeaderUploadOffset = "Upload-Offset"
 
-// BlobExpiry is how long an unused blob is kept; older ones are deleted at
-// daemon start.
-const BlobExpiry = 7 * 24 * time.Hour
+// BlobExpiry is how long an unused blob is kept; the housekeeping sweep
+// (shortly after daemon start, then hourly) deletes older ones.
+const BlobExpiry = 24 * time.Hour
 
 // BlobStore is the daemon's content-addressed file store.
 type BlobStore struct {
@@ -194,28 +194,6 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// Expire deletes complete and partial blobs unused for longer than maxAge.
-func (b *BlobStore) Expire(maxAge time.Duration) int {
-	cutoff := time.Now().Add(-maxAge)
-	removed := 0
-	for _, dir := range []string{"sha256", "partial"} {
-		entries, err := os.ReadDir(filepath.Join(b.root, dir))
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			fi, err := e.Info()
-			if err != nil || fi.IsDir() || !fi.ModTime().Before(cutoff) {
-				continue
-			}
-			if os.Remove(filepath.Join(b.root, dir, e.Name())) == nil {
-				removed++
-			}
-		}
-	}
-	return removed
 }
 
 // Materialize places the blob a ref names at <dir>/<hex>/<basename>, keeping

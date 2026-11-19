@@ -13,6 +13,7 @@ import (
 type IndexWriter struct {
 	mu        sync.Mutex
 	outputDir string
+	formats   Formats
 	path      string
 	index     *Index
 
@@ -23,10 +24,18 @@ type IndexWriter struct {
 	done      chan struct{}
 }
 
-// NewIndexWriter creates a new IndexWriter.
+// NewIndexWriter creates a new IndexWriter that keeps every report format
+// up to date.
 func NewIndexWriter(outputDir string, index *Index) *IndexWriter {
+	return NewIndexWriterFormats(outputDir, index, AllFormats)
+}
+
+// NewIndexWriterFormats creates an IndexWriter that regenerates only the
+// given formats on each flush; report.json is always written.
+func NewIndexWriterFormats(outputDir string, index *Index, formats Formats) *IndexWriter {
 	w := &IndexWriter{
 		outputDir: outputDir,
+		formats:   formats,
 		path:      filepath.Join(outputDir, "report.json"),
 		index:     index,
 		pending:   make(map[string]*FlowUpdate),
@@ -145,21 +154,27 @@ func (w *IndexWriter) flushLocked() {
 	}
 
 	// Regenerate HTML for live file:// viewing
-	if err := GenerateHTML(w.outputDir, HTMLConfig{
-		Title:     "Test Report",
-		ReportDir: w.outputDir,
-	}); err != nil {
-		logger.Warn("failed to regenerate HTML report: %v", err)
+	if w.formats.Has(FormatHTML) {
+		if err := GenerateHTML(w.outputDir, HTMLConfig{
+			Title:     "Test Report",
+			ReportDir: w.outputDir,
+		}); err != nil {
+			logger.Warn("failed to regenerate HTML report: %v", err)
+		}
 	}
 
 	// Regenerate JUnit XML for live CI consumption
-	if err := GenerateJUnit(w.outputDir); err != nil {
-		logger.Warn("failed to regenerate JUnit report: %v", err)
+	if w.formats.Has(FormatJUnit) {
+		if err := GenerateJUnit(w.outputDir); err != nil {
+			logger.Warn("failed to regenerate JUnit report: %v", err)
+		}
 	}
 
 	// Regenerate Allure results for live availability
-	if err := GenerateAllure(w.outputDir); err != nil {
-		logger.Warn("failed to regenerate Allure report: %v", err)
+	if w.formats.Has(FormatAllure) {
+		if err := GenerateAllure(w.outputDir); err != nil {
+			logger.Warn("failed to regenerate Allure report: %v", err)
+		}
 	}
 }
 

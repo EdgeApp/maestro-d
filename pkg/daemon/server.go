@@ -30,6 +30,9 @@ import (
 // Config configures a daemon process.
 type Config struct {
 	Name string
+	// KeepRunDir names run directories the housekeeping sweep never removes
+	// whole (a daemon with an installed launchd service); nil keeps none.
+	KeepRunDir func(name string) bool
 	// HTTPAddr optionally opens a TCP listener (127.0.0.1:port).
 	HTTPAddr string
 	// Token, when set, is required as `Authorization: Bearer` on TCP. A
@@ -110,6 +113,11 @@ type Server struct {
 
 	mu       sync.Mutex
 	attached map[string]*attached
+	// reportUsers counts attached sessions per report directory, so detach
+	// keeps a shared outputDir's blobs/ and bundles/ while another session
+	// in it is attached. Guarded by reportMu.
+	reportMu    sync.Mutex
+	reportUsers map[string]*reportUse
 	// attaching serialises concurrent attach calls for the same device.
 	attaching map[string]chan struct{}
 
@@ -236,9 +244,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
 	}
-	if n := s.blobs.Expire(BlobExpiry); n > 0 {
-		logger.Info("Deleted %d blob(s) unused for %v", n, BlobExpiry)
-	}
+	// The housekeeping sweep (old blobs, idle reports, dead daemons' run
+	// dirs, orphaned Chrome profiles) runs now and hourly while this
+	// daemon runs.
+	hkCtx, stopHousekeeping := context.WithCancel(context.Background())
+	defer stopHousekeeping()
+	go s.housekeep(hkCtx)
 	sockPath := SocketPath(s.cfg.Name)
 	_ = os.Remove(sockPath)
 	unixLn, err := net.Listen("unix", sockPath)

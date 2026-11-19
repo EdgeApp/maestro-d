@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -768,4 +769,177 @@ func TestE2E_Leases(t *testing.T) {
 
 func regexpMatch(pattern, s string) bool {
 	return regexp.MustCompile(pattern).MatchString(s)
+}
+
+// reportDirs lists the report directories a mock-1 session made under the
+// default daemon's home.
+func (e *e2e) reportDirs() []string {
+	e.t.Helper()
+	dirs, _ := filepath.Glob(filepath.Join(e.home, "run", "default", "reports", "mock-1", "*"))
+	return dirs
+}
+
+func TestE2E_ReportLifecycle(t *testing.T) {
+	e := newE2E(t)
+
+	// A failing step captures its failure artifacts; the daemon writes
+	// report.json and junit-report.xml, never report.html or Allure.
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock")
+	e.fails(1, "assertTrue", "false", "--device", "mock-1")
+	dirs := e.reportDirs()
+	if len(dirs) != 1 {
+		t.Fatalf("report dirs = %v, want 1", dirs)
+	}
+	kept := dirs[0]
+	for _, name := range []string{"report.json", "junit-report.xml", "flows"} {
+		if _, err := os.Stat(filepath.Join(kept, name)); err != nil {
+			t.Errorf("attached session lacks %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"report.html", "allure-results"} {
+		if _, err := os.Stat(filepath.Join(kept, name)); err == nil {
+			t.Errorf("daemon session wrote %s", name)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(kept, "bundles", "abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: the report stays after detach, without its inputs.
+	e.ok("detach", "--device", "mock-1")
+	if _, err := os.Stat(filepath.Join(kept, "report.json")); err != nil {
+		t.Fatalf("detach removed the kept report: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(kept, "bundles")); err == nil {
+		t.Error("detach left bundles/")
+	}
+
+	// --discard-reports removes the session's own report directory.
+	time.Sleep(1100 * time.Millisecond) // a new second, so a new report dir
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock", "--discard-reports")
+	if got := e.reportDirs(); len(got) != 2 {
+		t.Fatalf("report dirs while discarding session attached = %v, want 2", got)
+	}
+	e.ok("detach", "--device", "mock-1")
+	if got := e.reportDirs(); len(got) != 1 || got[0] != kept {
+		t.Errorf("after a discarding detach report dirs = %v, want only %s", got, kept)
+	}
+
+	// A caller's outputDir is never deleted.
+	out := filepath.Join(t.TempDir(), "out")
+	e.ok("tapOn", "Login", "--device", "mock-1", "--platform", "mock", "--output-dir", out, "--discard-reports")
+	e.ok("detach", "--device", "mock-1")
+	if _, err := os.Stat(filepath.Join(out, "report.json")); err != nil {
+		t.Errorf("a caller's outputDir lost report.json: %v", err)
+	}
+}
+
+// seed writes a file under the e2e home and ages it.
+func (e *e2e) seed(rel string, ago time.Duration) string {
+	e.t.Helper()
+	p := filepath.Join(e.home, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	old := time.Now().Add(-ago)
+	for d := p; d != e.home; d = filepath.Dir(d) {
+		_ = os.Chtimes(d, old, old)
+	}
+	return p
+}
+
+func TestE2E_Housekeeping(t *testing.T) {
+	e := newE2E(t)
+	day := 24 * time.Hour
+	oldBlob := e.seed("blobs/sha256/"+strings.Repeat("a", 64), 2*day)
+	newBlob := e.seed("blobs/sha256/"+strings.Repeat("b", 64), time.Hour)
+	deadLog := e.seed("run/old-daemon/daemon.log", 8*day)
+	idleReport := e.seed("run/old-daemon2/reports/mock-9/20261101-000000/report.json", 4*day)
+	keepBin := e.seed("drivers/keep", 30*day)
+
+	// gc --dry-run lists and deletes nothing.
+	r := e.ok("gc", "--dry-run", "--json")
+	var out struct {
+		GC daemon.SweepResult `json:"gc"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &out); err != nil {
+		t.Fatalf("gc --json: %v\n%s", err, r.stdout)
+	}
+	listed := map[string]bool{}
+	for _, x := range out.GC.Removed {
+		listed[x.Path] = true
+	}
+	if !out.GC.DryRun || !listed[oldBlob] || !listed[filepath.Join(e.home, "run", "old-daemon")] || listed[newBlob] {
+		t.Fatalf("dry run listed %v", out.GC.Removed)
+	}
+	for _, p := range []string{oldBlob, deadLog, idleReport} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("dry run deleted %s", p)
+		}
+	}
+	r = e.ok("gc", "--dry-run")
+	if !strings.Contains(r.stdout, "Would delete "+oldBlob) || !strings.Contains(r.stdout, "path(s)") {
+		t.Errorf("gc --dry-run text: %s", r.stdout)
+	}
+
+	// A running daemon sweeps at start: old blob, dead run dir and idle
+	// report go; its own run dir, fresh blobs and drivers stay.
+	e.okEnv([]string{daemon.EnvHousekeepingInterval + "=1s"}, "tapOn", "Login", "--device", "mock-1", "--platform", "mock")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(oldBlob); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	for _, p := range []string{oldBlob, filepath.Join(e.home, "run", "old-daemon"), filepath.Dir(idleReport)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("the daemon's sweep left %s", p)
+		}
+	}
+	for _, p := range []string{newBlob, keepBin, filepath.Join(e.home, "run", "default", "daemon.json")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the daemon's sweep removed %s: %v", p, err)
+		}
+	}
+
+	// While another sweep holds the home, gc says so and touches nothing
+	// there.
+	hk, err := os.OpenFile(filepath.Join(e.home, "housekeeping.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(hk.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	r = e.ok("gc")
+	if !strings.Contains(r.stdout, "Skipped the home") {
+		t.Errorf("gc while locked: %s", r.stdout)
+	}
+	r = e.ok("gc", "--include-build-cache", "--dry-run")
+	if !strings.Contains(r.stdout, "the build cache was still checked") {
+		t.Errorf("gc --include-build-cache while locked: %s", r.stdout)
+	}
+	_ = syscall.Flock(int(hk.Fd()), syscall.LOCK_UN)
+	_ = hk.Close()
+
+	// gc --include-build-cache prunes the binary's build cache, not
+	// MAESTRO_D_HOME's.
+	runnerHome := t.TempDir()
+	stale := filepath.Join(runnerHome, "cache", "wda-builds", "sim-ios20.0-iphone")
+	if err := os.MkdirAll(filepath.Join(stale, "Build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-40 * day)
+	_ = filepath.Walk(stale, func(p string, _ os.FileInfo, _ error) error { return os.Chtimes(p, old, old) })
+	r = e.okEnv([]string{"MAESTRO_RUNNER_HOME=" + runnerHome}, "gc", "--include-build-cache")
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("gc --include-build-cache left %s:\n%s", stale, r.stdout)
+	}
+	if !strings.Contains(r.stdout, "Deleted") {
+		t.Errorf("gc output: %s", r.stdout)
+	}
 }

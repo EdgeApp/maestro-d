@@ -617,6 +617,34 @@ func TestLeases_WindowEndsDuringTheLeaseAttach(t *testing.T) {
 	if devs, _ := env.local.Devices(ctx, "mock"); devs[0].Attached || devs[0].Lease != nil {
 		t.Fatalf("left attached: %+v", devs[0])
 	}
+	waitReportsReleased(t, env.s)
+}
+
+// waitReportsReleased waits until no attached session uses a report
+// directory: a late attach the lease teardown detaches writes its last
+// report files as it closes, after the request has already answered, and
+// must finish before the test's temp dirs are removed.
+func waitReportsReleased(t *testing.T, s *Server) {
+	t.Helper()
+	if !s.teardowns.wait(5 * time.Second) {
+		t.Fatal("a lease teardown never finished")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		attached := len(s.attached)
+		s.mu.Unlock()
+		s.reportMu.Lock()
+		users := len(s.reportUsers)
+		s.reportMu.Unlock()
+		if attached == 0 && users == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a late attach never unwound (%d attached, %d report dirs in use)", attached, users)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // An attach whose driver start ignores cancellation (WebDriverAgent's) and

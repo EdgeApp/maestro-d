@@ -40,6 +40,7 @@ type attached struct {
 	cleanup    func()
 	info       DeviceInfo
 	reportDir  string
+	release    func() // Ends this session's use of reportDir
 	attachedAt time.Time
 	base       context.Context
 	cancel     context.CancelFunc
@@ -73,28 +74,23 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	}
 	// The blobs an attach materializes (a packed .app is a full unzipped
 	// copy) are the session's, in a directory of this attach's own under
-	// blobs/: an attach that fails removes that directory again, and
-	// never another attach's blobs in a shared outputDir. blobs/ itself
-	// goes too when this attach made it and it is left empty.
-	blobsRoot := filepath.Join(reportDir, "blobs")
-	_, statErr := os.Stat(blobsRoot)
-	madeRoot := statErr != nil
-	blobDir := filepath.Join(blobsRoot, uuid.New().String())
+	// blobs/. The attach counts as a user of reportDir from here, before
+	// anything is materialized, so another session's detach never removes
+	// blobs/ or bundles/ under an attach still starting. An attach that
+	// fails ends its use again, which removes its blobs/<uuid>.
+	blobDir := filepath.Join(reportDir, "blobs", uuid.New().String())
+	reportKey := canonicalDir(reportDir)
+	s.addReportUser(reportKey)
 	keep := false
 	defer func() {
-		if keep {
-			return
-		}
-		if err := os.RemoveAll(blobDir); err != nil {
-			logger.Warn("attach %s: remove %s: %v", id, blobDir, err)
-		}
-		if madeRoot {
-			_ = os.Remove(blobsRoot) // only when empty
+		if !keep {
+			s.releaseReportDir(reportKey, blobDir, false)
 		}
 	}()
 	if e := s.mapAttachBlobs(&cfg, blobDir); e != nil {
 		return nil, e
 	}
+	cfg.ReportDir = reportDir
 
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
@@ -177,6 +173,8 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	}
 	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}
+	daemonOwned, discard := cfg.OutputDir == "", cfg.DiscardReports
+	a.release = func() { s.releaseReportDir(reportKey, blobDir, daemonOwned && discard) }
 	s.registry.MarkAttached(info)
 	s.events.Publish(Event{Type: "device.attached", Device: id, Message: reportDir})
 	logger.Info("Attached device %s (report %s)", id, reportDir)
@@ -197,11 +195,99 @@ func discardDriver(id string, cleanup func()) {
 // baseCtx is cancelled on detach/shutdown.
 func (a *attached) baseCtx() context.Context { return a.base }
 
-// close ends the session and tears the driver down.
+// close ends the session, tears the driver down and ends the session's
+// use of its report directory.
 func (a *attached) close() {
 	a.cancel()
 	a.session.Close()
 	discardDriver(a.id, a.cleanup)
+	if a.release != nil {
+		a.release()
+	}
+}
+
+// canonicalDir is dir as an absolute path with symlinks resolved, so every
+// spelling of one report directory counts its users together; dir as given
+// when it cannot be resolved.
+func canonicalDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	return filepath.Clean(dir)
+}
+
+// sessionInputDirs are the directories of session inputs (materialized
+// blobs and flow bundles) a report directory holds.
+var sessionInputDirs = []string{"blobs", "bundles"}
+
+// reportUse is how the attached sessions of this daemon use one report
+// directory: how many there are, and which session-input directories the
+// daemon created there (a caller's outputDir may already have its own).
+type reportUse struct {
+	n       int
+	created map[string]bool
+}
+
+// addReportUser counts one more session using reportDir. The first one
+// notes which session-input directories do not exist yet, so the daemon
+// later removes only those it made.
+func (s *Server) addReportUser(reportDir string) {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	if s.reportUsers == nil {
+		s.reportUsers = map[string]*reportUse{}
+	}
+	u := s.reportUsers[reportDir]
+	if u == nil {
+		u = &reportUse{created: map[string]bool{}}
+		for _, sub := range sessionInputDirs {
+			if _, err := os.Stat(filepath.Join(reportDir, sub)); os.IsNotExist(err) {
+				u.created[sub] = true
+			}
+		}
+		s.reportUsers[reportDir] = u
+	}
+	u.n++
+}
+
+// releaseReportDir ends one session's use of reportDir: it removes the
+// session's own blobs/<uuid>, and when no session of this daemon uses the
+// directory any more, the blobs/ and bundles/ the daemon created there
+// (session inputs, not results). discard also removes the whole directory,
+// which only a daemon-owned directory asks for.
+func (s *Server) releaseReportDir(reportDir, blobDir string, discard bool) {
+	if err := os.RemoveAll(blobDir); err != nil {
+		logger.Warn("detach: remove %s: %v", blobDir, err)
+	}
+	// The last user's removal runs under reportMu, which addReportUser
+	// also takes: an attach arriving meanwhile waits, then finds the
+	// directory as the removal left it.
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	u := s.reportUsers[reportDir]
+	if u != nil && u.n > 1 {
+		u.n--
+		return
+	}
+	delete(s.reportUsers, reportDir)
+	if discard {
+		if err := os.RemoveAll(reportDir); err != nil {
+			logger.Warn("detach: discard %s: %v", reportDir, err)
+		}
+		return
+	}
+	for _, sub := range sessionInputDirs {
+		path := filepath.Join(reportDir, sub)
+		if u != nil && !u.created[sub] {
+			continue // the caller's own directory of that name
+		}
+		if err := os.RemoveAll(path); err != nil {
+			logger.Warn("detach: remove %s: %v", path, err)
+		}
+	}
 }
 
 func parseArtifacts(s string) executor.ArtifactMode {

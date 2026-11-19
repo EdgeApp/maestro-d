@@ -17,6 +17,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/report"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
 )
 
@@ -44,6 +45,12 @@ type Driver struct {
 	browser *rod.Browser
 	page    *rod.Page
 	config  Config
+
+	// launcher started Chrome. When ownsProfile is set, go-rod made the
+	// profile under $TMPDIR/rod/user-data, and Close kills Chrome and
+	// removes it; a caller's UserDataDir is never touched.
+	launcher    profileLauncher
+	ownsProfile bool
 
 	findTimeoutMs int
 	clipboard     string
@@ -131,20 +138,28 @@ func New(cfg Config) (*Driver, error) {
 		writeChromePref(dataDir)
 	}
 
+	ownsProfile := cfg.UserDataDir == ""
 	controlURL, err := l.Launch()
 	if err != nil {
+		// Chrome never started, so there is nothing to kill or wait for.
+		if ownsProfile {
+			removeProfileDir(l)
+		}
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 
 	// Connect with NoDefaultDevice so we control the viewport
 	browser := rod.New().ControlURL(controlURL).NoDefaultDevice()
 	if err := browser.Connect(); err != nil {
+		removeProfile(l, ownsProfile)
 		return nil, fmt.Errorf("failed to connect to browser: %w", err)
 	}
 
 	// Create a new page
 	page, err := browser.Page(proto.TargetCreateTarget{})
 	if err != nil {
+		_ = browser.Close()
+		removeProfile(l, ownsProfile)
 		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 
@@ -154,12 +169,16 @@ func New(cfg Config) (*Driver, error) {
 		Height: cfg.ViewportH,
 	})
 	if err != nil {
+		_ = browser.Close()
+		removeProfile(l, ownsProfile)
 		return nil, fmt.Errorf("failed to set viewport: %w", err)
 	}
 
 	// Inject JS helper (persists across navigations)
 	_, err = page.EvalOnNewDocument(jsHelperCode)
 	if err != nil {
+		_ = browser.Close()
+		removeProfile(l, ownsProfile)
 		return nil, fmt.Errorf("failed to inject JS helper: %w", err)
 	}
 
@@ -167,6 +186,8 @@ func New(cfg Config) (*Driver, error) {
 		browser:       browser,
 		page:          page,
 		config:        cfg,
+		launcher:      l,
+		ownsProfile:   ownsProfile,
 		findTimeoutMs: defaultFindTimeoutMs,
 		viewportW:     cfg.ViewportW,
 		viewportH:     cfg.ViewportH,
@@ -335,15 +356,57 @@ func needsDownload(browserDir string) bool {
 	return len(entries) == 0
 }
 
-// Close shuts down the browser. Safe to call multiple times.
+// Close shuts down the browser and, when go-rod made the profile, removes
+// it. Safe to call multiple times.
 func (d *Driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.stopCh)
 		if d.browser != nil {
 			d.closeErr = d.browser.Close()
 		}
+		removeProfile(d.launcher, d.ownsProfile)
 	})
 	return d.closeErr
+}
+
+// profileLauncher is the part of go-rod's *launcher.Launcher that ends a
+// browser and removes its temporary profile.
+type profileLauncher interface {
+	Kill()
+	Cleanup()
+	Get(name flags.Flag) string
+}
+
+// cleanupWait bounds how long removeProfile waits for go-rod's Cleanup,
+// which blocks until Chrome has exited.
+var cleanupWait = 10 * time.Second
+
+// removeProfile kills the browser l started and removes the temporary
+// profile go-rod made for it. A caller-supplied profile (owns false) is
+// left alone.
+func removeProfile(l profileLauncher, owns bool) {
+	if l == nil || !owns {
+		return
+	}
+	l.Kill()
+	done := make(chan struct{})
+	go func() {
+		l.Cleanup()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(cleanupWait):
+	}
+	removeProfileDir(l)
+}
+
+// removeProfileDir deletes the profile directory go-rod chose for l, if it
+// is still there.
+func removeProfileDir(l profileLauncher) {
+	if dir := l.Get(flags.UserDataDir); dir != "" {
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // networkTracker tracks in-flight network requests via CDP Network domain events.

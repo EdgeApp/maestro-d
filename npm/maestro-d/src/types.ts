@@ -339,7 +339,13 @@ export interface AttachOptions {
   commandTimeout?: number
   /** Auto-dismiss system alerts between steps (default true). */
   alertMonitor?: boolean
+  /** Report directory; one you name is never deleted by the daemon. */
   outputDir?: string
+  /**
+   * Delete the daemon-owned report directory at detach. By default it is
+   * kept, and the daemon's housekeeping sweep deletes it after 3 idle days.
+   */
+  discardReports?: boolean
   /** Base directory for relative paths in steps. */
   flowDir?: string
   /**

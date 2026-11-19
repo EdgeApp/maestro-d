@@ -8,3 +8,7 @@ import "os/exec"
 // Tests override via t.Cleanup(func(){ execCommand = exec.Command }) and
 // must not run with t.Parallel().
 var execCommand = exec.Command
+
+// execCommandContext is the same seam over exec.CommandContext, used to
+// start the long-running `xcodebuild test-without-building`.
+var execCommandContext = exec.CommandContext

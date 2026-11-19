@@ -483,8 +483,17 @@ type AttachConfig struct {
 	CommandTimeout     int    `json:"commandTimeout,omitempty"` // ms
 	// AlertMonitor enables the iOS system-alert monitor (default true).
 	AlertMonitor *bool `json:"alertMonitor,omitempty"`
-	// OutputDir overrides the report directory for this device.
+	// OutputDir overrides the report directory for this device. A caller
+	// that names one owns it: the daemon never deletes it.
 	OutputDir string `json:"outputDir,omitempty"`
+	// DiscardReports deletes the daemon-owned report directory at detach.
+	// Without it the directory stays, and the housekeeping sweep deletes it
+	// once it has been idle for reportMaxAge.
+	DiscardReports bool `json:"discardReports,omitempty"`
+	// ReportDir is the report directory the daemon chose for this session,
+	// set before the driver is made so a driver can write beside the
+	// report (the Android trace). Never part of the wire format.
+	ReportDir string `json:"-"`
 	// FlowDir is the base for relative paths in steps — the client's cwd.
 	FlowDir string `json:"flowDir,omitempty"`
 	// Extra holds driver-specific options the wiring may understand

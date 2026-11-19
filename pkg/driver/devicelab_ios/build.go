@@ -48,7 +48,7 @@ func runnerBuildCacheDirFrom(simulatorUDID, sourcePath string) (string, error) {
 		return "", fmt.Errorf("hash runner source: %w", err)
 	}
 	configName := fmt.Sprintf("sim-ios%s-%s", iosVersion, srcHash)
-	return filepath.Join(config.GetCacheDir(), "devicelab-ios-runner-builds", configName), nil
+	return filepath.Join(config.GetCacheDir(), runnerBuildsDirName, configName), nil
 }
 
 // runnerSourceHash returns a short, stable content hash of the vendored runner

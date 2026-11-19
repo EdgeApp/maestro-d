@@ -183,10 +183,10 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 	if err != nil {
 		return nil, fmt.Errorf("session: build report skeleton: %w", err)
 	}
-	if err := report.WriteSkeleton(rc.OutputDir, index, details); err != nil {
+	if err := report.WriteSkeletonFormats(rc.OutputDir, index, details, report.DaemonFormats); err != nil {
 		return nil, fmt.Errorf("session: write report skeleton: %w", err)
 	}
-	iw := report.NewIndexWriter(rc.OutputDir, index)
+	iw := report.NewIndexWriterFormats(rc.OutputDir, index, report.DaemonFormats)
 	iw.Start()
 	detail := &details[0]
 

@@ -97,7 +97,7 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 		TypingFrequency:    cfg.TypingFrequency,
 		WaitForIdleTimeout: 200,
 		Artifacts:          parseArtifactMode(cfg.Artifacts),
-		OutputDir:          cfg.OutputDir,
+		OutputDir:          driverOutputDir(cfg),
 		ShutdownAfter:      false,
 	}
 	if rc.AppiumURL == "" {
@@ -270,4 +270,14 @@ func daemonListDevices(platform string) []daemon.DeviceInfo {
 		})
 	}
 	return out
+}
+
+// driverOutputDir is where a daemon session's driver writes beside the
+// report (the opt-in Android trace): the caller's outputDir, else the
+// report directory the daemon chose.
+func driverOutputDir(cfg daemon.AttachConfig) string {
+	if cfg.OutputDir != "" {
+		return cfg.OutputDir
+	}
+	return cfg.ReportDir
 }

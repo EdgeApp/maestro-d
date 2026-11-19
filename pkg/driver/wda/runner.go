@@ -16,6 +16,7 @@ import (
 
 	goios "github.com/danielpaulus/go-ios/ios"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
@@ -76,6 +77,9 @@ type Runner struct {
 	baseURL             string    // Where WDA answers; "" means localhost:port
 	reach               *reachDeps
 	devicectl           *DevicectlLookup // What devicectl said while Start reached WDA
+	seq                 int64            // This runner's number in the process (result bundle names)
+	resultBundles       []string         // Result bundles this runner's test runs wrote
+	releaseUse          func()           // Removes this runner's in-use stamp
 }
 
 // NewRunner creates a new WDA runner.
@@ -87,6 +91,7 @@ func NewRunner(deviceUDID, teamID, wdaBundleID string) *Runner {
 		teamID:      teamID,
 		wdaBundleID: wdaBundleID,
 		port:        PortFromUDID(deviceUDID),
+		seq:         xcodecache.NextRunnerSeq(),
 	}
 }
 
@@ -213,6 +218,7 @@ func (r *Runner) Build(ctx context.Context) error {
 		return err
 	}
 
+	xcodecache.MarkBuiltHere(r.buildDir)
 	fmt.Println("WebDriverAgent build complete")
 	return nil
 }
@@ -226,6 +232,7 @@ func (r *Runner) buildArguments(projectPath string) []string {
 		"-derivedDataPath", r.derivedDataPath(),
 		"-allowProvisioningUpdates",
 		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
+		xcodecache.NoIndexStoreSetting,
 	}
 	if r.wdaBundleID != "" {
 		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
@@ -250,6 +257,8 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.isSimulatorCache, _ = r.isSimulator()
 
 	logPath := filepath.Join(r.buildDir, "logs", "runner.log")
+
+	r.prepareRun()
 
 	var lastErr error
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
@@ -337,12 +346,14 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 	}
 	r.logFile = logFile
 
-	r.cmd = exec.CommandContext(ctx, "xcodebuild",
-		"test-without-building",
-		"-xctestrun", xctestrun,
-		"-destination", r.destination(),
-		"-derivedDataPath", r.derivedDataPath(),
-	)
+	bundle := xcodecache.ResultBundlePath(r.buildDir, r.seq, attempt)
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		return fmt.Errorf("failed to create results directory: %w", err)
+	}
+	_ = os.RemoveAll(bundle) // xcodebuild refuses an existing path
+	r.resultBundles = append(r.resultBundles, bundle)
+	r.cmd = execCommandContext(ctx, "xcodebuild",
+		wdaTestArgs(xctestrun, r.destination(), r.derivedDataPath(), bundle)...)
 	r.cmd.Stdout = r.logFile
 	r.cmd.Stderr = r.logFile
 
@@ -363,7 +374,9 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 	go func() { exitCh <- cmd.Wait() }()
 
 	if err := r.waitForStartup(logPath, exitCh); err != nil {
-		r.Stop()
+		// This attempt ends; the run (and its in-use stamp) goes on to the
+		// next attempt.
+		r.stopProcess()
 		return err
 	}
 	return nil
@@ -468,6 +481,17 @@ func setPortEnv(target interface{}, portStr string) {
 
 // Stop terminates the running WDA.
 func (r *Runner) Stop() {
+	r.stopProcess()
+	if r.releaseUse != nil {
+		r.releaseUse()
+		r.releaseUse = nil
+	}
+}
+
+// stopProcess ends WDA's port forward, xcodebuild and its result bundles,
+// keeping the build's in-use stamp: a failed start attempt calls it before
+// the next attempt, Stop calls it and then releases the stamp.
+func (r *Runner) stopProcess() {
 	// Stop port forwarding if running (for physical devices)
 	if r.portForwardListener != nil {
 		if err := r.portForwardListener.Close(); err != nil {
@@ -486,6 +510,40 @@ func (r *Runner) Stop() {
 			logger.Warn("failed to close WDA log file: %v", err)
 		}
 		r.logFile = nil
+	}
+	xcodecache.RemoveResultBundles(r.resultBundles)
+	r.resultBundles = nil
+}
+
+// prepareRun readies the build directory for a run: it removes the result
+// bundles of earlier runs that died without Stop and the
+// DerivedData/Logs/Test of runs that predate -resultBundlePath (neither is
+// read again), stamps the build as in use, and prunes sibling builds
+// unused for DefaultMaxAge.
+func (r *Runner) prepareRun() {
+	xcodecache.RemoveOrphanResults(r.buildDir)
+	// Another runner on this build (a second device of the same iOS
+	// version) may be running xcodebuild, which keeps a log store in
+	// Logs/Test; only an unheld build's is left over.
+	if r.releaseUse == nil && !xcodecache.HeldByLiveRunner(r.buildDir) {
+		_ = os.RemoveAll(filepath.Join(r.derivedDataPath(), "Logs", "Test"))
+	}
+	if r.releaseUse == nil {
+		r.releaseUse = xcodecache.StampUse(r.buildDir, r.seq)
+	}
+	xcodecache.PruneBuildCache(filepath.Dir(r.buildDir), r.buildDir, xcodecache.DefaultMaxAge, false)
+}
+
+// wdaTestArgs is the xcodebuild test-without-building command line that
+// runs WebDriverAgent, writing its result bundle (and the session log that
+// grows for as long as WDA runs) to resultBundle.
+func wdaTestArgs(xctestrun, destination, derivedData, resultBundle string) []string {
+	return []string{
+		"test-without-building",
+		"-xctestrun", xctestrun,
+		"-destination", destination,
+		"-derivedDataPath", derivedData,
+		"-resultBundlePath", resultBundle,
 	}
 }
 
@@ -544,6 +602,7 @@ func wdaBuildArgs(projectPath, destination, derivedData, teamID, wdaBundleID str
 		"-derivedDataPath", derivedData,
 		"-allowProvisioningUpdates",
 		fmt.Sprintf("DEVELOPMENT_TEAM=%s", teamID),
+		xcodecache.NoIndexStoreSetting,
 	}
 	if wdaBundleID != "" {
 		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", wdaBundleID))

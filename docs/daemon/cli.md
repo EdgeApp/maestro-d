@@ -285,6 +285,7 @@ curl -H "Authorization: Bearer $T" -H "X-Maestro-Lease: $LEASE" \
 | `status` | daemon pid, version, socket, report dir, idle deadline and its devices; exit 3 when not running |
 | `ps` | every daemon of this user (running or stale) with the devices it holds |
 | `stop [--all] [--timeout N]` | detach every device, shut down the simulators/emulators the daemon booted, exit |
+| `gc [--dry-run] [--json] [--include-build-cache]` | run the housekeeping sweep every daemon runs half a minute after it starts and then hourly (old blobs, idle reports, dead daemons' run dirs, orphaned Chrome profiles) without a daemon; `--include-build-cache` also prunes iOS runner builds unused for 30 days. See [What maestro-d keeps on disk](README.md#what-maestro-d-keeps-on-disk) |
 
 ```sh
 maestro-d start --daemon ci --http 127.0.0.1:7788 --token "$TOKEN"
@@ -309,7 +310,8 @@ maestro-d stop --all
 Attach flags map one to one onto maestro-runner's `test` flags:
 `--platform`, `--driver`, `--app-file`, `--app-id`, `--url`, `--team-id`,
 `--wda-bundle-id`, `--appium-url`, `--caps`, `-e/--env`, `--env-file`,
-`--artifacts all|none|on-failure`, `--output-dir`, `--no-app-install`,
+`--artifacts all|none|on-failure`, `--output-dir`, `--discard-reports`,
+`--no-app-install`,
 `--no-driver-install`, `--driver-start-timeout`, `--wait-for-idle-timeout`,
 `--condition-timeout`, `--step-delay`, `--typing-frequency`,
 `--command-timeout`, `--new-command-timeout`, `--alert-monitor[=false]`,
@@ -391,6 +393,8 @@ maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 | `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `serve`/`hub start` `--tls-cert`/`--tls-key` |
 | `MAESTRO_D_LISTEN` | default `hub start --listen` |
 | `MAESTRO_D_MOCK_DEVICES` | tests only: `mock-1,mock-2` lists those mock-driver devices as ready, so leases and selectors see them (the mock driver attaches any id but lists none) |
+| `MAESTRO_D_HOUSEKEEPING_INTERVAL` | how often a running daemon sweeps its home (a Go duration, default `1h`) |
+| `MAESTRO_D_ANDROID_TRACE` | `1` makes the Android drivers write a redacted, capped `client.log` into the report directory |
 | `MAESTRO_RUNNER_HOME` | install home: `bin/`, `drivers/`, `cache/`, `browsers/` (default: the parent of the binary's `bin/`, i.e. `~/.maestro-d`). Upstream's variable, upstream's name |
 
 ## Recipes

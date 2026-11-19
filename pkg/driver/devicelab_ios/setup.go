@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
@@ -51,9 +52,13 @@ type SetupOptions struct {
 
 // RunnerHandle owns the running xcodebuild subprocess and the chosen port.
 type RunnerHandle struct {
-	cmd  *exec.Cmd
-	port int
-	host string
+	// resultBundle is this run's -resultBundlePath; Stop deletes it.
+	resultBundle string
+	// releaseUse removes the runner's in-use stamp from its build cache.
+	releaseUse func()
+	cmd        *exec.Cmd
+	port       int
+	host       string
 	// waitDone closes once the subprocess exits; waitErr holds cmd.Wait's
 	// result (written before the close). The watch goroutine in startOnce
 	// is the single Wait owner — Stop must select on waitDone instead of
@@ -97,7 +102,49 @@ func (h *RunnerHandle) Stop() error {
 		_ = h.cmd.Process.Kill()
 		<-done
 	}
+	if h.resultBundle != "" {
+		xcodecache.RemoveResultBundles([]string{h.resultBundle})
+	}
+	if h.releaseUse != nil {
+		h.releaseUse()
+		h.releaseUse = nil
+	}
 	return nil
+}
+
+// prepareRunnerCache readies the runner's build cache for a run: it
+// removes the result bundles of runs that ended without Stop and the
+// default DerivedData folders that test runs without -derivedDataPath
+// left, stamps the cache as in use, and prunes sibling builds unused for
+// DefaultMaxAge. It returns this runner's sequence number and the func
+// that removes its in-use stamp.
+func prepareRunnerCache(artifactsDir string) (int64, func()) {
+	xcodecache.RemoveOrphanResults(artifactsDir)
+	// The test run's log store (-derivedDataPath <artifactsDir>) is left
+	// over from earlier runs, unless another live runner holds this build.
+	if !xcodecache.HeldByLiveRunner(artifactsDir) {
+		_ = os.RemoveAll(filepath.Join(artifactsDir, "Logs", "Test"))
+	}
+	xcodecache.RemoveStaleDerivedData("DevicelabIOSRunner-", 24*time.Hour)
+	seq := xcodecache.NextRunnerSeq()
+	release := xcodecache.StampUse(artifactsDir, seq)
+	if parent := filepath.Dir(artifactsDir); filepath.Base(parent) == runnerBuildsDirName {
+		xcodecache.PruneBuildCache(parent, artifactsDir, xcodecache.DefaultMaxAge, false)
+	}
+	return seq, release
+}
+
+// testArgs is the xcodebuild test-without-building command line that runs
+// the runner, with its DerivedData and result bundle kept under the
+// runner's own build cache.
+func testArgs(xctestrun, destination, derivedData, resultBundle string) []string {
+	return []string{
+		"test-without-building",
+		"-xctestrun", xctestrun,
+		"-destination", destination,
+		"-derivedDataPath", derivedData,
+		"-resultBundlePath", resultBundle,
+	}
 }
 
 // maxStartupAttempts caps the retry loop in Setup. On CI macos-latest
@@ -186,6 +233,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 		return nil, nil, fmt.Errorf("install host app: %w", err)
 	}
 
+	seq, releaseUse := prepareRunnerCache(opts.ArtifactsDir)
 	var lastErr error
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
 		if attempt > 1 {
@@ -217,21 +265,24 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 			}
 		}
 
-		client, handle, err := startOnce(ctx, opts, xctestrun, logPath)
+		client, handle, err := startOnce(ctx, opts, xctestrun, logPath, xcodecache.ResultBundlePath(opts.ArtifactsDir, seq, attempt))
 		if err == nil {
 			if attempt > 1 {
 				fmt.Fprintf(os.Stderr, "  ✓ Runner started on attempt %d/%d\n", attempt, maxStartupAttempts)
 			}
+			handle.releaseUse = releaseUse
 			return client, handle, nil
 		}
 		// Deterministic configuration failures won't be fixed by retrying —
 		// report the real error immediately (#118).
 		var perm *permanentStartupError
 		if errors.As(err, &perm) {
+			releaseUse()
 			return nil, nil, fmt.Errorf("runner failed to start: %w", err)
 		}
 		lastErr = err
 	}
+	releaseUse()
 	return nil, nil, fmt.Errorf(
 		"runner not ready after %d attempts: %w",
 		maxStartupAttempts, lastErr,
@@ -243,7 +294,7 @@ func Setup(ctx context.Context, opts SetupOptions) (*Client, *RunnerHandle, erro
 // stallDetectWindow) it kills xcodebuild and returns an error tagged
 // for retry. On other errors it also kills + returns. Caller (Setup)
 // owns the retry decision.
-func startOnce(ctx context.Context, opts SetupOptions, xctestrun, logPath string) (*Client, *RunnerHandle, error) {
+func startOnce(ctx context.Context, opts SetupOptions, xctestrun, logPath, resultBundle string) (*Client, *RunnerHandle, error) {
 	// Fresh port per attempt — the previous attempt's killed XCTest may
 	// still hold the old port in TIME_WAIT on the simulator side.
 	port, err := pickEphemeralPort()
@@ -264,12 +315,15 @@ func startOnce(ctx context.Context, opts SetupOptions, xctestrun, logPath string
 		"platform=iOS Simulator,arch=%s,id=%s",
 		simulator.XcodebuildArch(runtime.GOARCH), opts.SimulatorUDID,
 	)
-	cmd := exec.Command(
-		"xcodebuild",
-		"test-without-building",
-		"-xctestrun", xctestrun,
-		"-destination", destination,
-	)
+	if err := os.MkdirAll(filepath.Dir(resultBundle), 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create results directory: %w", err)
+	}
+	_ = os.RemoveAll(resultBundle) // xcodebuild refuses an existing path
+	// The runner outlives ctx (Stop ends it), so the command is not bound
+	// to it. -derivedDataPath keeps Xcode from making a DerivedData folder
+	// per extraction path under ~/Library/Developer/Xcode/DerivedData.
+	cmd := execCommandContext(context.Background(), "xcodebuild",
+		testArgs(xctestrun, destination, opts.ArtifactsDir, resultBundle)...)
 	cmd.Stdout = opts.Stdout
 	cmd.Stderr = opts.Stderr
 	setProcessGroup(cmd)
@@ -283,7 +337,7 @@ func startOnce(ctx context.Context, opts SetupOptions, xctestrun, logPath string
 	// identical to a hang: the log stopped growing and the stall detector
 	// misreported it 60s later, burning blind retries (#118). This
 	// goroutine is the single cmd.Wait owner — Stop selects on waitDone.
-	handle := &RunnerHandle{cmd: cmd, port: port, host: "127.0.0.1", waitDone: make(chan struct{})}
+	handle := &RunnerHandle{cmd: cmd, port: port, host: "127.0.0.1", waitDone: make(chan struct{}), resultBundle: resultBundle}
 	go func() {
 		handle.waitErr = cmd.Wait()
 		close(handle.waitDone)

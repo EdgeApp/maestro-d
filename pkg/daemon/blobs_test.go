@@ -107,40 +107,6 @@ func TestBlobStore_ConcurrentPutsOfOneHash(t *testing.T) {
 	}
 }
 
-func TestBlobStore_Expire(t *testing.T) {
-	b := NewBlobStore(t.TempDir())
-	old, fresh := []byte("old"), []byte("fresh")
-	for _, d := range [][]byte{old, fresh} {
-		if _, e := b.Put(sha(d), "", bytes.NewReader(d)); e != nil {
-			t.Fatal(e)
-		}
-	}
-	if _, e := b.Put(sha([]byte("partial!")), "bytes 0-1/8", strings.NewReader("pa")); e != nil {
-		t.Fatal(e)
-	}
-	past := time.Now().Add(-8 * 24 * time.Hour)
-	_ = os.Chtimes(b.path(sha(old)), past, past)
-	_ = os.Chtimes(b.partial(sha([]byte("partial!"))), past, past)
-	if n := b.Expire(BlobExpiry); n != 2 {
-		t.Fatalf("expired %d, want 2", n)
-	}
-	if _, ok := b.Has(sha(old)); ok {
-		t.Fatal("old blob kept")
-	}
-	if _, ok := b.Has(sha(fresh)); !ok {
-		t.Fatal("fresh blob removed")
-	}
-	// Using a blob refreshes it.
-	_ = os.Chtimes(b.path(sha(fresh)), past, past)
-	b.Has(sha(fresh))
-	if n := b.Expire(BlobExpiry); n != 0 {
-		t.Fatal("a blob just used was expired")
-	}
-	if NewBlobStore(filepath.Join(t.TempDir(), "none")).Expire(BlobExpiry) != 0 {
-		t.Fatal("empty store")
-	}
-}
-
 func zipBytes(t *testing.T, entries map[string]string, extra func(*zip.Writer)) []byte {
 	t.Helper()
 	var buf bytes.Buffer

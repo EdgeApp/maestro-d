@@ -443,6 +443,7 @@ func daemonCommands() []*cli.Command {
 		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
 		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
+		gcCommand,
 	}, oneShotCommands()...)
 }
 
@@ -593,6 +594,7 @@ var daemonServeCommand = &cli.Command{
 		}
 		defer logger.Close()
 		srv := daemon.New(daemon.Config{
+			KeepRunDir:  serviceInstalled,
 			Name:        o.Name,
 			HTTPAddr:    o.HTTPAddr,
 			Token:       o.Token,
