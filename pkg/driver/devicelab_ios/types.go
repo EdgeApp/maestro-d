@@ -69,6 +69,10 @@ const (
 	// so these are what make dark mode work on physical devices.
 	CmdAppearance    CommandType = "appearance"
 	CmdSetAppearance CommandType = "setAppearance"
+	// Local extension: read the app's XCUIApplication.state. A runner
+	// lifecycle command, so unlike a snapshot it never activates the app to
+	// read it, nor delays the next interaction.
+	CmdAppState CommandType = "appState"
 )
 
 // Command is the wire request envelope. Mirrors the Swift Command struct

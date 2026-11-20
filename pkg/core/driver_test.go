@@ -425,3 +425,38 @@ func TestLogEntry_Fields(t *testing.T) {
 		t.Errorf("Message = %s, want 'App crashed'", entry.Message)
 	}
 }
+
+// --- ScreenshotSpace tests ---
+
+// sizedDriver is a driver whose screenshots cover an area of their own size.
+type sizedDriver struct {
+	stubDriver
+	width, height int
+}
+
+func (s *sizedDriver) ScreenshotSize() (int, int, error) { return s.width, s.height, nil }
+
+// screenDriver reports a screen size and no screenshot size.
+type screenDriver struct{ stubDriver }
+
+func (s *screenDriver) GetPlatformInfo() *PlatformInfo {
+	return &PlatformInfo{ScreenWidth: 390, ScreenHeight: 844}
+}
+
+func TestScreenshotSpace(t *testing.T) {
+	cases := []struct {
+		name          string
+		driver        Driver
+		width, height int
+	}{
+		{"screenshot size", &sizedDriver{width: 1009, height: 2000}, 1009, 2000},
+		{"screen size", &screenDriver{}, 390, 844},
+		{"unknown", &stubDriver{}, 0, 0},
+	}
+	for _, c := range cases {
+		width, height, err := ScreenshotSpace(c.driver)
+		if err != nil || width != c.width || height != c.height {
+			t.Errorf("%s: got %dx%d, %v; want %dx%d", c.name, width, height, err, c.width, c.height)
+		}
+	}
+}

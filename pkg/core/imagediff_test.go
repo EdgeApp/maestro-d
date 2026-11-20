@@ -259,3 +259,17 @@ func TestWriteScreenshotDiff_DrawsRectangleOverlay(t *testing.T) {
 		t.Error("expected a red rectangle border around the differing region")
 	}
 }
+
+func TestImageSize(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 3, 7))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := ImageSize(buf.Bytes()); err != nil || size != image.Pt(3, 7) {
+		t.Errorf("got %v, %v", size, err)
+	}
+	if _, err := ImageSize([]byte("not an image")); err == nil {
+		t.Error("bad data must fail")
+	}
+}

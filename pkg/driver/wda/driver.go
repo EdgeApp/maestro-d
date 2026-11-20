@@ -73,6 +73,9 @@ type Driver struct {
 
 	// Last viewport read from WDA's /window/size; see orientedSize.
 	viewport viewportCache
+
+	// foreground runs GetState's foreground-app lookups (maestro-d).
+	foreground core.ForegroundProbe
 }
 
 // viewportCache holds the app's viewport in interface-orientation points, as
@@ -530,6 +533,9 @@ func (d *Driver) GetState() *core.StateSnapshot {
 	if orientation, err := d.client.GetOrientation(); err == nil {
 		state.Orientation = strings.ToLower(orientation)
 	}
+
+	// WDA does not keep the session's app, so only foregroundApp is reported.
+	state.SetForeground(d.foreground.Lookup(d.client.ActiveAppID), "")
 
 	return state
 }

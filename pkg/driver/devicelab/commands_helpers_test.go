@@ -3285,3 +3285,49 @@ func TestTapOn_BlockedByOverlay_ReportsCause(t *testing.T) {
 		t.Error("expected the hit test to be requested by default")
 	}
 }
+
+func TestDriver_GetStateForegroundApp(t *testing.T) {
+	client := &richClient{trackingClient: newTrackingClient(), orientation: "PORTRAIT"}
+	shell := &mockShell{out: "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"}
+	driver := New(client, &core.PlatformInfo{}, shell)
+	if state := driver.GetState(); state.ForegroundApp != "app.teamstation.app" || state.AppState != "" {
+		t.Errorf("with no app launched only foregroundApp is known: %+v", state)
+	}
+	driver.currentAppID = "app.teamstation.app"
+	if state := driver.GetState(); state.ForegroundApp != "app.teamstation.app" || state.AppState != "foreground" {
+		t.Errorf("got %+v", state)
+	}
+	driver.currentAppID = "app.other"
+	if state := driver.GetState(); state.AppState != "background" {
+		t.Errorf("another app in front is not the app in the foreground: %+v", state)
+	}
+	shell.err = errors.New("adb gone")
+	if state := New(client, &core.PlatformInfo{}, shell).GetState(); state.ForegroundApp != "" {
+		t.Errorf("a failed shell should leave the field absent: %+v", state)
+	}
+	if state := New(client, &core.PlatformInfo{}, nil).GetState(); state.ForegroundApp != "" {
+		t.Errorf("no shell should leave the field absent: %+v", state)
+	}
+}
+
+// deadlineShell is a device shell that takes a context, as AndroidDevice does.
+type deadlineShell struct {
+	mockShell
+	hasLimit bool
+}
+
+func (m *deadlineShell) ShellContext(ctx context.Context, cmd string) (string, error) {
+	_, m.hasLimit = ctx.Deadline()
+	return m.Shell(cmd)
+}
+
+func TestDriver_GetStateForegroundShellGetsTheLimit(t *testing.T) {
+	client := &richClient{trackingClient: newTrackingClient(), orientation: "PORTRAIT"}
+	shell := &deadlineShell{mockShell: mockShell{out: "  topResumedActivity=ActivityRecord{1a u0 app.teamstation.app/.Main t9}"}}
+	if state := New(client, &core.PlatformInfo{}, shell).GetState(); state.ForegroundApp != "app.teamstation.app" {
+		t.Fatalf("got %+v", state)
+	}
+	if !shell.hasLimit {
+		t.Error("the shell should run under the lookup's limit")
+	}
+}

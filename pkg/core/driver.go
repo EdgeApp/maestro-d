@@ -42,6 +42,36 @@ type Driver interface {
 	SetContext(ctx context.Context)
 }
 
+// ElementLocator is a driver whose visibility check leaves bounds empty, and so
+// has a separate way to find an element with them.
+type ElementLocator interface {
+	LocateElement(sel flow.Selector) (*ElementInfo, error)
+}
+
+// ScreenshotSizer is a driver whose screenshots cover an area other than the
+// screen size its platform info reports, such as a whole web page, or an
+// Android display whose reported window leaves out the navigation bar.
+// ScreenshotSize is that area's size in the units of the element bounds it
+// reports.
+type ScreenshotSizer interface {
+	ScreenshotSize() (width, height int, err error)
+}
+
+// ScreenshotSpace is the size, in the units of d's element bounds, of the area
+// d's screenshots cover, which scales those bounds onto a screenshot: its
+// ScreenshotSize when d is a ScreenshotSizer, otherwise its screen size. It is
+// zero when the size is unknown.
+func ScreenshotSpace(d Driver) (width, height int, err error) {
+	if sizer, ok := d.(ScreenshotSizer); ok {
+		return sizer.ScreenshotSize()
+	}
+	info := d.GetPlatformInfo()
+	if info == nil {
+		return 0, 0, nil
+	}
+	return info.ScreenWidth, info.ScreenHeight, nil
+}
+
 // CommandResult represents the outcome of executing a single command
 type CommandResult struct {
 	// Core outcome
@@ -162,6 +192,7 @@ func HasNonASCII(text string) bool {
 // StateSnapshot captures the current device/app state
 type StateSnapshot struct {
 	AppState        string       `json:"appState,omitempty"`        // foreground, background, not_running
+	ForegroundApp   string       `json:"foregroundApp,omitempty"`   // Bundle or package id in front
 	Orientation     string       `json:"orientation,omitempty"`     // portrait, landscape
 	KeyboardVisible bool         `json:"keyboardVisible"`           // Is keyboard shown
 	FocusedElement  *ElementInfo `json:"focusedElement,omitempty"`  // Currently focused element

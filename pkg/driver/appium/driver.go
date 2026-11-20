@@ -30,6 +30,12 @@ type Driver struct {
 	warnedFields              map[string]bool
 	appVersion                string // version name, supplied by the caller
 	appBuild                  string // build number, supplied by the caller
+
+	// foreground runs GetState's foreground-app lookups (maestro-d).
+	foreground core.ForegroundProbe
+	// launchedAppID is the app launchApp last started, which may not be the
+	// session's own (maestro-d). GetState's appState compares with it.
+	launchedAppID string
 }
 
 // NewDriver creates a new Appium driver.
@@ -230,10 +236,41 @@ func (d *Driver) GetState() *core.StateSnapshot {
 	orientation, _ := d.client.GetOrientation()
 	clipboard, _ := d.client.GetClipboard()
 
-	return &core.StateSnapshot{
+	state := &core.StateSnapshot{
 		Orientation:   orientation,
 		ClipboardText: clipboard,
 	}
+	state.SetForeground(d.foreground.Lookup(d.foregroundApp), d.sessionAppID())
+	return state
+}
+
+// sessionAppID is the session's app for appState: the one last launched, or
+// the capabilities' app before any launch.
+func (d *Driver) sessionAppID() string {
+	if d.launchedAppID != "" {
+		return d.launchedAppID
+	}
+	return d.appID
+}
+
+// foregroundApp asks Appium which app is in front, per platform. The request
+// is abandoned when ctx ends.
+func (d *Driver) foregroundApp(ctx context.Context) (string, error) {
+	if d.platform == "ios" {
+		value, err := d.client.ExecuteMobileContext(ctx, "activeAppInfo", map[string]interface{}{})
+		if err != nil {
+			return "", err
+		}
+		info, _ := value.(map[string]interface{})
+		id, _ := info["bundleId"].(string)
+		return id, nil
+	}
+	value, err := d.client.ExecuteMobileContext(ctx, "getCurrentPackage", map[string]interface{}{})
+	if err != nil {
+		return "", err
+	}
+	id, _ := value.(string)
+	return id, nil
 }
 
 // GetPlatformInfo implements core.Driver.
@@ -251,6 +288,31 @@ func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
 		AppVersion:   d.appVersion,
 		AppBuild:     d.appBuild,
 	}
+}
+
+// ScreenshotSize implements core.ScreenshotSizer: the size, in the units of
+// element bounds, of the area a screenshot covers. On iOS that is the window
+// size GetPlatformInfo reports, in points. On Android, bounds and screenshots
+// are both in pixels of the whole display, but the window size UiAutomator2
+// reports leaves out the navigation bar, so it is the real display size from
+// mobile: deviceInfo; scaling masks by the shorter window would push one near
+// the bottom of the screen 100 px or more too low.
+func (d *Driver) ScreenshotSize() (int, int, error) {
+	if d.platform == "ios" {
+		w, h := d.client.ScreenSize()
+		return w, h, nil
+	}
+	value, err := d.client.ExecuteMobile("deviceInfo", map[string]interface{}{})
+	if err != nil {
+		return 0, 0, fmt.Errorf("device info: %w", err)
+	}
+	info, _ := value.(map[string]interface{})
+	size, _ := info["realDisplaySize"].(string)
+	var w, h int
+	if _, err := fmt.Sscanf(size, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+		return 0, 0, fmt.Errorf("device info has no real display size (%q)", size)
+	}
+	return w, h, nil
 }
 
 // SetAppInfo records the app's version name and build number for reports.

@@ -57,6 +57,11 @@ enum CommandType: String, Codable {
   // Local extension: set the device's light/dark appearance. Takes
   // `appearance` as "dark" or "light".
   case setAppearance
+  // Local extension: read appBundleId's XCUIApplication.state into
+  // `appState`. A lifecycle command, so the app is never activated to read
+  // it (a crashed app reads notRunning, a backgrounded one runningBackground)
+  // and the next interaction is not delayed.
+  case appState
 }
 
 struct Command: Codable {
@@ -150,11 +155,12 @@ struct DataPayload: Codable {
   // Local extension: "dark" or "light" from the appearance command.
   let appearance: String?
   // Local extension (DeviceDeck): the target app's XCUIApplication.state
-  // at snapshot time — "runningForeground", "runningBackground",
-  // "runningBackgroundSuspended", "notRunning" or "unknown". A snapshot
-  // is not an interaction command, so it is never auto-activated first;
-  // this is the app's true state, which no signal in the node tree
-  // reports reliably (hittable oscillates while a screen backgrounds).
+  // — "runningForeground", "runningBackground",
+  // "runningBackgroundSuspended", "notRunning" or "unknown" — which no
+  // signal in the node tree reports reliably (hittable oscillates while a
+  // screen backgrounds). A snapshot reports it after activating a target
+  // that is not in front, so it then reads runningForeground; the appState
+  // command reports it without activating anything.
   let appState: String?
 
   init(

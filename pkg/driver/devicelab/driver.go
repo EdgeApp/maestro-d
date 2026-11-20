@@ -108,6 +108,9 @@ type Driver struct {
 	// mid-flow death can be explained rather than surfacing as "not found".
 	currentAppID string
 
+	// foreground runs GetState's foreground-app lookups (maestro-d).
+	foreground core.ForegroundProbe
+
 	// Parent context for element-finding operations (nil = context.Background())
 	ctx context.Context
 
@@ -664,6 +667,8 @@ func (d *Driver) GetState() *core.StateSnapshot {
 	if clipboard, err := d.client.GetClipboard(); err == nil {
 		state.ClipboardText = clipboard
 	}
+
+	state.SetForeground(core.AndroidForegroundApp(&d.foreground, d.device), d.currentAppID)
 
 	return state
 }

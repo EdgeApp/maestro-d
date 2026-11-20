@@ -3,8 +3,10 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -222,6 +224,16 @@ func (d *AndroidDevice) ADBPath() string {
 // Shell executes a shell command on the device.
 func (d *AndroidDevice) Shell(cmd string) (string, error) {
 	return d.adb("shell", cmd)
+}
+
+// maestro-d: ShellContext is Shell whose adb process is killed when ctx
+// ends, so a call against a hung adb does not outlive its caller's deadline.
+func (d *AndroidDevice) ShellContext(ctx context.Context, command string) (string, error) {
+	cmd := execCommandContext(ctx, d.adbPath, d.adbArgs("shell", command)...)
+	// A killed adb can leave a child holding its output open; don't wait on it.
+	cmd.WaitDelay = time.Second
+	out, err := d.runADB(cmd, []string{"shell", command})
+	return string(out), err
 }
 
 // Screenshot captures the physical display through ADB.
@@ -463,13 +475,20 @@ func (d *AndroidDevice) adb(args ...string) (string, error) {
 }
 
 func (d *AndroidDevice) adbOutput(args ...string) ([]byte, error) {
+	return d.runADB(execCommand(d.adbPath, d.adbArgs(args...)...), args)
+}
+
+// adbArgs prefixes args with the device's serial, when it has one.
+func (d *AndroidDevice) adbArgs(args ...string) []string {
 	cmdArgs := make([]string, 0, len(args)+2)
 	if d.serial != "" {
 		cmdArgs = append(cmdArgs, "-s", d.serial)
 	}
-	cmdArgs = append(cmdArgs, args...)
+	return append(cmdArgs, args...)
+}
 
-	cmd := execCommand(d.adbPath, cmdArgs...)
+// runADB runs an adb command built from args and returns its stdout.
+func (d *AndroidDevice) runADB(cmd *exec.Cmd, args []string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

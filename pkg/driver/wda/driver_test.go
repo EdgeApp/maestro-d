@@ -6139,3 +6139,71 @@ func TestInputTextFailsWhenNothingTakesFocus(t *testing.T) {
 		t.Errorf("error should name the missing focus, got %q", result.Message)
 	}
 }
+
+func TestGetStateForegroundApp(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/wda/activeAppInfo"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"value": map[string]interface{}{"bundleId": "app.teamstation.app"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/orientation"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": "PORTRAIT"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	state := createTestDriver(server).GetState()
+	if state.ForegroundApp != "app.teamstation.app" || state.AppState != "" {
+		t.Errorf("WDA does not know the session's app, so appState stays absent: %+v", state)
+	}
+	if state.Orientation != "portrait" {
+		t.Errorf("existing fields must keep their values: %+v", state)
+	}
+}
+
+func TestGetStateBadActiveAppInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": "unexpected"})
+	}))
+	defer server.Close()
+	if state := createTestDriver(server).GetState(); state.ForegroundApp != "" || state.AppState != "" {
+		t.Errorf("a bad reply should leave the fields absent: %+v", state)
+	}
+}
+
+func TestActiveAppIDFailsCleanly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	if id, err := createTestDriver(server).client.ActiveAppID(context.Background()); err == nil {
+		t.Errorf("expected an error, got %q", id)
+	}
+}
+
+// The foreground lookup's request ends with its context, so GetState giving
+// up leaves no request running on the device.
+func TestActiveAppIDHonoursItsContext(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := createTestDriver(server).client.ActiveAppID(ctx); err == nil {
+		t.Error("a cancelled request should fail")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the request outlived its context: %v", elapsed)
+	}
+}

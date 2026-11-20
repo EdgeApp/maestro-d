@@ -22,6 +22,9 @@ type Driver struct {
 	// In-flight --record capture (simulators only)
 	recording *simulator.Recording
 
+	// foreground runs GetState's app-state lookups (maestro-d).
+	foreground core.ForegroundProbe
+
 	// Parent context for element-finding operations.
 	ctx context.Context
 
@@ -111,7 +114,33 @@ func (d *Driver) Hierarchy() ([]byte, error) {
 // keyboard / clipboard separately on every call; the report includes what
 // the runner gave us during the most recent snapshot.
 func (d *Driver) GetState() *core.StateSnapshot {
-	return &core.StateSnapshot{}
+	state := &core.StateSnapshot{}
+	if d.client == nil || d.appID == "" {
+		return state
+	}
+	// The runner reports the target app's own state through its appState
+	// command, a lifecycle command: unlike a snapshot, which activates a
+	// target that is not in front before reading it, it never touches the
+	// app, so a crashed or backgrounded app reads as what it is, a viewer
+	// polling the state never changes the device mid-flow, and the next tap
+	// is not delayed. The call runs under the lookup's own limit, not
+	// callTimeout's ten seconds, so it ends when GetState gives up on it.
+	runnerState := d.foreground.Lookup(func(ctx context.Context) (string, error) {
+		data, err := d.client.Call(ctx, Command{Command: CmdAppState, AppBundleID: d.appID})
+		if err != nil || data == nil {
+			return "", err
+		}
+		return data.AppState, nil
+	})
+	switch runnerState {
+	case "runningForeground":
+		state.SetForeground(d.appID, d.appID)
+	case "runningBackground", "runningBackgroundSuspended":
+		state.AppState = "background"
+	case "notRunning":
+		state.AppState = "not_running"
+	}
+	return state
 }
 
 // GetPlatformInfo returns the cached PlatformInfo built during setup.

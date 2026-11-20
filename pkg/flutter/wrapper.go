@@ -677,3 +677,25 @@ func (d *FlutterDriver) DetectWebView() (*core.WebViewInfo, error) {
 
 // Inner returns the underlying driver for optional interface access.
 func (d *FlutterDriver) Inner() core.Driver { return d.inner }
+
+// LocateElement passes through to the wrapped driver, so a real element lookup
+// is not hidden by the wrapper. When the wrapped driver has no lookup, or its
+// lookup finds nothing with a size, the wrapper's own visibility check answers,
+// with the Flutter VM-service fallback assertVisible gets, and its result
+// carries the bounds.
+func (d *FlutterDriver) LocateElement(sel flow.Selector) (*core.ElementInfo, error) {
+	if locator, ok := d.inner.(core.ElementLocator); ok {
+		element, err := locator.LocateElement(sel)
+		if err == nil && element != nil && element.Bounds.Width > 0 && element.Bounds.Height > 0 {
+			return element, nil
+		}
+	}
+	found := d.Execute(&flow.AssertVisibleStep{
+		BaseStep: flow.BaseStep{StepType: flow.StepAssertVisible},
+		Selector: sel,
+	})
+	if !found.Success {
+		return nil, fmt.Errorf("%s", found.Message)
+	}
+	return found.Element, nil
+}

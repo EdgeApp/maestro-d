@@ -175,6 +175,27 @@ func TestPackFlow_Errors(t *testing.T) {
 	}
 }
 
+// assertScreenshot's captureOut is an output: the pack refuses one that is
+// absolute or leaves the flow's directory, as it does takeScreenshot's path,
+// rather than leaving the caller policy to refuse it mid-run.
+func TestPackFlow_CaptureOutIsAnOutput(t *testing.T) {
+	dir := tree(t, t.TempDir(), map[string]string{
+		"ref.png":     "png",
+		"abs.yaml":    "- assertScreenshot:\n    path: ref.png\n    captureOut: /tmp/x.png\n",
+		"up.yaml":     "- assertScreenshot:\n    path: ref.png\n    captureOut: ../out/x.png\n",
+		"inside.yaml": "- assertScreenshot:\n    path: ref.png\n    captureOut: out/x.png\n",
+	})
+	p := func(n string) string { return filepath.Join(dir, n) }
+	_, err := packFlow([]string{p("abs.yaml")}, packFlowOpts{})
+	wantUsage(t, err, "output paths must be relative", "captureOut")
+	_, err = packFlow([]string{p("up.yaml")}, packFlowOpts{})
+	wantUsage(t, err, "may not contain ..", "captureOut")
+	b, err := packFlow([]string{p("inside.yaml")}, packFlowOpts{})
+	if err != nil || keys(b.Manifest.Files) != "inside.yaml,ref.png" {
+		t.Fatalf("a relative captureOut packs cleanly: %v %v", err, b)
+	}
+}
+
 func TestPackFlow_Base(t *testing.T) {
 	cwd := tree(t, t.TempDir(), map[string]string{
 		"photo.png":     "png",

@@ -58,7 +58,7 @@ type CallerPolicy struct {
 	// restored afterwards.
 	FlowDir string
 	// OutputsDir receives the files a remote call's output fields write
-	// (takeScreenshot.path, saveAuthState.path).
+	// (takeScreenshot.path, saveAuthState.path, assertScreenshot.captureOut).
 	OutputsDir string
 	// ClientOutputs marks a local caller that names its outputs itself (a
 	// client targeting this daemon over loopback TCP): its relative output
@@ -130,7 +130,7 @@ const (
 var policyFieldTable = map[string]map[string]fieldKind{
 	"addMedia":         {"files": fieldInput},
 	"runScript":        {"script": fieldInput, "file": fieldInput},
-	"assertScreenshot": {"path": fieldInput},
+	"assertScreenshot": {"path": fieldInput, "captureOut": fieldOutput},
 	"runBrowserScript": {"file": fieldInput},
 	"runWebViewScript": {"file": fieldInput},
 	"uploadFile":       {"path": fieldInput, "paths": fieldInput},
@@ -800,6 +800,7 @@ func (se *ScriptEngine) policyStep(step flow.Step) {
 		if s.Path != "" {
 			se.screenshotRef(den("assertScreenshot", "path", s.Path), &s.Path)
 		}
+		out("assertScreenshot", "captureOut", &s.CaptureOut)
 	case *flow.RunBrowserScriptStep:
 		in("runBrowserScript", "file", &s.File)
 	case *flow.RunWebViewScriptStep:

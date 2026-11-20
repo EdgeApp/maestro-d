@@ -45,7 +45,7 @@ func TestPolicyFields_CoversEveryPathField(t *testing.T) {
 	got := PolicyFields()
 	want := map[string][]string{
 		"addMedia":         {"files"},
-		"assertScreenshot": {"path"},
+		"assertScreenshot": {"captureOut", "path"},
 		"loadAuthState":    {"path"},
 		"retry":            {"file"},
 		"runBrowserScript": {"file"},

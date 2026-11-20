@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,14 @@ const (
 	defaultViewportW           = 1280
 	defaultViewportH           = 800
 )
+
+// How long a tap's native click may wait for its element to be interactable
+// before the tap falls back to a JS click.
+const defaultClickTimeout = 5 * time.Second
+
+// finePointerSettings are the Blink settings of a mouse: a fine primary
+// pointer and hover (pointer type 4 is fine, hover type 2 is hover).
+const finePointerSettings = "primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2"
 
 // Config holds browser driver configuration.
 type Config struct {
@@ -118,6 +127,13 @@ func New(cfg Config) (*Driver, error) {
 	// Disable the sandbox only under CI or when explicitly requested.
 	if os.Getenv("CI") != "" || os.Getenv("MAESTRO_NO_SANDBOX") != "" {
 		l = l.Set("no-sandbox")
+	}
+	// Headless Chrome on Linux, with no input device, reports no fine
+	// pointer and no hover, so a page takes it for a touch screen: Enter in
+	// a composer stops sending and menus open their touch forms. A Mac's
+	// headless Chrome reports a mouse; this makes Linux's do the same.
+	if cfg.Headless && runtime.GOOS == "linux" {
+		l = l.Set("blink-settings", finePointerSettings)
 	}
 	if cfg.UserDataDir != "" {
 		// Persistent profile: cookies / localStorage / extensions survive
@@ -683,6 +699,80 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 // Screenshot captures the current page as PNG.
 func (d *Driver) Screenshot() ([]byte, error) {
 	return d.page.Screenshot(true, nil)
+}
+
+// LocateElement finds sel's element with its bounds where a screenshot shows
+// it, which mask needs: the visibility check's fast path reports no element.
+// A web screenshot is the whole page, laid out at its content size, so the
+// bounds are measured in that layout, in CSS pixels from the page's top-left,
+// the space ScreenshotSize reports.
+func (d *Driver) LocateElement(sel flow.Selector) (*core.ElementInfo, error) {
+	elem, info, err := d.findElement(sel, isOptional(sel.Optional), 0)
+	if err != nil {
+		return nil, err
+	}
+	bounds, err := d.screenshotBounds(elem)
+	if err != nil {
+		return nil, err
+	}
+	info.Bounds = bounds
+	return info, nil
+}
+
+// ScreenshotSize is the size, in CSS pixels, of the page a screenshot covers:
+// its content size, the size Rod's full-page capture lays it out at.
+func (d *Driver) ScreenshotSize() (int, int, error) {
+	metrics, err := proto.PageGetLayoutMetrics{}.Call(d.page)
+	if err != nil {
+		return 0, 0, err
+	}
+	if metrics.CSSContentSize == nil {
+		return 0, 0, errors.New("failed to get css content size")
+	}
+	return int(metrics.CSSContentSize.Width), int(metrics.CSSContentSize.Height), nil
+}
+
+// screenshotBounds measures elem in the layout a screenshot is taken in: the
+// viewport set to the page's content size, as Rod's full-page capture sets it,
+// so the page is not scrolled and fixed elements sit where the capture shows
+// them. An element in an iframe is placed in the top frame. The viewport is
+// restored afterwards, as the capture restores it.
+func (d *Driver) screenshotBounds(elem *rod.Element) (core.Bounds, error) {
+	width, height, err := d.ScreenshotSize()
+	if err != nil {
+		return core.Bounds{}, err
+	}
+	saved := proto.EmulationSetDeviceMetricsOverride{}
+	hasSaved := d.page.LoadState(&saved)
+	whole := saved
+	whole.Width, whole.Height = width, height
+	if err := d.page.SetViewport(&whole); err != nil {
+		return core.Bounds{}, err
+	}
+	defer func() {
+		if !hasSaved {
+			_ = proto.EmulationClearDeviceMetricsOverride{}.Call(d.page)
+			return
+		}
+		_ = d.page.SetViewport(&saved)
+	}()
+
+	res, err := elem.Eval(`() => {
+		var r = this.getBoundingClientRect();
+		var c = window.__maestro.topFrameClickPoint(this);
+		return [c.x - r.width / 2, c.y - r.height / 2, r.width, r.height];
+	}`)
+	if err != nil {
+		return core.Bounds{}, err
+	}
+	box := res.Value.Arr()
+	if len(box) != 4 {
+		return core.Bounds{}, fmt.Errorf("element bounds: got %d values", len(box))
+	}
+	// Whole pixels that cover the element, so a fractional edge is masked too.
+	left, top := math.Floor(box[0].Num()), math.Floor(box[1].Num())
+	right, bottom := math.Ceil(box[0].Num()+box[2].Num()), math.Ceil(box[1].Num()+box[3].Num())
+	return core.Bounds{X: int(left), Y: int(top), Width: int(right - left), Height: int(bottom - top)}, nil
 }
 
 // Hierarchy returns the full accessibility tree as JSON.

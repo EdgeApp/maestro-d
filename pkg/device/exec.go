@@ -9,5 +9,8 @@ import "os/exec"
 // do not run with t.Parallel() to avoid clobbering.
 var execCommand = exec.Command
 
+// execCommandContext is the seam over exec.CommandContext. Same rules.
+var execCommandContext = exec.CommandContext
+
 // execLookPath is the companion seam over exec.LookPath. Same rules.
 var execLookPath = exec.LookPath
