@@ -798,7 +798,7 @@ func TestMesh_BulkUploadEventsAndScreenshot(t *testing.T) {
 		t.Fatalf("upload: %v %v", uploaded, err)
 	}
 	if b.logged("bulk link to hub-a for PUT") != 1 {
-		t.Fatalf("no bulk link: %v", b.logs)
+		t.Fatalf("no bulk link: %v", b.logLines())
 	}
 	if ok, _, err := c.HasBlob(ctx, "a1@hub-a", hx); err != nil || !ok {
 		t.Fatalf("HEAD: %v %v", ok, err)
@@ -971,7 +971,7 @@ func TestMesh_DiscoveryOnceAtLaunch(t *testing.T) {
 	c := startHub(t, "hub-c", nil, withDisco(bad), withPeers(a.addr))
 	waitLinked(t, c, "hub-a")
 	if c.logged("mdns advertise: no multicast") != 1 || c.logged("mdns browse: no multicast") != 1 {
-		t.Fatalf("logs: %v", c.logs)
+		t.Fatalf("logs: %v", c.logLines())
 	}
 }
 
@@ -983,9 +983,7 @@ func TestMesh_ReadyWithoutPeers(t *testing.T) {
 		c.ReadyWait = 300 * time.Millisecond
 		c.DialTimeout = 100 * time.Millisecond
 	})
-	if h.logged("dial 127.0.0.1:1") == 0 {
-		t.Fatalf("no failed dial: %v", h.logs)
-	}
+	waitLogged(t, h, "dial 127.0.0.1:1:")
 	st := h.mesh.Status(context.Background())
 	if len(st.Peers) != 1 || st.Peers[0].State != "connecting" {
 		t.Fatalf("status: %+v", st.Peers)
@@ -1136,14 +1134,14 @@ func TestMesh_DialRefusesASecondHubOfTheSameName(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for a.logged("not linking hub-b") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no refusal: %v", a.logs)
+			t.Fatalf("no refusal: %v", a.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Several redial periods later the first link still stands.
 	time.Sleep(10 * fastConfig("x").BackoffMin)
 	if l2, e := a.mesh.link("hub-b"); e != nil || l2 != l || a.logged("not linking hub-b") != 1 || a.logged("replaced") != 0 {
-		t.Fatalf("link flipped: %v %v %v", l2 == l, e, a.logs)
+		t.Fatalf("link flipped: %v %v %v", l2 == l, e, a.logLines())
 	}
 
 	disco := &fakeDisco{found: []Found{{Name: "hub-c", Addr: b1.addr}}}
@@ -1151,7 +1149,7 @@ func TestMesh_DialRefusesASecondHubOfTheSameName(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for d.logged("where hub hub-c was expected") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no mismatch: %v", d.logs)
+			t.Fatalf("no mismatch: %v", d.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1357,7 +1355,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 		}
 	}
 	if a.logged("bulk link to hub-b for") != 0 || l.dialable.Load() {
-		t.Fatalf("a bulk link to an undialable peer: %v", a.logs)
+		t.Fatalf("a bulk link to an undialable peer: %v", a.logLines())
 	}
 	for _, r := range a.mesh.peerRefs() {
 		if r.Name == "hub-b" {
@@ -1368,7 +1366,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for a.logged("bulk links to hub-b at "+hole.Addr().String()+" fail") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no failed probe: %v", a.logs)
+			t.Fatalf("no failed probe: %v", a.logLines())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -1384,7 +1382,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 		t.Fatalf("screenshot after a failed bulk dial: %d %v", len(png), err)
 	}
 	if l.dialable.Load() || a.logged("bulk link to hub-b: ") != 1 {
-		t.Fatalf("a failed bulk dial: dialable %v, %v", l.dialable.Load(), a.logs)
+		t.Fatalf("a failed bulk dial: dialable %v, %v", l.dialable.Load(), a.logLines())
 	}
 }
 
@@ -1396,7 +1394,7 @@ func TestMesh_DialedInPeerProbedForBulk(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for !l.dialable.Load() {
 		if time.Now().After(deadline) {
-			t.Fatalf("never probed: %v", a.logs)
+			t.Fatalf("never probed: %v", a.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1414,7 +1412,7 @@ func TestMesh_DialedInPeerProbedForBulk(t *testing.T) {
 		t.Fatalf("screenshot: %d %v", len(png), err)
 	}
 	if a.logged("bulk link to hub-b for GET") != 1 {
-		t.Fatalf("no bulk link: %v", a.logs)
+		t.Fatalf("no bulk link: %v", a.logLines())
 	}
 	_ = b
 }
@@ -1730,7 +1728,7 @@ func TestMesh_RestartAtANewAddressRelinks(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for b2.logged("HUB_NAME_TAKEN") == 0 && a.logged("refused a link from hub-b") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no refusal while the old link stood: %v", b2.logs)
+			t.Fatalf("no refusal while the old link stood: %v", b2.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1745,12 +1743,12 @@ func TestMesh_RestartAtANewAddressRelinks(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the restarted hub never linked: %v", b2.logs)
+			t.Fatalf("the restarted hub never linked: %v", b2.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if b2.logged("not dialing it again") != 0 {
-		t.Fatalf("a taken name was treated as permanent: %v", b2.logs)
+		t.Fatalf("a taken name was treated as permanent: %v", b2.logLines())
 	}
 	unlock()
 	b1.stop()
@@ -1835,7 +1833,7 @@ func TestMesh_PeerThatIsThisHubItself(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if seed.logged("is this hub itself") != 1 || seed.logged("refused") != 0 {
-		t.Fatalf("logs: %v", seed.logs)
+		t.Fatalf("logs: %v", seed.logLines())
 	}
 	if st := seed.mesh.Status(context.Background()); len(st.Peers) != 0 {
 		t.Fatalf("its own address is listed: %+v", st.Peers)

@@ -76,6 +76,28 @@ type testHub struct {
 	logs  []string
 }
 
+// logLines is a copy of the mesh log so far: the mesh appends to it from
+// its own goroutines, so it is never read without logMu.
+func (h *testHub) logLines() []string {
+	h.logMu.Lock()
+	defer h.logMu.Unlock()
+	return append([]string(nil), h.logs...)
+}
+
+// waitLogged waits up to 10 s for a mesh log line that contains sub: a
+// line is logged after what it reports is done, so not always by the time
+// a caller sees that done.
+func waitLogged(t *testing.T, h *testHub, sub string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for h.logged(sub) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no log line with %q: %v", sub, h.logLines())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // logged counts the mesh log lines that contain sub.
 func (h *testHub) logged(sub string) int {
 	h.logMu.Lock()

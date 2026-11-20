@@ -563,7 +563,7 @@ func TestBulk_ScreenStreams(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for !flowing() {
 		if time.Now().After(deadline) {
-			t.Fatalf("not every stream flows: %v", b.logs)
+			t.Fatalf("not every stream flows: %v", b.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -667,7 +667,7 @@ func TestBulk_ScreenStreamRefusedWithoutABulkLink(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for a.logged("bulk links to hub-b at "+hole.Addr().String()+" fail") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no failed probe: %v", a.logs)
+			t.Fatalf("no failed probe: %v", a.logLines())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -675,7 +675,7 @@ func TestBulk_ScreenStreamRefusedWithoutABulkLink(t *testing.T) {
 	l.dialable.Store(true)
 	refused("a failed bulk dial", "its bulk link failed: ")
 	if l.dialable.Load() || a.logged("bulk link to hub-b: ") != 1 || a.logged("refusing the screen stream") != 1 {
-		t.Fatalf("a failed bulk dial for a stream: dialable %v, %v", l.dialable.Load(), a.logs)
+		t.Fatalf("a failed bulk dial for a stream: dialable %v, %v", l.dialable.Load(), a.logLines())
 	}
 }
 
