@@ -84,12 +84,20 @@ func TestLink_BulkDialNamesThePeerBeforeReading(t *testing.T) {
 // serving other exchanges and pongs; the body then reads in full, and
 // closing one early stops its sender.
 //
-// Pings still go every 100 ms, but a pong may take up to 5 s: while the
-// body streams, a ping queues behind its data frames, and under -race on
-// a busy machine three 100 ms timeouts in a row close the link mid-body.
-// A read loop the unread body blocked fails the exchanges below anyway.
+// Pings still go every 100 ms, but on both hubs a pong may take up to
+// 5 s: while the body streams, every ping's round trip crosses it, since
+// hub-a's pings, and its pongs to hub-b's, queue behind the body's data
+// frames. Under -race on a busy machine three 100 ms timeouts in a row
+// close the link mid-body, and a ping whose deadline ends while its frame
+// is being written closes the connection outright (the WebSocket's write
+// timeout). A read loop the unread body blocked fails the exchanges below
+// anyway.
 func TestLink_SlowReaderDoesNotStallTheLink(t *testing.T) {
-	a, b := twoHubs(t, func(c *Config, _ *daemon.Config) { c.PingTimeout = 5 * time.Second })
+	slowPongs := func(c *Config, _ *daemon.Config) { c.PingTimeout = 5 * time.Second }
+	setupHome(t)
+	a := startHub(t, "hub-a", testDevices("a"), slowPongs)
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), slowPongs)
+	waitLinked(t, a, "hub-b")
 	const size = 4*flowWindow + 12345
 	writeErr := make(chan error, 4)
 	a.setHook(func(w http.ResponseWriter, r *http.Request) bool {
@@ -130,7 +138,7 @@ func TestLink_SlowReaderDoesNotStallTheLink(t *testing.T) {
 	n, err := io.Copy(io.Discard, res.Body)
 	_ = res.Body.Close()
 	if err != nil || n != size {
-		t.Fatalf("body: %d of %d, %v", n, size, err)
+		t.Fatalf("body: %d of %d, %v (link: %s)", n, size, err, l.Reason())
 	}
 	if err := <-writeErr; err != nil {
 		t.Fatalf("sender: %v", err)
