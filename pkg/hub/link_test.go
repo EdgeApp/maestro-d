@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
 // logMesh is a mesh that is never started, with its log captured.
@@ -81,8 +83,13 @@ func TestLink_BulkDialNamesThePeerBeforeReading(t *testing.T) {
 // stops at the flow-control window, while the same control link keeps
 // serving other exchanges and pongs; the body then reads in full, and
 // closing one early stops its sender.
+//
+// Pings still go every 100 ms, but a pong may take up to 5 s: while the
+// body streams, a ping queues behind its data frames, and under -race on
+// a busy machine three 100 ms timeouts in a row close the link mid-body.
+// A read loop the unread body blocked fails the exchanges below anyway.
 func TestLink_SlowReaderDoesNotStallTheLink(t *testing.T) {
-	a, b := twoHubs(t)
+	a, b := twoHubs(t, func(c *Config, _ *daemon.Config) { c.PingTimeout = 5 * time.Second })
 	const size = 4*flowWindow + 12345
 	writeErr := make(chan error, 4)
 	a.setHook(func(w http.ResponseWriter, r *http.Request) bool {
