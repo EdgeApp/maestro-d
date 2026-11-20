@@ -314,7 +314,12 @@ func (m *Mesh) isSelf(e *daemon.Error) bool {
 	return e.Code == daemon.CodeHubNameTaken && e.Details["instance"] == m.instance
 }
 
-// Close ends every link, telling the peers this hub is stopping.
+// Close ends every link, telling the peers this hub is stopping. The
+// listener stays up a while after (the daemon closes it last), and a
+// peer's redial can be mid-hello as Close runs: registerLink takes no link
+// once m.ctx is cancelled, which happens before the links are collected
+// under m.mu, so every link is either collected here or turned away there
+// with the same going-away close.
 func (m *Mesh) Close() {
 	m.cancel()
 	if m.stopAd != nil {
@@ -329,7 +334,7 @@ func (m *Mesh) Close() {
 	}
 	m.mu.Unlock()
 	for _, l := range links {
-		l.close(websocket.StatusGoingAway, "hub "+m.cfg.Name+" stopping")
+		m.closeStopping(l)
 	}
 	for _, l := range links {
 		select {
@@ -337,6 +342,12 @@ func (m *Mesh) Close() {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// closeStopping closes l as this hub stopping: the peer records it as
+// stopped (a clean shutdown), not down.
+func (m *Mesh) closeStopping(l *Link) {
+	l.close(websocket.StatusGoingAway, "hub "+m.cfg.Name+" stopping")
 }
 
 // advertisedAddr normalizes an address a hub advertises for itself (its
@@ -663,7 +674,13 @@ func (m *Mesh) dial(addr, peer string, bulk bool) (*Link, error) {
 		l.close(websocket.StatusInternalError, "hello failed")
 		return nil, err
 	}
-	f, err := readHello(ctx, conn)
+	// The hello is read outside m.ctx: a read cancelled by Close would drop
+	// the connection with no close frame, and a peer that had already
+	// linked would take this hub for down rather than stopped. A link
+	// dialed as this hub stops is turned away by registerLink instead.
+	helloCtx, helloCancel := context.WithTimeout(context.Background(), m.cfg.DialTimeout)
+	defer helloCancel()
+	f, err := readHello(helloCtx, conn)
 	if err != nil {
 		l.close(websocket.StatusProtocolError, "no hello")
 		return nil, err
@@ -727,6 +744,13 @@ func (m *Mesh) register(l *Link) bool {
 // refused rather than replacing the live link.
 func (m *Mesh) registerLink(l *Link) (bool, *daemon.Error) {
 	m.mu.Lock()
+	if m.ctx.Err() != nil {
+		// Close has collected (or is collecting) the links to end: one
+		// registered now would outlive it, linked to a hub that stopped.
+		m.mu.Unlock()
+		m.closeStopping(l)
+		return false, nil
+	}
 	if l.outbound {
 		if e := m.checkNameLocked(l.peer, l.instance, l.addr); e != nil {
 			m.mu.Unlock()
@@ -917,6 +941,11 @@ func (m *Mesh) acceptLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 0, daemon.Errorf(daemon.CodeUsage, "bad hub name %q in %s", name, headerHub))
 		return
 	}
+	if m.ctx.Err() != nil {
+		writeError(w, http.StatusServiceUnavailable, daemon.Errorf(daemon.CodePeerUnavailable, "hub %s is stopping", m.cfg.Name).
+			WithDetails("hub", m.cfg.Name))
+		return
+	}
 	bulk := r.URL.Query().Get("bulk") == "1"
 	addr := peerAddr(r)
 	if !bulk {
@@ -941,7 +970,11 @@ func (m *Mesh) acceptLink(w http.ResponseWriter, r *http.Request) {
 		<-l.closed
 		return
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, m.cfg.DialTimeout)
+	// The hello is read outside m.ctx, as dial reads it: the dialer may
+	// have linked already, and Close cutting this read short would drop
+	// the connection with no close frame. registerLink turns the link
+	// away, going away, once this hub is stopping.
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.DialTimeout)
 	defer cancel()
 	if err := l.writeFrame(m.hello()); err != nil {
 		l.close(websocket.StatusInternalError, "hello failed")

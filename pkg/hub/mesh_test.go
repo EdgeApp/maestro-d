@@ -546,6 +546,76 @@ func TestMesh_ReconnectAndPeerUnavailable(t *testing.T) {
 	}
 }
 
+// A stopping hub serves its listener a while after its mesh closed (the
+// daemon closes the listeners last), and a peer's redial can be mid-hello
+// as it closes. No link outlives the close, and the peer is told the hub
+// stopped: a link registered from then on is closed going away, and a
+// redial is refused before the upgrade.
+func TestMesh_StoppingHubTurnsRedialsAway(t *testing.T) {
+	a, b := twoHubs(t)
+	// A link whose hello finished as Close ran.
+	status := make(chan websocket.StatusCode, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_, _, err = conn.Read(context.Background())
+		status <- websocket.CloseStatus(err)
+	}))
+	t.Cleanup(srv.Close)
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLink(a.mesh, conn, false, false)
+	l.peer, l.instance = "hub-z", "z"
+	go l.readLoop()
+	a.mesh.Close()
+	if ok, refused := a.mesh.registerLink(l); ok || refused != nil {
+		t.Fatalf("registered after close: %v %v", ok, refused)
+	}
+	select {
+	case st := <-status:
+		if st != websocket.StatusGoingAway {
+			t.Fatalf("closed with %v, not going away", st)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a link registered after close stayed open")
+	}
+	if _, e := a.mesh.link("hub-z"); e == nil {
+		t.Fatal("hub-z linked after close")
+	}
+	// b, a's dialer, records a stopped, and its redials are refused
+	// before the upgrade: it never links again, and a stays stopped.
+	waitDown(t, b, "hub-a")
+	dials := b.logged("dialing")
+	deadline := time.Now().Add(10 * time.Second)
+	for b.logged("dialing") < dials+3 {
+		if time.Now().After(deadline) {
+			t.Fatal("b stopped redialing")
+		}
+		if _, e := b.mesh.link("hub-a"); e == nil {
+			t.Fatal("b linked to a stopped hub")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := b.mesh.Status(context.Background()); len(st.Peers) != 1 || st.Peers[0].State != "stopped" {
+		t.Fatalf("b's status of a: %+v", st.Peers)
+	}
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+testPeerToken)
+	hdr.Set(headerHub, "hub-y")
+	hdr.Set("X-Maestro-Api-Version", daemon.APIVersion)
+	_, resp, err := websocket.Dial(context.Background(), "ws://"+a.addr+"/v1/hub/link", &websocket.DialOptions{HTTPHeader: hdr})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a redial to a stopping hub: %v %v", resp, err)
+	}
+	if e := refusalFrom(resp); !isCode(e, daemon.CodePeerUnavailable) || isRefusal(e.(*daemon.Error)) {
+		t.Fatalf("stopping refusal: %v", e)
+	}
+}
+
 func TestMesh_PingTimeoutMarksDown(t *testing.T) {
 	a, b := twoHubs(t)
 	// Make a stop answering pings, as a stopped process would: its read
