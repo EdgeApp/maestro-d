@@ -907,12 +907,20 @@ func TestE2E_Housekeeping(t *testing.T) {
 	}
 
 	// While another sweep holds the home, gc says so and touches nothing
-	// there.
+	// there. The daemon, still running, sweeps every second under this
+	// lock: the test waits out a sweep in progress (a sweep that finds the
+	// lock held skips the home, so none waits on the test).
 	hk, err := os.OpenFile(filepath.Join(e.home, "housekeeping.lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Flock(int(hk.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	for {
+		err = syscall.Flock(int(hk.Fd()), syscall.LOCK_EX)
+		if err != syscall.EINTR {
+			break
+		}
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	r = e.ok("gc")
