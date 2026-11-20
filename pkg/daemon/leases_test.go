@@ -1821,8 +1821,26 @@ func TestLeases_GrantRefusesAnExpiredUnendedLease(t *testing.T) {
 // A client that leaves while a selector lease boots its simulator gets no
 // lease, and the simulator, booted for nobody, is shut down again rather
 // than left running unleased.
+//
+// The hub knows the client left only once its HTTP server has seen the
+// connection close, which can come well after the client's own call
+// returned (a busy machine, or GOMAXPROCS=1, runs the boot first): a boot
+// that ends before that is a lease for a client still there as far as the
+// hub can tell. So the test lets the boot end only after the request's
+// context has ended.
 func TestLeases_SelectorBootCancelledMidBoot(t *testing.T) {
 	env := newHubEnv(t, Config{})
+	left := make(chan struct{})
+	var leftOnce sync.Once
+	h := env.s.Handler()
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/leases" {
+			context.AfterFunc(r.Context(), func() { leftOnce.Do(func() { close(left) }) })
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hs.Close)
+	client := NewHTTPClient(hs.URL, "t", nil)
 	gate := make(chan struct{})
 	booting := make(chan struct{})
 	var once sync.Once
@@ -1839,13 +1857,18 @@ func TestLeases_SelectorBootCancelledMidBoot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := env.local.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Name: "Spare Phone", Boot: true}})
+		_, err := client.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Name: "Spare Phone", Boot: true}})
 		done <- err
 	}()
 	<-booting
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("a cancelled lease request succeeded")
+	}
+	select {
+	case <-left:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the hub did not see the client leave")
 	}
 	open()
 	waitFor(t, func() bool {
