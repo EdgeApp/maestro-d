@@ -490,6 +490,37 @@ func TestMesh_RefusalsAndExitCodes(t *testing.T) {
 	x.Close()
 }
 
+// Start answers with a --peer's refusal only once the refusal is
+// recorded, so Status right after lists it. The dialer logs the refusal
+// after recording it; the log line is held here until Status was read, so
+// a refusal recorded only after its log line would be missing.
+func TestMesh_RefusedStartIsInStatus(t *testing.T) {
+	setupHome(t)
+	a := startHub(t, "hub-a", testDevices("a"))
+	read := make(chan struct{})
+	x := New(fastConfig("hub-x"))
+	x.cfg.PeerToken = "wrong"
+	x.cfg.Peers = []string{a.addr}
+	x.cfg.Logf = func(format string, _ ...any) {
+		if strings.Contains(format, "refused this hub") {
+			select {
+			case <-read:
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}
+	defer x.Close()
+	if err := x.Start(context.Background(), daemon.Info{HTTPAddr: "127.0.0.1:1"}); !isCode(err, daemon.CodeUsage) {
+		close(read)
+		t.Fatalf("refused start: %v", err)
+	}
+	st := x.Status(context.Background())
+	close(read)
+	if len(st.Peers) != 1 || st.Peers[0].State != "refused" || st.Peers[0].Addr != a.addr {
+		t.Fatalf("status as Start returned: %+v", st.Peers)
+	}
+}
+
 func TestMesh_ReconnectAndPeerUnavailable(t *testing.T) {
 	a, b := twoHubs(t)
 	l := waitLinked(t, b, "hub-a")

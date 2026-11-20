@@ -512,23 +512,27 @@ func (m *Mesh) runDialer(d *dialer) {
 			l.close(websocket.StatusPolicyViolation, "not the hub expected")
 			l, err = nil, fmt.Errorf("hub %s answered at %s, where hub %s was expected", l.peer, d.addr, d.expect)
 		}
-		d.report(err)
+		// The first dial's outcome is recorded before it is reported:
+		// Start returns on the report, and Status right after must show it.
 		if err != nil {
 			var de *daemon.Error
 			if errors.As(err, &de) && m.isSelf(de) {
+				d.report(err)
 				m.logf("%s is this hub itself; not dialing it", d.addr)
 				return
 			}
 			if errors.As(err, &de) && isRefusal(de) {
-				m.logf("%s refused this hub: %s (%s); not dialing it again", d.addr, de.Message, de.Code)
 				d.mu.Lock()
 				d.refused = de
 				d.mu.Unlock()
+				d.report(err)
+				m.logf("%s refused this hub: %s (%s); not dialing it again", d.addr, de.Message, de.Code)
 				return
 			}
 			d.mu.Lock()
 			d.lastErr = err.Error()
 			d.mu.Unlock()
+			d.report(err)
 			m.logf("dial %s: %v (again in %v)", d.addr, err, backoff)
 			if !m.sleep(backoff) {
 				return
@@ -539,6 +543,7 @@ func (m *Mesh) runDialer(d *dialer) {
 		d.mu.Lock()
 		d.name, d.lastErr = l.peer, ""
 		d.mu.Unlock()
+		d.report(nil)
 		ok, refused := m.registerLink(l)
 		if refused != nil {
 			l.close(websocket.StatusPolicyViolation, refused.Message)
