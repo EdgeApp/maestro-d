@@ -591,7 +591,10 @@ func TestLeases_ExpiryInterruptsARunningStep(t *testing.T) {
 }
 
 // A lease whose window ends while its attach runs ends that attach: the
-// device is not left attached without a lease.
+// device is not left attached without a lease. The request is answered
+// LEASE_EXPIRED as the window ends, without waiting for the attach; the
+// lease's teardown detaches the device once the attach has unwound, so
+// the device is free a moment after the answer, not by then.
 func TestLeases_WindowEndsDuringTheLeaseAttach(t *testing.T) {
 	env := newHubEnv(t, Config{})
 	attaching := make(chan struct{})
@@ -616,9 +619,10 @@ func TestLeases_WindowEndsDuringTheLeaseAttach(t *testing.T) {
 	if err == nil {
 		t.Fatal("an attach outlived its lease")
 	}
-	if devs, _ := env.local.Devices(ctx, "mock"); devs[0].Attached || devs[0].Lease != nil {
-		t.Fatalf("left attached: %+v", devs[0])
-	}
+	waitFor(t, func() bool {
+		devs, _ := env.local.Devices(ctx, "mock")
+		return !devs[0].Attached && devs[0].Lease == nil
+	})
 	waitReportsReleased(t, env.s)
 }
 
