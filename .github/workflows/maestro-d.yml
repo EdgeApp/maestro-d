@@ -27,12 +27,23 @@ jobs:
           cache: npm
           cache-dependency-path: npm/maestro-d/package-lock.json
 
+      # The capture tests check every muxed file with ffprobe. Ubuntu's apt
+      # FFmpeg is 6.x; the ipcm/pcmC checks need FFmpeg 7.1 or later. BtbN's
+      # static builds keep only the newest release branches, so this is 9.0,
+      # the FFmpeg the checks were written against.
+      - name: Install FFmpeg 9.0
+        run: |
+          curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-n9.0-latest-linux64-gpl-9.0/bin" >> "$GITHUB_PATH"
+
       # The Go/TypeScript/Markdown command tables must match the flow parser.
       - name: Generated command tables are current
         run: make gen-check
 
-      - name: Go tests (daemon and CLI)
-        run: go test -race -timeout 20m ./pkg/daemon/... ./pkg/cli/...
+      - name: Go tests (daemon, CLI, capture, hub, executor, mock driver)
+        env:
+          MAESTRO_D_REQUIRE_FFPROBE: '1'  # ffprobe-backed tests fail rather than skip
+        run: ffprobe -version | head -1 && go test -race -timeout 20m ./pkg/daemon/... ./pkg/cli/... ./pkg/capture/... ./pkg/hub/... ./pkg/executor/... ./pkg/driver/mock/... ./pkg/device/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/driver/wda/...
 
       - name: JavaScript library tests
         run: npm ci --no-audit --no-fund && npm test

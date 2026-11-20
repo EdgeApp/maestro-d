@@ -81,6 +81,12 @@ const (
 	// CodeLeaseExpired: the request's lease has expired or was released.
 	// Exit 5 / HTTP 409.
 	CodeLeaseExpired Code = "LEASE_EXPIRED"
+	// CodeCaptureUnavailable: the device has no screen capture, or its
+	// capture failed or produced no frames. Exit 4 / HTTP 503;
+	// details.reason names why (pkg/capture's reasons: simulator,
+	// unsupported-platform, no-frames, …). The X-Maestro-Error-Code header
+	// tells it from DAEMON_UNAVAILABLE's 503.
+	CodeCaptureUnavailable Code = "CAPTURE_UNAVAILABLE"
 )
 
 // Codes lists every code, for tables and tests.
@@ -88,7 +94,7 @@ var Codes = []Code{
 	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
-	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired,
+	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeCaptureUnavailable,
 }
 
 // ExitCode returns the CLI exit status for the code.
@@ -102,7 +108,7 @@ func (c Code) ExitCode() int {
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
-	case CodeDeviceError, CodeDeviceNotFound, CodeInternal:
+	case CodeDeviceError, CodeDeviceNotFound, CodeInternal, CodeCaptureUnavailable:
 		return 4
 	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
 		return 5
@@ -121,7 +127,7 @@ func (c Code) HTTPStatus() int {
 		return http.StatusUnprocessableEntity
 	case CodeUsage:
 		return http.StatusBadRequest
-	case CodeDaemonUnavailable, CodePeerUnavailable:
+	case CodeDaemonUnavailable, CodePeerUnavailable, CodeCaptureUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeDeviceError:
 		return http.StatusBadGateway
@@ -640,10 +646,12 @@ type Event struct {
 	Seq  int64  `json:"seq"`
 	Time string `json:"time"`
 	// Type: step | nestedStep | device.attached | device.detached |
-	// device.booted | device.stopped | daemon.shutdown | lease.granted |
-	// lease.released | lease.expired. lease.expired is a lease whose window
-	// ran out; every other end of a lease (a release, its device stopped
-	// or deleted, its attach failing, the hub stopping) is lease.released.
+	// device.booted | device.stopped | device.capture | daemon.shutdown |
+	// lease.granted | lease.released | lease.expired. device.capture's
+	// Message is capturing, unavailable or lost, and Error its reason.
+	// lease.expired is a lease whose window ran out; every other end of a
+	// lease (a release, its device stopped or deleted, its attach failing,
+	// the hub stopping) is lease.released.
 	Type       string `json:"type"`
 	Device     string `json:"device,omitempty"`
 	Depth      int    `json:"depth,omitempty"`

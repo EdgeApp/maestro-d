@@ -99,6 +99,9 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 		Artifacts:          parseArtifactMode(cfg.Artifacts),
 		OutputDir:          driverOutputDir(cfg),
 		ShutdownAfter:      false,
+		// An attached device streams and records: a physical iPhone's
+		// capture starts before WebDriverAgent (ios_capture.go).
+		ScreenCapture: true,
 	}
 	if rc.AppiumURL == "" {
 		rc.AppiumURL = "http://127.0.0.1:4723"

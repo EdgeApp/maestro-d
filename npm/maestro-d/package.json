@@ -1,6 +1,6 @@
 {
   "name": "maestro-d",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "Run Maestro YAML commands one at a time from JavaScript or the shell, on real devices, simulators and emulators. A fork of maestro-runner 1.1.26 with a persistent daemon.",
   "keywords": [
     "maestro",
@@ -49,6 +49,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.cjs.json && tsc -p tsconfig.esm.json && echo '{\"type\":\"module\"}' > dist/esm/package.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage --test-coverage-include='dist/esm/**' --test-coverage-lines=90 test/*.test.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
@@ -56,9 +57,9 @@
     "typescript": "^5.6.0"
   },
   "optionalDependencies": {
-    "maestro-d-darwin-arm64": "3.0.1",
-    "maestro-d-darwin-x64": "3.0.1",
-    "maestro-d-linux-arm64": "3.0.1",
-    "maestro-d-linux-x64": "3.0.1"
+    "maestro-d-darwin-arm64": "3.1.0",
+    "maestro-d-darwin-x64": "3.1.0",
+    "maestro-d-linux-arm64": "3.1.0",
+    "maestro-d-linux-x64": "3.1.0"
   }
 }

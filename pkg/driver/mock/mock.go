@@ -4,8 +4,11 @@ package mock
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"      // maestro-d: fake screen capture
+	"github.com/devicelab-dev/maestro-runner/pkg/capture/fake" // maestro-d
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
@@ -17,6 +20,13 @@ type Driver struct {
 
 	// Internal state
 	stepCount int
+
+	// maestro-d: the fake capture session (created on first use, under
+	// capMu) and the --record recording on it, kept by screen as every
+	// capture driver's are.
+	capMu   sync.Mutex
+	session *capture.Session
+	screen  capture.DriverCapture
 }
 
 // Config configures mock driver behavior.
@@ -167,4 +177,45 @@ func needsElement(step flow.Step) bool {
 		return true
 	}
 	return false
+}
+
+// maestro-d: screen capture. The mock streams and records the fake source
+// (pkg/capture/fake): an embedded 640x360 H.264 clip with AAC audio,
+// looped at the requested frame rate.
+
+// Capture returns the mock's on-demand capture session.
+func (d *Driver) Capture() (*capture.Session, error) {
+	d.capMu.Lock()
+	defer d.capMu.Unlock()
+	if d.session == nil {
+		d.session = capture.NewSession(fake.New())
+		d.screen.Set(d.session)
+	}
+	return d.session, nil
+}
+
+// StartScreenRecording records the capture session into a temporary file
+// (capture.DriverCapture).
+func (d *Driver) StartScreenRecording() error {
+	if _, err := d.Capture(); err != nil {
+		return err
+	}
+	return d.screen.StartRecording()
+}
+
+// StopScreenRecording finalizes the recording at hostPath.
+func (d *Driver) StopScreenRecording(hostPath string) error {
+	return d.screen.StopRecording(hostPath)
+}
+
+// Close ends the capture session, if one was made.
+func (d *Driver) Close() {
+	d.capMu.Lock()
+	s := d.session
+	d.session = nil
+	d.screen.Set(nil)
+	d.capMu.Unlock()
+	if s != nil {
+		s.Close()
+	}
 }

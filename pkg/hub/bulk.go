@@ -1,13 +1,16 @@
 package hub
 
 // bulk.go: bulk links. A request body over 1 MiB (a blob upload), an
-// artifact, a screenshot and an event stream each get their own
-// short-lived peer link, GET /v1/hub/link?bulk=1, so a 300 MB APK never
-// delays the control link's pings or another device's tapOn. At most
-// bulkPerPeer transfers run at once per peer; an event stream, which
-// lives as long as its subscriber, is not one of them. When the peer
-// cannot be dialed (it joined by dialing out, from behind NAT) the
-// exchange runs on the control link instead.
+// artifact, a screenshot, a screen stream and an event stream each get
+// their own short-lived peer link, GET /v1/hub/link?bulk=1, so a 300 MB
+// APK never delays the control link's pings or another device's tapOn. At
+// most bulkPerPeer transfers run at once per peer; an event stream and a
+// screen stream, which live as long as their client, are not among them.
+// When the peer cannot be dialed (it joined by dialing out, from behind
+// NAT) the exchange runs on the control link instead, except a screen
+// stream: its continuous video would delay the control link's pings and
+// every other device's steps, so it is refused with PEER_UNAVAILABLE
+// (details.reason peer-not-dialable).
 //
 // A peer's address is dialable once this hub has dialed it: the address
 // of a link this hub dialed is, and that of a link the peer dialed in on
@@ -28,6 +31,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
 const bulkPerPeer = 4
@@ -42,6 +47,8 @@ func needsBulk(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodGet && (strings.Contains(p, "/artifacts/") || strings.HasSuffix(p, "/screenshot") || p == "/v1/events"):
 		return true
+	case r.Method == http.MethodGet && isScreenStreamPath(p):
+		return true
 	}
 	return false
 }
@@ -49,6 +56,18 @@ func needsBulk(r *http.Request) bool {
 // isEventStream reports whether req subscribes to an event stream.
 func isEventStream(req Request) bool {
 	return req.Method == http.MethodGet && req.Path == "/v1/events"
+}
+
+// isScreenStreamPath reports whether p is a device's screen stream,
+// /v1/devices/{id}/stream.
+func isScreenStreamPath(p string) bool {
+	seg := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	return len(seg) == 4 && seg[0] == "v1" && seg[1] == "devices" && seg[2] != "" && seg[3] == "stream"
+}
+
+// isScreenStream reports whether req asks for a device's screen stream.
+func isScreenStream(req Request) bool {
+	return req.Method == http.MethodGet && isScreenStreamPath(req.Path)
 }
 
 func (m *Mesh) bulkSem(peer string) chan struct{} {
@@ -60,17 +79,37 @@ func (m *Mesh) bulkSem(peer string) chan struct{} {
 	return m.bulkSems[peer]
 }
 
+// ReasonPeerNotDialable is details.reason of the PEER_UNAVAILABLE that
+// refuses a screen stream to a peer this hub cannot open a bulk link to.
+const ReasonPeerNotDialable = "peer-not-dialable"
+
+// notDialableForStreams refuses a screen stream to the peer of l, which
+// has no bulk link: why says why.
+func notDialableForStreams(l *Link, why string) *daemon.Error {
+	return daemon.Errorf(daemon.CodePeerUnavailable,
+		"hub %s is not dialable from this hub for screen streams (%s); a screen stream needs a bulk link and never runs on the control link. Stream from hub %s itself, or give it an address this hub can reach (--advertise)",
+		l.peer, why, l.peer).WithDetails("hub", l.peer, "reason", ReasonPeerNotDialable)
+}
+
 // exchange runs req with the peer of control link l, on a bulk link of
-// its own when bulk is set and the peer can be dialed.
+// its own when bulk is set and the peer can be dialed. A screen stream to
+// a peer without a bulk link is refused (notDialableForStreams).
 func (m *Mesh) exchange(ctx context.Context, l *Link, req Request, bulk bool) (*Response, error) {
+	if bulk && isScreenStream(req) && (l.addr == "" || !l.dialable.Load()) {
+		why := "its address has not answered a bulk dial"
+		if l.addr == "" {
+			why = "it has no address this hub can dial"
+		}
+		return nil, notDialableForStreams(l, why)
+	}
 	if !bulk || l.addr == "" || !l.dialable.Load() {
 		return l.RoundTrip(ctx, req)
 	}
-	// An event stream would hold its slot for as long as anyone listens,
-	// so four open subscriptions would block every transfer: it takes a
-	// bulk link without one.
+	// An event stream or a screen stream would hold its slot for as long
+	// as anyone watches, so four open streams would block every transfer:
+	// each takes a bulk link without one.
 	release := func() {}
-	if !isEventStream(req) {
+	if !isEventStream(req) && !isScreenStream(req) {
 		sem := m.bulkSem(l.peer)
 		select {
 		case sem <- struct{}{}:
@@ -82,10 +121,14 @@ func (m *Mesh) exchange(ctx context.Context, l *Link, req Request, bulk bool) (*
 	bl, err := m.dial(l.addr, l.peer, true)
 	if err != nil {
 		release()
-		m.logf("bulk link to %s: %v; using the control link", l.peer, err)
 		if l.dialable.CompareAndSwap(true, false) {
 			go m.probeBulk(l)
 		}
+		if isScreenStream(req) {
+			m.logf("bulk link to %s: %v; refusing the screen stream", l.peer, err)
+			return nil, notDialableForStreams(l, "its bulk link failed: "+err.Error())
+		}
+		m.logf("bulk link to %s: %v; using the control link", l.peer, err)
 		return l.RoundTrip(ctx, req)
 	}
 	m.logf("bulk link to %s for %s %s", l.peer, req.Method, req.Path)

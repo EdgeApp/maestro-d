@@ -6,8 +6,10 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture" // maestro-d: screen capture (capture.go)
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -26,6 +28,16 @@ type Driver struct {
 
 	// In-flight --record capture (simulators only)
 	recording *simulator.Recording
+
+	// maestro-d: a physical device's screen capture (capture.go): why it
+	// has none, its always-on session and the --record recording on it
+	// (screen), and whether the capture was lost (the device
+	// re-enumerated).
+	capMu       sync.Mutex
+	capErr      error
+	capStop     func()
+	screen      capture.DriverCapture
+	captureLost atomic.Bool
 
 	// Parent context for element-finding operations (nil = context.Background())
 	ctx context.Context
@@ -419,6 +431,7 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	}
 
 	result.Duration = time.Since(start)
+	d.addCaptureLostHint(result) // maestro-d: a lost screen capture took WebDriverAgent with it
 	d.trackCrashLoop(result)
 	return result
 }

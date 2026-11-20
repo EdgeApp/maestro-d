@@ -447,6 +447,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
+	mux.HandleFunc("GET /v1/viewer", s.handleViewer)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
 	mux.HandleFunc("POST /v1/leases", s.idempotent(s.handleAcquireLease))
@@ -466,6 +467,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("POST /v1/devices/{id}/steps", leased(s.idempotent(s.handleSteps)))
 	mux.HandleFunc("POST /v1/devices/{id}/flows", leased(s.idempotent(s.handleFlow)))
 	mux.HandleFunc("GET /v1/devices/{id}/screenshot", leased(s.handleScreenshot))
+	mux.HandleFunc("GET /v1/devices/{id}/stream", leased(s.handleStream))
 	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", leased(s.handleHierarchy))
 	mux.HandleFunc("GET /v1/devices/{id}/state", leased(s.handleState))
 	mux.HandleFunc("GET /v1/devices/{id}/info", open(s.handleInfo))
@@ -497,7 +499,9 @@ func BearerAuthorized(header, token string) bool {
 
 func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tcp && !BearerAuthorized(r.Header.Get("Authorization"), s.cfg.Token) {
+		// The viewer page carries no device data; it reads its token from
+		// its URL fragment and sends it with the stream request.
+		if tcp && !IsViewerRequest(r) && !BearerAuthorized(r.Header.Get("Authorization"), s.cfg.Token) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeErrorStatus(w, http.StatusUnauthorized, Errorf(CodeUsage, "missing or invalid bearer token"))
 			return

@@ -104,7 +104,9 @@ A remote caller drives devices but not the host. These are refused with
   no extension), and the result lists it in [`outputs`](#outputs). Inside a
   bundle the path is taken relative to the bundle root from the step's own
   flow directory: `takeScreenshot: x` in `sub/open.yaml` is `outputs/sub/x.png`.
-  `startRecording`'s path is a device path on Android and passes through.
+  `startRecording`'s path is a recording name and passes through: on a
+  device with screen capture its directory is dropped and the file is
+  written to `recordings/` in the report ([streaming.md](streaming.md#recording)).
 - `assertScreenshot`'s reference: a `blob:` ref is compared; a relative
   path that names no uploaded file is a **baseline**, written to
   `outputs/<path>` (`.png` added) as a local first run writes it beside the
@@ -180,6 +182,7 @@ attaches are retried the same way.
 | `DEVICE_ERROR` | 502 | 4 | the driver failed: device disconnected, WDA/UIAutomator2 died, boot or shutdown failed |
 | `DEVICE_NOT_FOUND` | 404 | 4 | no such device id |
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
+| `CAPTURE_UNAVAILABLE` | 503 | 4 | `GET …/stream`: the device has no screen capture, it failed, or it sent no frames within 10 s; `details.reason` names why ([streaming](streaming.md#errors)) |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
@@ -199,7 +202,8 @@ Every error answer also carries its code in the header
 `X-Maestro-Error-Code: <code>`, and a hub relaying a peer's answer passes
 it on. An answer without a body, a `HEAD`'s, has only the header to tell
 its code: `LEASE_REQUIRED`, `LEASE_EXPIRED`, `DEVICE_IN_USE` and `BUSY`
-are all `409`, and `PEER_UNAVAILABLE` and `DAEMON_UNAVAILABLE` both `503`.
+are all `409`, and `PEER_UNAVAILABLE`, `DAEMON_UNAVAILABLE` and
+`CAPTURE_UNAVAILABLE` all `503`.
 The CLI and the JavaScript library read the header when there is no body,
 so a `HEAD` refused `LEASE_EXPIRED` drops the lease from `leases.json` as
 any other request does. A client falls back on the status alone only when
@@ -273,7 +277,10 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"29271FDH200ABP"}
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
-`device.stopped`, `daemon.shutdown`, and on a hub `lease.granted`,
+`device.stopped`, `device.capture` (a device with screen capture: `message`
+is `capturing`, `unavailable` or `lost`, `error` the reason; an on-demand
+capture stopping when nobody watches is not published), `daemon.shutdown`,
+and on a hub `lease.granted`,
 `lease.released` and `lease.expired` (`message` names the holder).
 `lease.expired` is a lease whose window ran out; every other end of a lease
 is `lease.released`: a release, its device stopped or deleted, the attach in
@@ -529,7 +536,7 @@ before.
 
 - **Which routes need it.** Every `/v1/devices/{id}/…` route — attach,
   detach, commands, steps, flows, apps, blobs, artifacts, screenshot,
-  hierarchy, state, vars and eval — and `DELETE /v1/devices/{id}` while the
+  stream, hierarchy, state, vars and eval — and `DELETE /v1/devices/{id}` while the
   device is leased. A `DELETE` that names the device by its name is checked
   as the device the name resolves to. Without the header: `LEASE_REQUIRED` (409, exit 5);
   with a lease that has ended: `LEASE_EXPIRED` (409, exit 5).
@@ -706,7 +713,7 @@ The response is a **step result**:
 | `skipped` | the step's `platform` did not match the device |
 | `optional`, `error` | the step failed but was optional: `ok` stays true |
 | `element` | the element a selector resolved to, when there was one |
-| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the file path for `startRecording` |
+| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`) |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
 | `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |
@@ -926,6 +933,75 @@ PNG bytes (`Content-Type: image/png`), or with `?format=json` /
 ```sh
 curl -s -H "$H" $D/v1/devices/29271FDH200ABP/screenshot -o now.png
 ```
+
+### `GET /v1/devices/{id}/stream?fps=15&audio=false`
+
+The device's live screen as fragmented MP4, until the client leaves. See
+[streaming.md](streaming.md) for the platforms.
+
+```sh
+curl -sN -H "$H" "$D/v1/devices/EXAMPLE0001/stream?fps=30" -o screen.mp4   # Ctrl-C to stop
+curl -sN -H "$H" "$D/v1/devices/EXAMPLE0001/stream" | ffplay -
+```
+
+| query | |
+| --- | --- |
+| `fps` | requested frame rate, an integer from 3 to 60 (default 15); anything else is `USAGE`. A ceiling where the device honours it, advisory where it picks its own rate |
+| `audio` | `true` to include the device's audio (default `false`) |
+
+The answer is `200` with `Content-Type: video/mp4`, `Cache-Control:
+no-store`, `X-Content-Type-Options: nosniff`, no `Content-Length`
+(chunked), and:
+
+| header | |
+| --- | --- |
+| `X-Maestro-Fps` | the running frame rate, or `device` when the device picks it |
+| `X-Maestro-Audio` | `true` when the stream has an audio track |
+| `X-Maestro-Codecs` | the tracks' codecs for `MediaSource.isTypeSupported`: `avc3.640028`, `avc3.640028,mp4a.40.2` |
+
+The body is an init segment, then one `moof`+`mdat` fragment per frame
+(and per audio packet), each flushed as it is made. Parameter sets travel
+in-band (`avc3`), so a rotation changes the size mid-stream without a new
+init segment. A device's capture is shared: a second viewer joins the
+running capture at its frame rate and starts where it joins (the frames
+since the latest keyframe arrive first, a millisecond apart).
+
+A live stream cannot know how long a sample lasts until the next one
+arrives, so each fragment's duration is an estimate: the gap before it,
+clamped to 1 ms–1 s. A player that reads `tfdt` (ffplay, a file player)
+plays it as is. A Media Source Extensions consumer should retime it the
+way the viewer does: hold each track's newest fragment until that track's
+next one arrives and write the real gap as its duration, or a still
+Android screen (no frames for seconds) is a discontinuity, after which the
+browser drops frames until the next keyframe. See `makeRetimer` in
+[`pkg/daemon/viewer.html`](../../pkg/daemon/viewer.html) and
+[streaming.md](streaming.md#the-viewer). Recordings are written with the
+real durations.
+
+The route takes the device's lease on a hub, like every device route, but
+not the device's step lock: steps run beside a stream. It answers
+`DEVICE_NOT_ATTACHED` for an unattached device and `CAPTURE_UNAVAILABLE`
+(`details.reason`) when the device has no capture or nothing arrives
+within 10 s. Once the headers are sent, the body ends when the client
+leaves, the device is detached, the daemon stops, the lease ends, the
+client reads too slowly to keep up or stops reading (a write that cannot
+drain within 10 s), or the capture fails; the daemon log
+says which. A stream holds the daemon's idle timer while it runs.
+
+### `GET /v1/viewer`
+
+A page that plays a device's stream in Chrome, Safari or Edge (browsers
+with H.264 in Media Source Extensions; Playwright's open-source Chromium
+has none). It is the one route a TCP listener serves without the token,
+at exactly `GET /v1/viewer`; it carries no device data. Everything it needs
+is in the URL fragment, which the browser never sends to a server:
+
+```
+http://127.0.0.1:7788/v1/viewer#device=EXAMPLE0001&token=<token>&fps=15
+```
+
+`device`, `token`, `lease` (a hub lease id), `fps` and `audio=true`. See
+[streaming.md](streaming.md#the-viewer).
 
 ### `GET /v1/devices/{id}/hierarchy`
 

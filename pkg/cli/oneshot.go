@@ -63,7 +63,7 @@ func oneShotCommands() []*cli.Command {
 var valueOptional = map[string]bool{
 	"launchApp": true, "stopApp": true, "killApp": true, "clearState": true,
 	"takeScreenshot": true, "scroll": true, "eraseText": true,
-	"waitForAnimationToEnd": true, "stopRecording": true,
+	"waitForAnimationToEnd": true, "startRecording": true, "stopRecording": true,
 }
 
 func oneShotArgsUsage(spec daemon.CommandSpec) string {

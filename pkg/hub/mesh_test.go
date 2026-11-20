@@ -490,6 +490,37 @@ func TestMesh_RefusalsAndExitCodes(t *testing.T) {
 	x.Close()
 }
 
+// Start answers with a --peer's refusal only once the refusal is
+// recorded, so Status right after lists it. The dialer logs the refusal
+// after recording it; the log line is held here until Status was read, so
+// a refusal recorded only after its log line would be missing.
+func TestMesh_RefusedStartIsInStatus(t *testing.T) {
+	setupHome(t)
+	a := startHub(t, "hub-a", testDevices("a"))
+	read := make(chan struct{})
+	x := New(fastConfig("hub-x"))
+	x.cfg.PeerToken = "wrong"
+	x.cfg.Peers = []string{a.addr}
+	x.cfg.Logf = func(format string, _ ...any) {
+		if strings.Contains(format, "refused this hub") {
+			select {
+			case <-read:
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}
+	defer x.Close()
+	if err := x.Start(context.Background(), daemon.Info{HTTPAddr: "127.0.0.1:1"}); !isCode(err, daemon.CodeUsage) {
+		close(read)
+		t.Fatalf("refused start: %v", err)
+	}
+	st := x.Status(context.Background())
+	close(read)
+	if len(st.Peers) != 1 || st.Peers[0].State != "refused" || st.Peers[0].Addr != a.addr {
+		t.Fatalf("status as Start returned: %+v", st.Peers)
+	}
+}
+
 func TestMesh_ReconnectAndPeerUnavailable(t *testing.T) {
 	a, b := twoHubs(t)
 	l := waitLinked(t, b, "hub-a")
@@ -543,6 +574,76 @@ func TestMesh_ReconnectAndPeerUnavailable(t *testing.T) {
 	st := b.mesh.Status(context.Background())
 	if st.Peers[0].State != "stopped" {
 		t.Fatalf("status: %+v", st.Peers)
+	}
+}
+
+// A stopping hub serves its listener a while after its mesh closed (the
+// daemon closes the listeners last), and a peer's redial can be mid-hello
+// as it closes. No link outlives the close, and the peer is told the hub
+// stopped: a link registered from then on is closed going away, and a
+// redial is refused before the upgrade.
+func TestMesh_StoppingHubTurnsRedialsAway(t *testing.T) {
+	a, b := twoHubs(t)
+	// A link whose hello finished as Close ran.
+	status := make(chan websocket.StatusCode, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_, _, err = conn.Read(context.Background())
+		status <- websocket.CloseStatus(err)
+	}))
+	t.Cleanup(srv.Close)
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLink(a.mesh, conn, false, false)
+	l.peer, l.instance = "hub-z", "z"
+	go l.readLoop()
+	a.mesh.Close()
+	if ok, refused := a.mesh.registerLink(l); ok || refused != nil {
+		t.Fatalf("registered after close: %v %v", ok, refused)
+	}
+	select {
+	case st := <-status:
+		if st != websocket.StatusGoingAway {
+			t.Fatalf("closed with %v, not going away", st)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a link registered after close stayed open")
+	}
+	if _, e := a.mesh.link("hub-z"); e == nil {
+		t.Fatal("hub-z linked after close")
+	}
+	// b, a's dialer, records a stopped, and its redials are refused
+	// before the upgrade: it never links again, and a stays stopped.
+	waitDown(t, b, "hub-a")
+	dials := b.logged("dialing")
+	deadline := time.Now().Add(10 * time.Second)
+	for b.logged("dialing") < dials+3 {
+		if time.Now().After(deadline) {
+			t.Fatal("b stopped redialing")
+		}
+		if _, e := b.mesh.link("hub-a"); e == nil {
+			t.Fatal("b linked to a stopped hub")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := b.mesh.Status(context.Background()); len(st.Peers) != 1 || st.Peers[0].State != "stopped" {
+		t.Fatalf("b's status of a: %+v", st.Peers)
+	}
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+testPeerToken)
+	hdr.Set(headerHub, "hub-y")
+	hdr.Set("X-Maestro-Api-Version", daemon.APIVersion)
+	_, resp, err := websocket.Dial(context.Background(), "ws://"+a.addr+"/v1/hub/link", &websocket.DialOptions{HTTPHeader: hdr})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a redial to a stopping hub: %v %v", resp, err)
+	}
+	if e := refusalFrom(resp); !isCode(e, daemon.CodePeerUnavailable) || isRefusal(e.(*daemon.Error)) {
+		t.Fatalf("stopping refusal: %v", e)
 	}
 }
 
@@ -697,7 +798,7 @@ func TestMesh_BulkUploadEventsAndScreenshot(t *testing.T) {
 		t.Fatalf("upload: %v %v", uploaded, err)
 	}
 	if b.logged("bulk link to hub-a for PUT") != 1 {
-		t.Fatalf("no bulk link: %v", b.logs)
+		t.Fatalf("no bulk link: %v", b.logLines())
 	}
 	if ok, _, err := c.HasBlob(ctx, "a1@hub-a", hx); err != nil || !ok {
 		t.Fatalf("HEAD: %v %v", ok, err)
@@ -870,7 +971,7 @@ func TestMesh_DiscoveryOnceAtLaunch(t *testing.T) {
 	c := startHub(t, "hub-c", nil, withDisco(bad), withPeers(a.addr))
 	waitLinked(t, c, "hub-a")
 	if c.logged("mdns advertise: no multicast") != 1 || c.logged("mdns browse: no multicast") != 1 {
-		t.Fatalf("logs: %v", c.logs)
+		t.Fatalf("logs: %v", c.logLines())
 	}
 }
 
@@ -882,9 +983,7 @@ func TestMesh_ReadyWithoutPeers(t *testing.T) {
 		c.ReadyWait = 300 * time.Millisecond
 		c.DialTimeout = 100 * time.Millisecond
 	})
-	if h.logged("dial 127.0.0.1:1") == 0 {
-		t.Fatalf("no failed dial: %v", h.logs)
-	}
+	waitLogged(t, h, "dial 127.0.0.1:1:")
 	st := h.mesh.Status(context.Background())
 	if len(st.Peers) != 1 || st.Peers[0].State != "connecting" {
 		t.Fatalf("status: %+v", st.Peers)
@@ -1035,14 +1134,14 @@ func TestMesh_DialRefusesASecondHubOfTheSameName(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for a.logged("not linking hub-b") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no refusal: %v", a.logs)
+			t.Fatalf("no refusal: %v", a.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Several redial periods later the first link still stands.
 	time.Sleep(10 * fastConfig("x").BackoffMin)
 	if l2, e := a.mesh.link("hub-b"); e != nil || l2 != l || a.logged("not linking hub-b") != 1 || a.logged("replaced") != 0 {
-		t.Fatalf("link flipped: %v %v %v", l2 == l, e, a.logs)
+		t.Fatalf("link flipped: %v %v %v", l2 == l, e, a.logLines())
 	}
 
 	disco := &fakeDisco{found: []Found{{Name: "hub-c", Addr: b1.addr}}}
@@ -1050,7 +1149,7 @@ func TestMesh_DialRefusesASecondHubOfTheSameName(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for d.logged("where hub hub-c was expected") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no mismatch: %v", d.logs)
+			t.Fatalf("no mismatch: %v", d.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1256,7 +1355,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 		}
 	}
 	if a.logged("bulk link to hub-b for") != 0 || l.dialable.Load() {
-		t.Fatalf("a bulk link to an undialable peer: %v", a.logs)
+		t.Fatalf("a bulk link to an undialable peer: %v", a.logLines())
 	}
 	for _, r := range a.mesh.peerRefs() {
 		if r.Name == "hub-b" {
@@ -1267,7 +1366,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for a.logged("bulk links to hub-b at "+hole.Addr().String()+" fail") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no failed probe: %v", a.logs)
+			t.Fatalf("no failed probe: %v", a.logLines())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -1283,7 +1382,7 @@ func TestMesh_UndialablePeerUsesTheControlLink(t *testing.T) {
 		t.Fatalf("screenshot after a failed bulk dial: %d %v", len(png), err)
 	}
 	if l.dialable.Load() || a.logged("bulk link to hub-b: ") != 1 {
-		t.Fatalf("a failed bulk dial: dialable %v, %v", l.dialable.Load(), a.logs)
+		t.Fatalf("a failed bulk dial: dialable %v, %v", l.dialable.Load(), a.logLines())
 	}
 }
 
@@ -1295,7 +1394,7 @@ func TestMesh_DialedInPeerProbedForBulk(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for !l.dialable.Load() {
 		if time.Now().After(deadline) {
-			t.Fatalf("never probed: %v", a.logs)
+			t.Fatalf("never probed: %v", a.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1313,7 +1412,7 @@ func TestMesh_DialedInPeerProbedForBulk(t *testing.T) {
 		t.Fatalf("screenshot: %d %v", len(png), err)
 	}
 	if a.logged("bulk link to hub-b for GET") != 1 {
-		t.Fatalf("no bulk link: %v", a.logs)
+		t.Fatalf("no bulk link: %v", a.logLines())
 	}
 	_ = b
 }
@@ -1629,7 +1728,7 @@ func TestMesh_RestartAtANewAddressRelinks(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for b2.logged("HUB_NAME_TAKEN") == 0 && a.logged("refused a link from hub-b") == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no refusal while the old link stood: %v", b2.logs)
+			t.Fatalf("no refusal while the old link stood: %v", b2.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1644,12 +1743,12 @@ func TestMesh_RestartAtANewAddressRelinks(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the restarted hub never linked: %v", b2.logs)
+			t.Fatalf("the restarted hub never linked: %v", b2.logLines())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if b2.logged("not dialing it again") != 0 {
-		t.Fatalf("a taken name was treated as permanent: %v", b2.logs)
+		t.Fatalf("a taken name was treated as permanent: %v", b2.logLines())
 	}
 	unlock()
 	b1.stop()
@@ -1734,7 +1833,7 @@ func TestMesh_PeerThatIsThisHubItself(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if seed.logged("is this hub itself") != 1 || seed.logged("refused") != 0 {
-		t.Fatalf("logs: %v", seed.logs)
+		t.Fatalf("logs: %v", seed.logLines())
 	}
 	if st := seed.mesh.Status(context.Background()); len(st.Peers) != 0 {
 		t.Fatalf("its own address is listed: %+v", st.Peers)

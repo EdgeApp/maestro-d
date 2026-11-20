@@ -53,6 +53,25 @@ directory stays after `detach()` for local readers and is swept 3 days after
 its last write; `attach({…, discardReports: true})` deletes it at detach
 instead.
 
+`device.stream({fps, audio, signal})` resolves a `VideoStream`
+(`{fps: number | 'device', audio, codecs, body: ReadableStream<Uint8Array>}`):
+the device's live screen as fragmented MP4 from
+[`GET …/stream`](rest.md#get-v1devicesidstreamfps15audiofalse), on a
+socket of its own (as `events()` is) and with the handle's lease on a hub.
+Aborting `signal` ends `body` cleanly, after the last whole fragment (the
+body only ever holds whole MP4 boxes, a `moof` with its `mdat`, as
+`maestro-d stream -o` writes them). Cancelling `body` (`body.cancel()`,
+a `break` out of a `for await` over it, or a `pipeline` that fails)
+closes the connection. Each fragment's duration is an estimate, the gap
+before it (a live stream cannot know the gap after it yet): a consumer
+that feeds Media Source Extensions should retime the fragments as the
+viewer does (`makeRetimer` in `pkg/daemon/viewer.html`, described under
+[the viewer](streaming.md#the-viewer)), or a still Android screen gives a
+discontinuity and the browser drops frames until the next keyframe. A
+device without screen capture
+rejects with `CAPTURE_UNAVAILABLE` and `details.reason`. It is never
+retried. See [streaming.md](streaming.md).
+
 Whole flows and step lists run on the hub as
 [flow bundles](rest.md#flow-bundles). `device.flow({file})` packs the file
 with its dependency closure (`maestro-d pack --flow`), uploads what the hub

@@ -1,0 +1,22 @@
+# About a minute of activity on an iPhone for the screen-capture scenarios
+# (docs/daemon/streaming.md): run it with `maestro-d test --record` to
+# record it, or without to check that a run that does not record never
+# starts screen capture. It has no recording steps of its own.
+appId: com.apple.Preferences
+---
+- launchApp
+- repeat:
+    times: 6
+    commands:
+      - swipe:
+          direction: UP
+      - extendedWaitUntil:
+          visible: "maestro-d-never-present"
+          timeout: 4500
+          optional: true
+      - swipe:
+          direction: DOWN
+      - extendedWaitUntil:
+          visible: "maestro-d-never-present"
+          timeout: 4500
+          optional: true

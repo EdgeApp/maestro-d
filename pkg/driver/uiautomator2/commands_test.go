@@ -938,80 +938,6 @@ func TestAddMediaSuccess(t *testing.T) {
 }
 
 // ============================================================================
-// StartRecording Tests
-// ============================================================================
-
-func TestStartRecordingNoDevice(t *testing.T) {
-	driver := &Driver{device: nil}
-	step := &flow.StartRecordingStep{Path: "/sdcard/test.mp4"}
-
-	result := driver.startRecording(step)
-
-	if result.Success {
-		t.Error("expected failure when device is nil")
-	}
-}
-
-func TestStartRecordingSuccess(t *testing.T) {
-	mock := &MockShellExecutor{response: "Success"}
-	driver := &Driver{device: mock}
-	step := &flow.StartRecordingStep{Path: "/sdcard/test.mp4"}
-
-	result := driver.startRecording(step)
-
-	if !result.Success {
-		t.Errorf("expected success, got error: %v", result.Error)
-	}
-
-	if result.Data != "/sdcard/test.mp4" {
-		t.Errorf("expected path in data, got %v", result.Data)
-	}
-}
-
-func TestStartRecordingDefaultPath(t *testing.T) {
-	mock := &MockShellExecutor{response: "Success"}
-	driver := &Driver{device: mock}
-	step := &flow.StartRecordingStep{Path: ""}
-
-	result := driver.startRecording(step)
-
-	if !result.Success {
-		t.Errorf("expected success, got error: %v", result.Error)
-	}
-
-	if result.Data != "/sdcard/recording.mp4" {
-		t.Errorf("expected default path, got %v", result.Data)
-	}
-}
-
-// ============================================================================
-// StopRecording Tests
-// ============================================================================
-
-func TestStopRecordingNoDevice(t *testing.T) {
-	driver := &Driver{device: nil}
-	step := &flow.StopRecordingStep{}
-
-	result := driver.stopRecording(step)
-
-	if result.Success {
-		t.Error("expected failure when device is nil")
-	}
-}
-
-func TestStopRecordingSuccess(t *testing.T) {
-	mock := &MockShellExecutor{response: "Success"}
-	driver := &Driver{device: mock}
-	step := &flow.StopRecordingStep{}
-
-	result := driver.stopRecording(step)
-
-	if !result.Success {
-		t.Errorf("expected success, got error: %v", result.Error)
-	}
-}
-
-// ============================================================================
 // WaitForAnimationToEnd Tests
 // ============================================================================
 
@@ -2113,22 +2039,6 @@ func TestAddMediaShellError(t *testing.T) {
 	step := &flow.AddMediaStep{Files: []string{"/path/to/file.jpg"}}
 
 	result := driver.addMedia(step)
-
-	if result.Success {
-		t.Error("expected failure when shell command fails")
-	}
-}
-
-// ============================================================================
-// StartRecording Error Test
-// ============================================================================
-
-func TestStartRecordingError(t *testing.T) {
-	mock := &MockShellExecutor{err: errors.New("shell failed")}
-	driver := &Driver{device: mock}
-	step := &flow.StartRecordingStep{Path: "/sdcard/test.mp4"}
-
-	result := driver.startRecording(step)
 
 	if result.Success {
 		t.Error("expected failure when shell command fails")

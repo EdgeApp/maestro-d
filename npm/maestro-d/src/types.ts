@@ -80,6 +80,7 @@ export type ErrorCode =
   | 'HUB_VERSION'
   | 'LEASE_REQUIRED'
   | 'LEASE_EXPIRED'
+  | 'CAPTURE_UNAVAILABLE'
 
 export interface ErrorBody {
   code: ErrorCode
@@ -459,7 +460,10 @@ export interface StatusResult extends Envelope {
 export interface DaemonEvent {
   seq: number
   time: string
-  /** step | nestedStep | device.attached | device.detached | device.booted | … */
+  /**
+   * step | nestedStep | device.attached | device.detached | device.booted |
+   * device.capture (message capturing | unavailable | lost, error the reason) | …
+   */
   type: string
   device?: string
   depth?: number
@@ -468,6 +472,29 @@ export interface DaemonEvent {
   durationMs?: number
   error?: string
   message?: string
+}
+
+// ---------------------------------------------------------------------------
+// Screen streams (GET /stream)
+
+export interface StreamOptions {
+  /** Requested frame rate, 3 to 60 (default 15): a ceiling on Android, advisory on iOS. */
+  fps?: number
+  /** Include the device's audio when it has any (default false). */
+  audio?: boolean
+  /** Ends the stream: `body` then closes cleanly. */
+  signal?: AbortSignal
+}
+
+/** A device's live screen: fragmented MP4 (an init segment, then one fragment per frame). */
+export interface VideoStream {
+  /** The running frame rate, or 'device' when the device picks it (iOS). */
+  fps: number | 'device'
+  /** Whether the stream carries an audio track. */
+  audio: boolean
+  /** The tracks' codecs, as MediaSource wants them: `avc3.640028`, `avc3.640028,mp4a.40.2`, `…,ipcm`, `…,fpcm`. */
+  codecs: string
+  body: ReadableStream<Uint8Array>
 }
 
 // ---------------------------------------------------------------------------

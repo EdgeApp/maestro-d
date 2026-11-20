@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -218,13 +219,14 @@ func (d *stubbornDriver) Execute(step flow.Step) *core.CommandResult {
 	return d.Driver.Execute(step)
 }
 
-// waitFor polls cond until it holds, failing the test after 5 s.
+// waitFor polls cond until it holds, failing the test after 20 s: CI runs
+// many packages at once under -race, and a teardown can take seconds there.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 5s")
+			t.Fatal("condition not met within 20s")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -589,7 +591,10 @@ func TestLeases_ExpiryInterruptsARunningStep(t *testing.T) {
 }
 
 // A lease whose window ends while its attach runs ends that attach: the
-// device is not left attached without a lease.
+// device is not left attached without a lease. The request is answered
+// LEASE_EXPIRED as the window ends, without waiting for the attach; the
+// lease's teardown detaches the device once the attach has unwound, so
+// the device is free a moment after the answer, not by then.
 func TestLeases_WindowEndsDuringTheLeaseAttach(t *testing.T) {
 	env := newHubEnv(t, Config{})
 	attaching := make(chan struct{})
@@ -614,9 +619,10 @@ func TestLeases_WindowEndsDuringTheLeaseAttach(t *testing.T) {
 	if err == nil {
 		t.Fatal("an attach outlived its lease")
 	}
-	if devs, _ := env.local.Devices(ctx, "mock"); devs[0].Attached || devs[0].Lease != nil {
-		t.Fatalf("left attached: %+v", devs[0])
-	}
+	waitFor(t, func() bool {
+		devs, _ := env.local.Devices(ctx, "mock")
+		return !devs[0].Attached && devs[0].Lease == nil
+	})
 	waitReportsReleased(t, env.s)
 }
 
@@ -1819,8 +1825,26 @@ func TestLeases_GrantRefusesAnExpiredUnendedLease(t *testing.T) {
 // A client that leaves while a selector lease boots its simulator gets no
 // lease, and the simulator, booted for nobody, is shut down again rather
 // than left running unleased.
+//
+// The hub knows the client left only once its HTTP server has seen the
+// connection close, which can come well after the client's own call
+// returned (a busy machine, or GOMAXPROCS=1, runs the boot first): a boot
+// that ends before that is a lease for a client still there as far as the
+// hub can tell. So the test lets the boot end only after the request's
+// context has ended.
 func TestLeases_SelectorBootCancelledMidBoot(t *testing.T) {
 	env := newHubEnv(t, Config{})
+	left := make(chan struct{})
+	var leftOnce sync.Once
+	h := env.s.Handler()
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/leases" {
+			context.AfterFunc(r.Context(), func() { leftOnce.Do(func() { close(left) }) })
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(hs.Close)
+	client := NewHTTPClient(hs.URL, "t", nil)
 	gate := make(chan struct{})
 	booting := make(chan struct{})
 	var once sync.Once
@@ -1837,13 +1861,18 @@ func TestLeases_SelectorBootCancelledMidBoot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := env.local.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Name: "Spare Phone", Boot: true}})
+		_, err := client.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Name: "Spare Phone", Boot: true}})
 		done <- err
 	}()
 	<-booting
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("a cancelled lease request succeeded")
+	}
+	select {
+	case <-left:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the hub did not see the client leave")
 	}
 	open()
 	waitFor(t, func() bool {
@@ -2787,3 +2816,72 @@ func TestShared_TVOnPlainDaemon(t *testing.T) {
 		t.Fatal("a plain daemon hid a TV")
 	}
 }
+
+// U19: leaseGate flushes (every leased route on a hub can stream) and
+// lets http.ResponseController reach the request's writer; once closed,
+// Flush does nothing. A leased stream on a hub sends its init segment at
+// once, and a stream without the lease is LEASE_REQUIRED.
+func TestLeases_GateFlushesAStream(t *testing.T) {
+	var _ http.Flusher = (*leaseGate)(nil)
+	rec := httptest.NewRecorder()
+	g := &leaseGate{w: rec, header: http.Header{}}
+	if g.Unwrap() != rec {
+		t.Fatal("Unwrap does not return the request's writer")
+	}
+	g.Header().Set("X-Test", "1")
+	g.Flush()
+	if !rec.Flushed || rec.Header().Get("X-Test") != "1" {
+		t.Fatalf("Flush: flushed %t header %v", rec.Flushed, rec.Header())
+	}
+	closed := httptest.NewRecorder()
+	gc := &leaseGate{w: closed, header: http.Header{}, closed: true}
+	gc.Flush()
+	if closed.Flushed {
+		t.Fatal("a closed gate flushed")
+	}
+
+	env := newHubEnv(t, Config{})
+	src := newStepSource()
+	src.tiny = true // a few hundred bytes in all: nothing but a flush sends them
+	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
+		sess := capture.NewSession(src)
+		return &capDriver{Driver: mock.New(mock.Config{Platform: "mock", DeviceID: id}), sess: sess},
+			DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}, sess.Close, nil
+	}
+	env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := make(chan []byte, 1)
+	done := make(chan error, 1)
+	src.next <- true // one keyframe, then nothing until the test ends
+	go func() {
+		_, err := env.remote.Stream(ctx, "mock-1", StreamOptions{}, writerFunc(func(p []byte) (int, error) {
+			select {
+			case first <- append([]byte(nil), p...):
+			default:
+			}
+			return len(p), nil
+		}))
+		done <- err
+	}()
+	select {
+	case b := <-first:
+		if len(b) < 8 || string(b[4:8]) != "ftyp" {
+			t.Fatalf("first bytes % x", b[:min(len(b), 16)])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leased stream's init segment was not flushed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("stream ended with %v", err)
+	}
+	other := NewHTTPClient(env.remote.BaseURL(), "t", nil)
+	if _, err := other.Stream(context.Background(), "mock-1", StreamOptions{}, io.Discard); codeOf(t, err) != CodeLeaseRequired {
+		t.Fatalf("without the lease: %v", err)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

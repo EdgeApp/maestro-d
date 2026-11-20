@@ -579,6 +579,11 @@ type RunConfig struct {
 	// UpdateScreenshots overwrites existing assertScreenshot baselines.
 	UpdateScreenshots bool
 
+	// maestro-d: ScreenCapture starts a physical iPhone's or iPad's screen
+	// capture at attach (ios_capture.go). The daemon's attach always sets
+	// it; `maestro-d test` only when it records.
+	ScreenCapture bool
+
 	// Record captures a screen recording of every flow (--record / --video).
 	Record bool
 	// RecordMode is the retention decision for those recordings:
@@ -1424,6 +1429,7 @@ func determineExecutionMode(cfg *RunConfig, emulatorMgr *emulator.Manager, simul
 // executeFlowsWithMode executes flows using the appropriate execution mode.
 func executeFlowsWithMode(cfg *RunConfig, flows []flow.Flow, needsParallel bool, deviceIDs []string) (*executor.RunResult, error) {
 	driverType := strings.ToLower(cfg.Driver)
+	cfg.ScreenCapture = cfg.Record || flowsRecord(flows) // maestro-d: capture iOS screens only when the run records
 
 	if driverType == "appium" {
 		count := cfg.Parallel
@@ -1987,7 +1993,7 @@ func CreateDriver(cfg *RunConfig) (core.Driver, func(), error) {
 			Platform: cfg.Platform,
 			DeviceID: getFirstDevice(cfg),
 		})
-		return driver, func() {}, nil
+		return driver, driver.Close, nil // maestro-d: ends the mock's capture session
 	}
 
 	switch platform {

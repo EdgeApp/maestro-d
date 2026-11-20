@@ -170,14 +170,26 @@ steps by bare id does not repeat the lookup for every step.
   resume.
 - `POST /v1/devices` (boot or create) and `GET /v1/catalog` take `hub` in the
   body or query; the CLI's `device catalog|create|start` take `--hub NAME`.
-- Uploads over 1 MiB, artifacts, screenshots and event streams travel on a
-  short-lived link of their own (at most 4 per peer), so a large APK never
-  delays another device's `tapOn` or the pings. A hub that dialed in gets
+- Uploads over 1 MiB, artifacts, screenshots, screen streams and event
+  streams travel on a short-lived link of their own, so a large APK never
+  delays another device's `tapOn` or the pings. At most 4 transfers run at
+  once per peer; event streams and screen streams, which last as long as
+  their client, do not count against that, so open streams never hold up
+  a download. A hub that dialed in gets
   them only once a test link to its address opens; until then (a hub behind
   NAT), and for a minute after one fails, they go on the control link at
   once. Only addresses a hub has dialed are passed on to its peers. Such a
   link closes with the peer's control link, so an event stream from a hub
   that vanished (missed pongs) ends rather than staying open and silent.
+- **Screen streams need a bulk link.** Continuous video on the control
+  link would delay its pings and every other device's steps, so a screen
+  stream never falls back to it. To a peer this hub cannot dial (behind
+  NAT, not yet probed, or within a minute of a failed bulk dial), and when
+  the stream's own bulk dial fails, `GET /v1/devices/{id}/stream` fails
+  `PEER_UNAVAILABLE` with `details.reason: "peer-not-dialable"` and
+  `details.hub`, its message saying the peer is not dialable for screen
+  streams. Stream from that peer's hub directly, or give it an address
+  this hub can reach (`--advertise`).
 - If the owner's link is down, the request fails `PEER_UNAVAILABLE` (503,
   exit 3) with `details.hub`; so does one in flight when its link drops.
   Clients retry it with the same request id, so it runs at most once.

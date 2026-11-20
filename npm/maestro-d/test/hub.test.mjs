@@ -221,7 +221,7 @@ describe('error codes', () => {
     COMMAND_FAILED: [1, 422], USAGE: [2, 400], DAEMON_UNAVAILABLE: [3, 503], DEVICE_ERROR: [4, 502], BUSY: [5, 409],
     DEVICE_EXTERNAL: [5, 409], DEVICE_IN_USE: [5, 409], DEVICE_NOT_FOUND: [4, 404], DEVICE_NOT_ATTACHED: [2, 404],
     INTERRUPTED: [130, 499], INTERNAL: [4, 500], FORBIDDEN: [2, 403], PEER_UNAVAILABLE: [3, 503], HUB_NAME_TAKEN: [5, 409],
-    HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409],
+    HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409], CAPTURE_UNAVAILABLE: [4, 503],
   }
   test('EXIT_CODES and HTTP_STATUS agree with the daemon for every code', () => {
     assert.deepEqual(Object.keys(EXIT_CODES).sort(), Object.keys(TABLE).sort())

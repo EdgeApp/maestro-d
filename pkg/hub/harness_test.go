@@ -69,9 +69,33 @@ type testHub struct {
 	seen sync.Map // path → count
 	// lists counts the daemon's live device discoveries.
 	lists atomic.Int32
+	// driver, when set, makes the drivers of the devices attached after.
+	driver atomic.Pointer[func(id string) (core.Driver, func())]
 
 	logMu sync.Mutex
 	logs  []string
+}
+
+// logLines is a copy of the mesh log so far: the mesh appends to it from
+// its own goroutines, so it is never read without logMu.
+func (h *testHub) logLines() []string {
+	h.logMu.Lock()
+	defer h.logMu.Unlock()
+	return append([]string(nil), h.logs...)
+}
+
+// waitLogged waits up to 10 s for a mesh log line that contains sub: a
+// line is logged after what it reports is done, so not always by the time
+// a caller sees that done.
+func waitLogged(t *testing.T, h *testHub, sub string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for h.logged(sub) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no log line with %q: %v", sub, h.logLines())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // logged counts the mesh log lines that contain sub.
@@ -211,8 +235,12 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 	deps := daemon.Deps{
 		Version: "test",
 		NewDriver: func(ctx context.Context, id string, cfg daemon.AttachConfig) (core.Driver, daemon.DriverInfo, func(), error) {
-			d := mock.New(mock.Config{Platform: "mock", DeviceID: id})
-			return d, daemon.DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}, func() {}, nil
+			info := daemon.DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}
+			if f := h.driver.Load(); f != nil {
+				d, cleanup := (*f)(id)
+				return d, info, cleanup, nil
+			}
+			return mock.New(mock.Config{Platform: "mock", DeviceID: id}), info, func() {}, nil
 		},
 		ListDevices: func(platform string) []daemon.DeviceInfo {
 			h.lists.Add(1)

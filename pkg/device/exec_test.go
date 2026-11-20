@@ -268,3 +268,16 @@ func TestInstallCheckErrorNamesTheRealFault(t *testing.T) {
 }
 
 var errFakeShell = errors.New("device offline")
+
+// maestro-d: ADBPath returns the adb New resolved (U30).
+func TestAndroidDevice_ADBPath(t *testing.T) {
+	withFakeExec(t, fakeExec("device\n"))
+	withFakeLookPath(t, func(string) (string, error) { return "/opt/fake/adb", nil })
+	d, err := New("ABC123")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := d.ADBPath(); got != "/opt/fake/adb" {
+		t.Errorf("ADBPath = %q, want /opt/fake/adb", got)
+	}
+}

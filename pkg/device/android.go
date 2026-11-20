@@ -213,6 +213,12 @@ func (d *AndroidDevice) Serial() string {
 	return d.serial
 }
 
+// maestro-d: ADBPath returns the adb binary the device runs, so screen
+// capture (pkg/capture/scrcpy) can start its long-running adb shell.
+func (d *AndroidDevice) ADBPath() string {
+	return d.adbPath
+}
+
 // Shell executes a shell command on the device.
 func (d *AndroidDevice) Shell(cmd string) (string, error) {
 	return d.adb("shell", cmd)

@@ -6,14 +6,15 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
-// --record support (core.ScreenRecorder). Capture happens host-side via
-// `simctl io recordVideo`, so it is simulator-only: WDA itself exposes no
-// screen-capture endpoint for physical devices.
+// --record support (core.ScreenRecorder). On a simulator capture happens
+// host-side via `simctl io recordVideo`. maestro-d: a physical iPhone or
+// iPad records its screen capture session (capture.go), which
+// CreateIOSDriver starts through the QuickTime channel on macOS.
 
 // StartScreenRecording implements core.ScreenRecorder.
 func (d *Driver) StartScreenRecording() error {
 	if d.info == nil || !d.info.IsSimulator {
-		return fmt.Errorf("screen recording is supported on simulators only — physical iOS devices have no host-side capture path")
+		return d.startCaptureRecording() // maestro-d
 	}
 	if d.recording != nil {
 		return fmt.Errorf("a recording is already in progress")
@@ -28,6 +29,9 @@ func (d *Driver) StartScreenRecording() error {
 
 // StopScreenRecording implements core.ScreenRecorder.
 func (d *Driver) StopScreenRecording(hostPath string) error {
+	if d.info == nil || !d.info.IsSimulator {
+		return d.stopCaptureRecording(hostPath) // maestro-d
+	}
 	if d.recording == nil {
 		return fmt.Errorf("no recording in progress")
 	}

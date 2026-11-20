@@ -200,6 +200,7 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 		flowWriter:  report.NewFlowWriter(detail, rc.OutputDir, iw),
 		script:      NewScriptEngine(),
 		totalFlows:  1,
+		rec:         stepRecording{inReport: true},
 	}
 
 	// Prelude — mirrors FlowRunner.Run() up to the first step.
@@ -538,6 +539,7 @@ func (s *Session) Close() {
 		return
 	}
 	s.closed = true
+	_ = s.fr.finishRecording()
 	status := report.StatusPassed
 	if s.failed {
 		status = report.StatusFailed

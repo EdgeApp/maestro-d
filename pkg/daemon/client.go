@@ -982,6 +982,159 @@ func (c *Client) Artifact(ctx context.Context, device, path string, w io.Writer)
 	return nil
 }
 
+// StreamOptions are a screen stream's options.
+type StreamOptions struct {
+	// FPS is the requested frame rate (3–60); 0 asks for the default (15).
+	FPS int
+	// Audio asks for the device's audio as well.
+	Audio bool
+	// Duration, when set, ends the stream that long after its headers
+	// arrived.
+	Duration time.Duration
+	// OnStart, when set, is told the stream's details once its headers
+	// arrived, before the first bytes are copied.
+	OnStart func(StreamInfo)
+}
+
+// StreamInfo describes a stream, from its response headers.
+type StreamInfo struct {
+	// FPS is the running frame rate, or "device" when the device picks it.
+	FPS    string
+	Audio  bool
+	Codecs string
+}
+
+// Stream copies the device's screen stream (fragmented MP4, GET
+// /v1/devices/{id}/stream) into w until ctx ends, opts.Duration passes, or
+// the daemon ends it (the device was detached, the capture stopped). It
+// copies whole top-level MP4 boxes only, holding each moof until its mdat
+// is complete, so w always ends on a fragment boundary and plays. Ending
+// it through ctx after the stream started is not an error. It is never
+// retried: a stream that dropped is a new stream.
+func (c *Client) Stream(ctx context.Context, device string, opts StreamOptions, w io.Writer) (StreamInfo, error) {
+	q := url.Values{}
+	if opts.FPS != 0 {
+		q.Set("fps", strconv.Itoa(opts.FPS))
+	}
+	if opts.Audio {
+		q.Set("audio", "true")
+	}
+	path := devPath(device, "/stream")
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return StreamInfo{}, err
+	}
+	req.Header.Set("Accept", "video/mp4")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return StreamInfo{}, WrapErr(CodeInterrupted, ctx.Err())
+		}
+		return StreamInfo{}, Errorf(CodeDaemonUnavailable, "daemon %s: %v", c.describe(), unwrapURLError(err))
+	}
+	defer resp.Body.Close()
+	c.noteLeaseExpired(req, resp)
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return StreamInfo{}, errorFromResponse(resp.StatusCode, resp.Header, data)
+	}
+	info := StreamInfo{
+		FPS:    resp.Header.Get(HeaderStreamFPS),
+		Audio:  resp.Header.Get(HeaderStreamAudio) == "true",
+		Codecs: resp.Header.Get(HeaderStreamCodecs),
+	}
+	if opts.OnStart != nil {
+		opts.OnStart(info)
+	}
+	copyCtx := ctx
+	if opts.Duration > 0 {
+		var cancel context.CancelFunc
+		copyCtx, cancel = context.WithTimeout(ctx, opts.Duration)
+		defer cancel()
+	}
+	stop := context.AfterFunc(copyCtx, func() { _ = resp.Body.Close() })
+	defer stop()
+	bw := &boxWriter{w: w}
+	_, err = io.Copy(bw, resp.Body)
+	ended := copyCtx.Err() != nil
+	switch {
+	case bw.err != nil:
+		return info, WrapErr(CodeUsage, bw.err)
+	case err != nil && !ended:
+		return info, Errorf(CodeDaemonUnavailable, "stream from daemon %s: %v", c.describe(), unwrapURLError(err))
+	}
+	return info, nil
+}
+
+// boxWriter passes whole top-level MP4 boxes to w: a box is written once
+// it is complete, and a moof only together with the box after it (its
+// mdat). err is the first error w returned.
+type boxWriter struct {
+	w    io.Writer
+	buf  []byte
+	held []byte // a complete moof waiting for its mdat
+	err  error
+}
+
+func (b *boxWriter) Write(p []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	b.buf = append(b.buf, p...)
+	for {
+		n, ok := boxSize(b.buf)
+		if !ok || len(b.buf) < n {
+			break
+		}
+		box := b.buf[:n:n]
+		b.buf = b.buf[n:]
+		if string(box[4:8]) == "moof" {
+			b.held = append(b.held[:0], box...)
+			continue
+		}
+		if len(b.held) > 0 {
+			box = append(b.held, box...)
+			b.held = b.held[:0]
+		}
+		if _, err := b.w.Write(box); err != nil {
+			b.err = err
+			return 0, err
+		}
+	}
+	if len(b.buf) == 0 {
+		b.buf = nil
+	}
+	return len(p), nil
+}
+
+// boxSize reads a box header: its total size, or false when the header is
+// incomplete. A size below the header's own length (0, "to the end of the
+// file", included) is taken as the rest of the data, which never
+// completes it.
+func boxSize(b []byte) (int, bool) {
+	if len(b) < 8 {
+		return 0, false
+	}
+	size := uint64(b[0])<<24 | uint64(b[1])<<16 | uint64(b[2])<<8 | uint64(b[3])
+	hdr := uint64(8)
+	if size == 1 {
+		if len(b) < 16 {
+			return 0, false
+		}
+		size, hdr = 0, 16
+		for _, x := range b[8:16] {
+			size = size<<8 | uint64(x)
+		}
+	}
+	if size < hdr || size > 1<<40 {
+		return 0, false
+	}
+	return int(size), true
+}
+
 // ---------------------------------------------------------------------------
 // Leases (hubs)
 

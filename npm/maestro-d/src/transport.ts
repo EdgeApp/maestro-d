@@ -13,6 +13,7 @@ import * as fs from 'node:fs'
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as tls from 'node:tls'
+import { Readable, Transform, type TransformCallback } from 'node:stream'
 
 import { codeFromHeaders, MaestroError } from './errors.js'
 import type { Envelope } from './types.js'
@@ -59,6 +60,12 @@ export interface RawResponse {
   status: number
   headers: http.IncomingHttpHeaders
   body: Buffer
+}
+
+/** A streamed response: its headers, and its body as a web stream. */
+export interface StreamResponse {
+  headers: http.IncomingHttpHeaders
+  body: ReadableStream<Uint8Array>
 }
 
 const RETRY_ERRNOS = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ECONNABORTED', 'ETIMEDOUT', 'UND_ERR_SOCKET'])
@@ -410,6 +417,84 @@ export class Transport {
     }
   }
 
+  /**
+   * Open a long-lived fragmented-MP4 stream (a device's screen) on a socket
+   * of its own, with the device's lease. A non-200 answer rejects with the
+   * daemon's error. The body carries whole top-level boxes only (a `moof`
+   * together with its `mdat`), so it ends on a fragment boundary both when
+   * the daemon ends it and when `signal` fires; it is never retried.
+   * Cancelling the body (or abandoning it in a `for await` or a failed
+   * `pipeline`) closes the connection.
+   */
+  async stream(path: string, opts: { signal?: AbortSignal; accept?: string } = {}): Promise<StreamResponse> {
+    const { signal } = opts
+    const headers: http.OutgoingHttpHeaders = {
+      'X-Maestro-Api-Version': API_VERSION,
+      Accept: opts.accept ?? 'video/mp4',
+    }
+    if (this.token) headers.Authorization = `Bearer ${this.token}`
+    this.leaseHeader(path, headers)
+    const id = pathDevice(path)
+    const lease = id === undefined ? undefined : this.leases.get(id)
+    // The signal is not handed to the request: aborting it would fail the
+    // body. It ends the body here instead.
+    const reqOpts: https.RequestOptions = { ...this.baseOptions('GET', headers), path, agent: false }
+    if (this.ca) reqOpts.ca = this.ca
+    if (signal?.aborted) throw MaestroError.of('INTERRUPTED', 'request aborted')
+
+    let req: http.ClientRequest | undefined
+    const res = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      const onAbort = (): void => {
+        req?.destroy()
+        reject(MaestroError.of('INTERRUPTED', 'request aborted'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      req = this.request(reqOpts, (r) => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve(r)
+      })
+      req.on('error', (err) => {
+        signal?.removeEventListener('abort', onAbort)
+        reject(this.transportError(err, signal))
+      })
+      req.end()
+    })
+    if (res.statusCode !== 200) {
+      const chunks: Buffer[] = []
+      for await (const c of res) chunks.push(c as Buffer)
+      const raw: RawResponse = { status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }
+      this.noteLeaseExpired(path, lease, raw)
+      throw MaestroError.fromResponse(raw.status, raw.body.toString('utf8'), undefined, codeFromHeaders(res.headers))
+    }
+    const out = new Mp4Boxes()
+    res.pipe(out)
+    // The consumer can end the body itself: body.cancel(), a break out of
+    // a for await over it, or a pipeline that fails on its write side all
+    // destroy out, after which pipe only unpipes res. The response (and
+    // its socket, agent: false) goes with it, or the daemon would keep
+    // writing into a socket nobody reads.
+    out.on('close', () => {
+      if (!res.destroyed) res.destroy()
+    })
+    const finish = (): void => {
+      res.unpipe(out)
+      out.end()
+      res.destroy()
+    }
+    if (signal?.aborted) finish()
+    else signal?.addEventListener('abort', finish, { once: true })
+    res.on('error', (err) => {
+      if (signal?.aborted) return
+      out.destroy(this.transportError(err, signal))
+    })
+    res.on('close', () => {
+      signal?.removeEventListener('abort', finish)
+      // A connection that dropped before the body's end is an error.
+      if (!res.complete && !signal?.aborted && !out.destroyed) out.destroy(MaestroError.of('DAEMON_UNAVAILABLE', `daemon ${this.describe}: the stream was cut off`))
+    })
+    return { headers: res.headers, body: Readable.toWeb(out) as ReadableStream<Uint8Array> }
+  }
+
   private transportError(err: unknown, signal?: AbortSignal): MaestroError {
     if (err instanceof MaestroError) return err
     const e = err as NodeJS.ErrnoException
@@ -418,4 +503,81 @@ export class Transport {
     }
     return MaestroError.of('DAEMON_UNAVAILABLE', `daemon ${this.describe}: ${e.message ?? String(err)}`, { cause: err })
   }
+}
+
+/**
+ * Splits an MP4 byte stream into whole top-level boxes, as the Go client's
+ * boxWriter does: a box passes once it is complete, and a `moof` only
+ * together with the box after it (its `mdat`). An incomplete box when the
+ * stream ends is dropped, so the output always ends on a box boundary.
+ */
+export class Mp4Boxes extends Transform {
+  private chunks: Buffer[] = []
+  private size = 0
+  private held: Buffer | undefined
+
+  override _transform(chunk: Buffer, _enc: BufferEncoding, cb: TransformCallback): void {
+    this.chunks.push(chunk)
+    this.size += chunk.length
+    for (;;) {
+      const n = boxSize(this.peek(16))
+      if (n === undefined || this.size < n) break
+      const box = this.shift(n)
+      if (box.toString('latin1', 4, 8) === 'moof') {
+        this.held = box
+        continue
+      }
+      if (this.held !== undefined) {
+        this.push(Buffer.concat([this.held, box]))
+        this.held = undefined
+      } else {
+        this.push(box)
+      }
+    }
+    cb()
+  }
+
+  override _flush(cb: TransformCallback): void {
+    this.chunks = []
+    this.size = 0
+    this.held = undefined
+    cb()
+  }
+
+  /** The first `n` buffered bytes, or fewer when fewer are buffered. */
+  private peek(n: number): Buffer {
+    const first = this.chunks[0]
+    if (first === undefined || first.length >= n || this.chunks.length === 1) return (first ?? Buffer.alloc(0)).subarray(0, n)
+    const all = Buffer.concat(this.chunks)
+    this.chunks = [all]
+    return all.subarray(0, n)
+  }
+
+  /** Removes and returns the first `n` buffered bytes (n ≤ size). */
+  private shift(n: number): Buffer {
+    const first = this.chunks[0]
+    const all = this.chunks.length === 1 && first !== undefined ? first : Buffer.concat(this.chunks)
+    const rest = all.subarray(n)
+    this.chunks = rest.length > 0 ? [rest] : []
+    this.size = rest.length
+    return all.subarray(0, n)
+  }
+}
+
+/**
+ * A box header's total size, or undefined while the header is incomplete.
+ * A size below the header's own length (0, "to the end of the file",
+ * included) never completes.
+ */
+export function boxSize(b: Buffer): number | undefined {
+  if (b.length < 8) return undefined
+  let size = b.readUInt32BE(0)
+  let hdr = 8
+  if (size === 1) {
+    if (b.length < 16) return undefined
+    size = Number(b.readBigUInt64BE(8))
+    hdr = 16
+  }
+  if (size < hdr || size > 2 ** 40) return undefined
+  return size
 }

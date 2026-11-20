@@ -1468,14 +1468,22 @@ func TestRunner_AssertConditionStep(t *testing.T) {
 	}
 }
 
+// The run is cancelled inside the repeat, on its third tap, rather than
+// after a fixed time: a busy machine can spend that time before the flow
+// starts, and a flow cancelled before it starts is skipped, which leaves
+// the run passed.
 func TestRunner_RepeatStep_ContextCancellation(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	execCount := 0
 	driver := &mockDriver{
 		executeFunc: func(step flow.Step) *core.CommandResult {
 			execCount++
-			time.Sleep(50 * time.Millisecond)
+			if execCount == 3 {
+				cancel()
+			}
 			return &core.CommandResult{Success: true}
 		},
 	}
@@ -1503,9 +1511,6 @@ func TestRunner_RepeatStep_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
 	result, err := runner.Run(ctx, flows)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -1515,9 +1520,9 @@ func TestRunner_RepeatStep_ContextCancellation(t *testing.T) {
 	if result.Status == report.StatusPassed {
 		t.Errorf("Status should not be passed after cancellation")
 	}
-	// Should have executed less than 100 times
-	if execCount >= 100 {
-		t.Errorf("execCount = %d, should be less than 100", execCount)
+	// The repeat stops at the iteration after the cancel.
+	if execCount != 3 {
+		t.Errorf("execCount = %d, want 3", execCount)
 	}
 }
 
@@ -1762,14 +1767,21 @@ func TestRunner_NestedFlowControl(t *testing.T) {
 	}
 }
 
+// Cancelled inside the retry, on its third attempt, as
+// TestRunner_RepeatStep_ContextCancellation is: a fixed time can run out
+// before the flow starts, which skips it and leaves the run passed.
 func TestRunner_RetryStep_ContextCancellation(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	execCount := 0
 	driver := &mockDriver{
 		executeFunc: func(step flow.Step) *core.CommandResult {
 			execCount++
-			time.Sleep(50 * time.Millisecond)
+			if execCount == 3 {
+				cancel()
+			}
 			return &core.CommandResult{Success: false, Error: &testError{msg: "fail"}}
 		},
 	}
@@ -1797,9 +1809,6 @@ func TestRunner_RetryStep_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
 	result, err := runner.Run(ctx, flows)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -1809,9 +1818,9 @@ func TestRunner_RetryStep_ContextCancellation(t *testing.T) {
 	if result.Status == report.StatusPassed {
 		t.Errorf("Status should not be passed after cancellation")
 	}
-	// Should have executed less than 100 times
-	if execCount >= 100 {
-		t.Errorf("execCount = %d, should be less than 100", execCount)
+	// The retry stops at the attempt after the cancel.
+	if execCount != 3 {
+		t.Errorf("execCount = %d, want 3", execCount)
 	}
 }
 
@@ -2185,6 +2194,8 @@ name: Sub Flow
 	}
 }
 
+// Cancelled inside the retry, on its third attempt (see
+// TestRunner_RetryStep_ContextCancellation).
 func TestRunner_RetryStep_ExternalFile_ContextCancellation(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2200,9 +2211,15 @@ name: Sub Flow
 		t.Fatalf("Failed to write subflow: %v", err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	execCount := 0
 	driver := &mockDriver{
 		executeFunc: func(step flow.Step) *core.CommandResult {
-			time.Sleep(50 * time.Millisecond)
+			execCount++
+			if execCount == 3 {
+				cancel()
+			}
 			return &core.CommandResult{Success: false, Error: &testError{msg: "fails"}}
 		},
 	}
@@ -2228,9 +2245,6 @@ name: Sub Flow
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
 	result, err := runner.Run(ctx, flows)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -2239,6 +2253,9 @@ name: Sub Flow
 	// Should fail due to cancellation
 	if result.Status == report.StatusPassed {
 		t.Errorf("Status should not be passed after cancellation")
+	}
+	if execCount != 3 {
+		t.Errorf("execCount = %d, want 3", execCount)
 	}
 }
 

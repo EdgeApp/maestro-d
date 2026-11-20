@@ -96,6 +96,10 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		logger.Info("Device %s is a physical device", udid)
 	}
 
+	// maestro-d: step 0, screen capture before app install and WDA (ios_capture.go)
+	capt := startIOSCapture(cfg, udid, isSimulator)
+	defer capt.closeUnlessKept() // maestro-d: every early return ends the capture session
+
 	// 1. Install app if specified
 	if cfg.AppFile != "" && !cfg.NoAppInstall {
 		printSetupStep(fmt.Sprintf("Installing app: %s", cfg.AppFile))
@@ -190,6 +194,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		clientBuildDir = built.BuildDir()
 	}
 	driver, cleanup := configuredIOSDriver(client, platformInfo, cfg, runner.IsTV(), runner.Cleanup, clientBuildDir)
+	cleanup = capt.bind(driver, cleanup) // maestro-d: cleanup ends WDA, then the capture session
 	return driver, cleanup, nil
 }
 
