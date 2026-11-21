@@ -42,6 +42,8 @@ type FlowRunner struct {
 	rec stepRecording
 	// maestro-d: the device's traffic shaper, nil when the host has none (trafficshape.go)
 	shaper TrafficShaper
+	// maestro-d: what this runner set that its session's end must undo (cleanup.go)
+	undo sessionUndo
 }
 
 // Run executes the flow and returns the result.

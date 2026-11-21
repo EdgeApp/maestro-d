@@ -141,6 +141,9 @@ type Session struct {
 	cfg     SessionConfig
 	closed  bool
 	failed  bool
+	// ending is set by Cleanup (maestro-d): from then on the session runs
+	// no more steps, so none can redo what the cleanup undid before Close.
+	ending bool
 }
 
 // NewSession creates the report skeleton, applies the flow-level prelude
@@ -317,7 +320,7 @@ func (s *Session) withOutputs(out *StepOutcome, call *CallerPolicy) *StepOutcome
 // policy and restores the session's flow directory.
 func (s *Session) beginPolicy(ctx context.Context) (context.Context, *CallerPolicy, func()) {
 	p := CallerPolicyFrom(ctx)
-	if p == nil || s.closed {
+	if p == nil || s.ended() {
 		return ctx, nil, func() {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -390,7 +393,7 @@ func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnE
 func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.ended() {
 		return s.closedOutcome(flow.StepRunFlow, "runFlow")
 	}
 	ctx, call, done := s.beginPolicy(ctx)
@@ -461,7 +464,7 @@ func (s *Session) runFlowSteps(f flow.Flow) (result *core.CommandResult) {
 func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.ended() {
 		return nil, errSessionClosed
 	}
 	defer s.enterStep(ctx)()
@@ -472,7 +475,7 @@ func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
 func (s *Session) Hierarchy(ctx context.Context) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.ended() {
 		return nil, errSessionClosed
 	}
 	defer s.enterStep(ctx)()
@@ -523,7 +526,7 @@ func (s *Session) SetVar(name, value string) {
 func (s *Session) Eval(js string) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.ended() {
 		return nil, errSessionClosed
 	}
 	v, err := s.fr.script.js.Eval(js)
@@ -559,6 +562,10 @@ func (s *Session) Close() {
 }
 
 var errSessionClosed = fmt.Errorf("session is closed")
+
+// ended reports whether the session takes no more steps: it is closed, or
+// its cleanup has run (maestro-d). Caller holds s.mu.
+func (s *Session) ended() bool { return s.closed || s.ending }
 
 func (s *Session) closedOutcome(typ flow.StepType, desc string) *StepOutcome {
 	return &StepOutcome{
@@ -596,7 +603,7 @@ func (s *Session) appendCommand(cmd report.Command) int {
 }
 
 func (s *Session) executeLocked(ctx context.Context, step flow.Step) *StepOutcome {
-	if s.closed {
+	if s.ended() {
 		return s.closedOutcome(step.Type(), step.Describe())
 	}
 	fr := s.fr

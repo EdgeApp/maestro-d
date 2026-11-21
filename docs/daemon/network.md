@@ -148,6 +148,19 @@ Remote callers never see the config.
 for a device whose host has both calls configured; a hub's merged listing
 carries each hub's own answer.
 
+## Cleanup at session end
+
+A shaper has no expiry, so maestro-d undoes what a session set. When the
+session that sent a `setTrafficShape` ends — `detach`, `device stop`, the
+lease's release or expiry, a hub or daemon shutting down — maestro-d sends
+that device's `resetTrafficShape` call. A session whose last shaping
+command was `resetTrafficShape` sends nothing more. The same goes for
+Android airplane mode: a session that ran `setAirplaneMode` or
+`toggleAirplaneMode` turns it off as it ends.
+
+Each undo is bounded at 4 s and logged in the daemon log; one that fails
+or does not answer is logged and never holds up the rest of the teardown.
+
 ## Simulating a lost network on iOS
 
 iOS has no airplane mode in maestro-d: `setAirplaneMode` and

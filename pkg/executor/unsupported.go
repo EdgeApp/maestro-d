@@ -58,6 +58,7 @@ func (fr *FlowRunner) executeAirplaneStep(step flow.Step) *core.CommandResult {
 	if info := fr.driver.GetPlatformInfo(); info != nil && isApplePlatform(info.Platform) {
 		return unsupportedResult(iosAirplaneMessage)
 	}
+	fr.undo.airplane = true
 	return fr.driver.Execute(step)
 }
 

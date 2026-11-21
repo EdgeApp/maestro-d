@@ -47,9 +47,13 @@ func (fr *FlowRunner) executeTrafficShapeStep(step flow.Step) *core.CommandResul
 		}
 		v := netshape.Values{Mbit: s.Mbit, LossPct: s.LossPct, LatencyMs: s.LatencyMs, JitterMs: s.JitterMs, Direction: direction}.WithDefaults()
 		res, err = fr.shaper.Set(ctx, v)
+		fr.undo.noteSet(err)
 		what = fmt.Sprintf("traffic shape set (mbit %v, lossPct %v, latencyMs %v, jitterMs %v, %s)", v.Mbit, v.LossPct, v.LatencyMs, v.JitterMs, v.Direction)
 	case *flow.ResetTrafficShapeStep:
 		res, err = fr.shaper.Reset(ctx)
+		if err == nil {
+			fr.undo.shaped = false
+		}
 		what = "traffic shape reset"
 	default:
 		return errorResult(fmt.Errorf("not a traffic-shaping step: %s", step.Type()))

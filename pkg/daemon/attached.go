@@ -50,6 +50,9 @@ type attached struct {
 	inFlite int32
 	// stopCapture ends the device.capture events (watchCapture).
 	stopCapture func()
+	// closing is closed when a detach's teardown has finished: until then
+	// the id stays reserved, so a new attach waits (takeAttached).
+	closing chan struct{}
 }
 
 var unsafePath = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -206,6 +209,9 @@ func (a *attached) close() {
 		a.stopCapture()
 	}
 	a.cancel()
+	// Undo what the session set on the device's network (traffic shape,
+	// Android airplane mode), on a fresh context: the attach's is ended.
+	a.session.Cleanup(context.Background())
 	a.session.Close()
 	discardDriver(a.id, a.cleanup)
 	if a.release != nil {

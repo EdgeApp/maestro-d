@@ -132,6 +132,16 @@ func TestE2E_TrafficShape(t *testing.T) {
 		t.Fatalf("exit %d\n%s", r.code, r.stderr)
 	}
 	expectCalls(`POST /v1/shape {"device":"mock-1"}`)
+
+	// 5. The end of the session that shaped a device resets it.
+	if r := run("setTrafficShape", "--device", "mock-1", "--latencyMs", "250"); r.code != 0 {
+		t.Fatalf("exit %d\n%s", r.code, r.stderr)
+	}
+	sr.take(t)
+	if r := run("detach", "--device", "mock-1"); r.code != 0 {
+		t.Fatalf("detach: exit %d\n%s", r.code, r.stderr)
+	}
+	expectCalls(`POST /v1/shape {"device":"mock-1"}`)
 }
 
 // B2: through two hubs, the hub the device is plugged into makes the call
