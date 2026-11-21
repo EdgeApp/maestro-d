@@ -60,6 +60,8 @@ type hubEnv struct {
 	// emuAVD, when set, lists a running emulator-5554 running that AVD;
 	// downAVD a shut-down AVD of that name.
 	emuAVD, downAVD string
+	// phones are listed as they are (Android phones with props).
+	phones []DeviceInfo
 	// tv, when set, lists a ready Apple TV, TV-1 "Lab TV"; tvKnown makes
 	// Deps.TVInfo know it.
 	tv, tvKnown bool
@@ -125,6 +127,7 @@ func newHubEnv(t *testing.T, cfg Config) *hubEnv {
 		if env.emuAVD != "" {
 			all = append(all, DeviceInfo{ID: "emulator-5554", Platform: "android", Kind: "emulator", Name: env.emuAVD, State: "device", Ready: true})
 		}
+		all = append(all, env.phones...)
 		var out []DeviceInfo
 		for _, d := range all {
 			if platform == "" || d.Platform == platform {

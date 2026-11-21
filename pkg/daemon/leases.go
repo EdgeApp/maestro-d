@@ -303,10 +303,15 @@ func bootKey(d DeviceInfo) string {
 	return d.ID
 }
 
-// avdKey is the bootKey of the AVD that running Android device d is listed
-// under (an emulator's name is its AVD's), or "" for any other device.
+// avdKey is the bootKey of the AVD that Android device d is listed under
+// (a running emulator's name is its AVD's, and a shut-down AVD is listed
+// as avd:<name>), or "" for any other device. A phone has none: phones are
+// named too, and two of one model share a name.
 func avdKey(d DeviceInfo) string {
 	if d.Platform != "android" || d.Name == "" {
+		return ""
+	}
+	if d.Kind != "emulator" && !strings.HasPrefix(d.ID, "emulator-") && !strings.HasPrefix(d.ID, AVDPrefix) {
 		return ""
 	}
 	return "android:" + strings.ToLower(d.Name)

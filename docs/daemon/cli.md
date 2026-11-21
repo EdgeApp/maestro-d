@@ -111,7 +111,7 @@ So the very first command on a fresh machine can be the whole setup:
 
 ```sh
 maestro-d launchApp co.edgesecure.app \
-  --device 00008110-0006098A02FA801E --platform ios --team-id G5LQ7MERPK
+  --device FAKE-IOS-UDID-0001 --platform ios --team-id G5LQ7MERPK
 ```
 
 It spawns the daemon, attaches the iPhone (starting WebDriverAgent), runs the
@@ -335,7 +335,7 @@ serial=$(maestro-d device start avd:ci-pixel --json | jq -r .device.id)
 maestro-d device delete "$serial"                     # stops the emulator, deletes the AVD
 udid=$(maestro-d device start "iPhone 16" --platform ios --json | jq -r .device.id)
 maestro-d attach --device "$udid" --app-file build/Edge.app
-maestro-d attach --device 29271FDH200ABP --app-file app-release.apk --app-id co.edgesecure.app
+maestro-d attach --device FAKEPIXEL0002 --app-file app-release.apk --app-id co.edgesecure.app
 maestro-d attach --device mock-1 --platform mock      # a fake device for trying things out
 ```
 
@@ -406,7 +406,7 @@ maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 command is short:
 
 ```sh
-export MAESTRO_D=task-1234 MAESTRO_DEVICE=29271FDH200ABP
+export MAESTRO_D=task-1234 MAESTRO_DEVICE=FAKEPIXEL0002
 maestro-d ps                                  # nobody else on that device?
 maestro-d launchApp co.edgesecure.app --clearState
 maestro-d tapOn "Get started"

@@ -60,6 +60,7 @@ type simctlCatalogDeviceTypes struct {
 		Name                    string `json:"name"`
 		ProductFamily           string `json:"productFamily"`
 		MinRuntimeVersionString string `json:"minRuntimeVersionString"`
+		ModelIdentifier         string `json:"modelIdentifier"`
 	} `json:"devicetypes"`
 }
 

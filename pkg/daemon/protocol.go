@@ -424,6 +424,7 @@ type DeviceInfo struct {
 	Platform  string `json:"platform"`       // android | ios | web | mock
 	Kind      string `json:"kind,omitempty"` // device | emulator | simulator | tv
 	Name      string `json:"name,omitempty"`
+	Model     string `json:"model,omitempty"` // hardware: "Pixel 8" (ro.product.model), "iPhone14,2"
 	OSVersion string `json:"osVersion,omitempty"`
 	State     string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
 	Ready     bool   `json:"ready"`

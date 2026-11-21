@@ -14,6 +14,7 @@ type SimulatorDevice struct {
 	OSVersion   string // e.g., "17.2" (extracted from Runtime)
 	State       string // "Shutdown", "Booted", etc.
 	IsAvailable bool
+	DeviceType  string // maestro-d: e.g. "com.apple.CoreSimulator.SimDeviceType.iPhone-16"
 }
 
 // SimulatorInstance tracks a simulator booted by maestro-runner.

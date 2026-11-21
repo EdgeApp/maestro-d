@@ -31,7 +31,7 @@ func resetTVCache(t *testing.T) {
 
 func TestPhysicalTVEntries(t *testing.T) {
 	stubTVs(t, []wdadriver.DevicectlTV{
-		{UDID: "tv-1", Name: "Lab TV", OSVersion: "26.3", Paired: true, Reachable: true, Tunnel: true},
+		{UDID: "tv-1", Name: "Lab TV", Model: "AppleTV14,1", OSVersion: "26.3", Paired: true, Reachable: true, Tunnel: true},
 		{UDID: "tv-2", Name: "Hall TV", OSVersion: "27.2.1", Paired: true, Reachable: true},
 		{UDID: "tv-4", Name: "Away", OSVersion: "26.6.1", Paired: true},
 		{UDID: "tv-3", Name: "Den", OSVersion: "26.1", Reachable: true},
@@ -39,7 +39,7 @@ func TestPhysicalTVEntries(t *testing.T) {
 	}, nil)
 	got := physicalTVEntries([]DeviceEntry{{ID: "phone-1"}}, true)
 	want := []DeviceEntry{
-		{Platform: "ios", Kind: "tv", ID: "tv-1", Name: "Lab TV", OSVersion: "26.3", State: "connected", Ready: true},
+		{Platform: "ios", Kind: "tv", ID: "tv-1", Name: "Lab TV", Model: "AppleTV14,1", OSVersion: "26.3", State: "connected", Ready: true},
 		{Platform: "ios", Kind: "tv", ID: "tv-2", Name: "Hall TV", OSVersion: "27.2.1", State: "paired", Ready: true},
 		{Platform: "ios", Kind: "tv", ID: "tv-4", Name: "Away", OSVersion: "26.6.1", State: "unavailable (off or out of reach)"},
 		{Platform: "ios", Kind: "tv", ID: "tv-3", Name: "Den", OSVersion: "26.1", State: "not ready (pair it in Xcode and enable developer mode)"},

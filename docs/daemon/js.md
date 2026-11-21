@@ -7,7 +7,7 @@ daemon the CLI uses, so a script and a shell can share a session.
 ```js
 import { MaestroD } from 'maestro-d'
 
-const m = await MaestroD.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' })
+const m = await MaestroD.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' })
 await m.launchApp({ clearState: true })
 await m.tapOn({ text: 'Get started' })
 try {

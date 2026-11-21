@@ -14,6 +14,7 @@ import (
 type DevicectlTV struct {
 	UDID      string
 	Name      string
+	Model     string // the product type, e.g. "AppleTV14,1"
 	OSVersion string
 	// Paired is true when the TV is paired with this host and in developer
 	// mode, so WDA and devicectl may drive it.
@@ -97,9 +98,10 @@ type devicectlRecord struct {
 		DeveloperModeStatus string `json:"developerModeStatus"`
 	} `json:"deviceProperties"`
 	HardwareProperties struct {
-		Platform string `json:"platform"`
-		Reality  string `json:"reality"`
-		UDID     string `json:"udid"`
+		Platform    string `json:"platform"`
+		ProductType string `json:"productType"`
+		Reality     string `json:"reality"`
+		UDID        string `json:"udid"`
 	} `json:"hardwareProperties"`
 }
 
@@ -124,6 +126,7 @@ func parseDevicectlTVs(data []byte) ([]DevicectlTV, error) {
 		tvs = append(tvs, DevicectlTV{
 			UDID:      hw.UDID,
 			Name:      d.DeviceProperties.Name,
+			Model:     hw.ProductType,
 			OSVersion: d.DeviceProperties.OSVersionNumber,
 			Paired: d.ConnectionProperties.PairingState == "paired" &&
 				d.DeviceProperties.DeveloperModeStatus == "enabled",

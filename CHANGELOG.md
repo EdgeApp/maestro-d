@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- added: Device listings (`GET /v1/devices`, `maestro-d device list`, `maestro-runner devices --json`, JS `devices()`, and every hub's) carry each ready Android phone's name, model and Android version, read once per adb connection, and running emulators carry their model and Android version beside their AVD name. Every entry gains `model`: `ro.product.model` on Android, the product type (`iPhone14,2`) on iOS phones and Apple TVs, and the device type's model identifier on simulators. `device list` shows it after the name.
+
 ## 3.2.0 (2026-11-20)
 
 - added: `assertScreenshot` takes three options for unattended runs. `mask` lists selectors whose elements are left out of the comparison on both images, on every driver including the web one; a mask element that is missing or has empty bounds fails the step, and `mask` cannot be combined with `cropOn`. `requireBaseline` fails with `BASELINE_MISSING` instead of creating a missing reference from the capture; with `--update-screenshots` the missing reference is written, so a suite that always sets `requireBaseline` records new baselines that way. `captureOut` is where the settled frame is always written, whether the comparison passes, fails or has no baseline; it may not name the step's reference or its diff. `captureOut` is an output, like `takeScreenshot`'s path: a remote caller's lands in the call's outputs directory, a client targeting a hub fetches it back, and `maestro-d pack --flow` refuses one that is absolute or leaves the flow's directory. See `docs/daemon/rest.md`.

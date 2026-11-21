@@ -1,7 +1,7 @@
 // maestro-d: run Maestro YAML commands one at a time from JavaScript.
 //
 //   import { MaestroD } from 'maestro-d'
-//   const m = await MaestroD.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' })
+//   const m = await MaestroD.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' })
 //   await m.launchApp({ clearState: true })
 //   await m.tapOn('Login')
 //   await m.assertVisible('Welcome', { timeout: 10_000 })

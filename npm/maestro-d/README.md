@@ -7,7 +7,7 @@ steps.
 ```js
 import { MaestroD } from 'maestro-d'
 
-const m = await MaestroD.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' })
+const m = await MaestroD.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' })
 await m.launchApp({ clearState: true })
 await m.tapOn({ text: 'Get Started' })
 await m.inputText({ text: 'alice@example.com' })
@@ -434,8 +434,8 @@ daemon runs each id once.
 ```js
 const d = await MaestroD.connect({ name: 'pair-test' })
 const [android, ios] = await Promise.all([
-  d.attach({ device: '29271FDH200ABP', appId: 'co.edgesecure.app' }),
-  d.attach({ device: '00008110-0006098A02FA801E', appId: 'co.edgesecure.app', teamId: 'G5LQ7MERPK' }),
+  d.attach({ device: 'FAKEPIXEL0002', appId: 'co.edgesecure.app' }),
+  d.attach({ device: 'FAKE-IOS-UDID-0001', appId: 'co.edgesecure.app', teamId: 'G5LQ7MERPK' }),
 ])
 await Promise.all([android.launchApp(), ios.launchApp()])
 ```
@@ -496,7 +496,7 @@ await d.deleteDevice(emu.id)                                     // stops the em
 The package also installs the `maestro-d` command:
 
 ```sh
-npx maestro-d launchApp co.edgesecure.app --device 29271FDH200ABP
+npx maestro-d launchApp co.edgesecure.app --device FAKEPIXEL0002
 npx maestro-d tapOn Login
 npx maestro-d commands           # every one-shot command
 npx maestro-d tapOn --help       # a command's fields

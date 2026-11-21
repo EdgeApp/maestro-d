@@ -140,6 +140,7 @@ func physicalTVEntries(seen []DeviceEntry, includeUnready bool) []DeviceEntry {
 			Kind:      "tv",
 			ID:        tv.UDID,
 			Name:      tv.Name,
+			Model:     tv.Model,
 			OSVersion: tv.OSVersion,
 			State:     state,
 			Ready:     tv.Ready(),

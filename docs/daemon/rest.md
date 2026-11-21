@@ -257,17 +257,17 @@ moment later. No body. On a hub it is served only on the unix socket
 ### `GET /v1/events` — server-sent events
 
 ```sh
-curl -sN -H "$H" "$D/v1/events?device=29271FDH200ABP"
+curl -sN -H "$H" "$D/v1/events?device=FAKEPIXEL0002"
 ```
 
 ```
 id: 17
 event: step
-data: {"seq":17,"time":"2026-09-10T10:01:02Z","type":"step","device":"29271FDH200ABP","step":"tapOn: text=\"Login\"","passed":true,"durationMs":312}
+data: {"seq":17,"time":"2026-09-10T10:01:02Z","type":"step","device":"FAKEPIXEL0002","step":"tapOn: text=\"Login\"","passed":true,"durationMs":312}
 
 id: 18
 event: device.detached
-data: {"seq":18,"time":"…","type":"device.detached","device":"29271FDH200ABP"}
+data: {"seq":18,"time":"…","type":"device.detached","device":"FAKEPIXEL0002"}
 ```
 
 | query / header | |
@@ -299,15 +299,24 @@ not), emulator AVDs — merged with what this and other daemons hold.
 {
   "ok": true, "exitCode": 0,
   "devices": [
-    { "id": "29271FDH200ABP", "platform": "android", "kind": "device", "name": "Pixel 7", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/29271FDH200ABP/20260910-100000" },
-    { "id": "CD9D3952-58FA-4E81-AC64-736189D71D1E", "platform": "ios", "kind": "simulator", "name": "iPhone 13 Pro", "osVersion": "26.0", "state": "Shutdown", "ready": false, "attached": false },
-    { "id": "00008110-0006098A02FA801E", "platform": "ios", "kind": "device", "name": "iPhone", "ready": true, "attached": false, "owner": "other-daemon" },
-    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "state": "device", "ready": true, "attached": false },
+    { "id": "FAKEPIXEL0002", "platform": "android", "kind": "device", "name": "Lab Pixel", "model": "Pixel 7", "osVersion": "15", "state": "device", "ready": true, "attached": true, "attachedAt": "…", "appId": "co.edgesecure.app", "driver": "uiautomator2", "reportDir": "…/reports/FAKEPIXEL0002/20260910-100000" },
+    { "id": "FAKE-SIM-UDID-0001", "platform": "ios", "kind": "simulator", "name": "iPhone 13 Pro", "model": "iPhone14,2", "osVersion": "26.0", "state": "Shutdown", "ready": false, "attached": false },
+    { "id": "FAKE-IOS-UDID-0001", "platform": "ios", "kind": "device", "name": "iPhone", "model": "iPhone15,4", "osVersion": "26.1", "ready": true, "attached": false, "owner": "other-daemon" },
+    { "id": "emulator-5554", "platform": "android", "kind": "emulator", "name": "Pixel_8_API_35", "model": "sdk_gphone64_arm64", "osVersion": "15", "state": "device", "ready": true, "attached": false },
     { "id": "avd:ci-pixel", "platform": "android", "kind": "emulator", "name": "ci-pixel", "state": "Shutdown", "ready": false, "attached": false, "createdBy": "maestro-d" },
-    { "id": "00000000000000000000000000000000000000a1", "platform": "ios", "kind": "tv", "name": "Lab TV", "osVersion": "26.3", "state": "connected", "ready": true, "attached": false }
+    { "id": "00000000000000000000000000000000000000a1", "platform": "ios", "kind": "tv", "name": "Lab TV", "model": "AppleTV14,1", "osVersion": "26.3", "state": "connected", "ready": true, "attached": false }
   ]
 }
 ```
+
+`name`, `model` and `osVersion` describe the hardware. An Android phone's
+`name` is its user-set device name, or its model when it has none; `model` is
+`ro.product.model` and `osVersion` is `ro.build.version.release`, read once
+per adb connection (a phone that has not finished booting lists its model as
+its name until a read 30 s later finds its user-set name). An iOS device's or Apple TV's `model` is its product type
+(`iPhone14,2`), and a simulator's is its device type's model identifier. A
+device that is offline or unauthorized lists without them, and so does every
+device of a hub running an older maestro-d.
 
 A running emulator's `name` is its AVD name. An AVD that is not running is
 listed once, as `avd:<name>`; booting it returns the emulator's serial.
@@ -425,7 +434,7 @@ test` takes. Idempotent: attaching an attached device answers with its
 current state and ignores the body.
 
 ```sh
-curl -s -H "$H" $D/v1/devices/00008110-0006098A02FA801E/attach -d '{
+curl -s -H "$H" $D/v1/devices/FAKE-IOS-UDID-0001/attach -d '{
   "platform": "ios",
   "appId": "co.edgesecure.app",
   "teamId": "G5LQ7MERPK",
@@ -650,7 +659,7 @@ that command's fields — its parameters and its modifiers together, exactly
 the keys the YAML map form takes:
 
 ```sh
-C=$D/v1/devices/29271FDH200ABP/commands
+C=$D/v1/devices/FAKEPIXEL0002/commands
 curl -s -H "$H" $C/tapOn       -d '{"text":"Login"}'
 curl -s -H "$H" $C/tapOn       -d '{"id":"submit","index":1,"timeout":5000,"optional":true}'
 curl -s -H "$H" $C/tapOn       -d '{"text":"Delete","childOf":{"id":"row-3"},"label":"delete row"}'
@@ -693,14 +702,14 @@ The response is a **step result**:
 ```json
 {
   "ok": true, "exitCode": 0,
-  "device": "29271FDH200ABP",
+  "device": "FAKEPIXEL0002",
   "step": "tapOn: text=\"Login\"",
   "type": "tapOn",
   "index": 3,
   "durationMs": 312,
   "element": { "id": "login_btn", "text": "Login", "bounds": {"x": 40, "y": 812, "width": 320, "height": 48} },
   "artifacts": { "screenshotAfter": "assets/flow-000/cmd-003-after.png" },
-  "reportDir": "/Users/me/.maestro-d/run/api/reports/29271FDH200ABP/20260910-100000"
+  "reportDir": "…/reports/FAKEPIXEL0002/20260910-100000"
 }
 ```
 
@@ -726,7 +735,7 @@ when artifacts were captured.
 ### `POST /v1/devices/{id}/steps` — a batch
 
 ```sh
-curl -s -H "$H" $D/v1/devices/29271FDH200ABP/steps -d '{
+curl -s -H "$H" $D/v1/devices/FAKEPIXEL0002/steps -d '{
   "steps": [ {"launchApp": "co.edgesecure.app"}, {"tapOn": "Login"}, "back" ],
   "continueOnError": false
 }'
@@ -746,7 +755,7 @@ failure and the status is its code's (`422` for `COMMAND_FAILED`):
 ```json
 {
   "ok": true, "exitCode": 0,
-  "device": "29271FDH200ABP",
+  "device": "FAKEPIXEL0002",
   "results": [ {step result}, {step result}, … ],
   "passed": 2, "failed": 1, "skipped": 0
 }
@@ -765,7 +774,7 @@ Query `wait` and `cwd` as for commands.
 ### `POST /v1/devices/{id}/flows` — a flow file
 
 ```sh
-curl -s -H "$H" $D/v1/devices/29271FDH200ABP/flows -d '{
+curl -s -H "$H" $D/v1/devices/FAKEPIXEL0002/flows -d '{
   "file": "/Users/me/edge/maestro/login.yaml",
   "env": { "USER": "alice" }
 }'
@@ -931,7 +940,7 @@ PNG bytes (`Content-Type: image/png`), or with `?format=json` /
 `Accept: application/json` the envelope `{"ok": true, "data": "<base64>"}`.
 
 ```sh
-curl -s -H "$H" $D/v1/devices/29271FDH200ABP/screenshot -o now.png
+curl -s -H "$H" $D/v1/devices/FAKEPIXEL0002/screenshot -o now.png
 ```
 
 ### `GET /v1/devices/{id}/stream?fps=15&audio=false`
@@ -1050,7 +1059,7 @@ WDA, which does not know the session's app, reports only `foregroundApp`.
 
 ### `GET /v1/devices/{id}/info`
 
-`{"ok": true, "data": {"platform": "android", "osVersion": "15", "deviceName": "Pixel 7", "deviceId": "29271FDH200ABP", "isSimulator": false, "screenWidth": 1080, "screenHeight": 2400, "appId": "co.edgesecure.app", "appVersion": "4.30.1", …}}`.
+`{"ok": true, "data": {"platform": "android", "osVersion": "15", "deviceName": "Pixel 7", "deviceId": "FAKEPIXEL0002", "isSimulator": false, "screenWidth": 1080, "screenHeight": 2400, "appId": "co.edgesecure.app", "appVersion": "4.30.1", …}}`.
 
 ### `GET /v1/devices/{id}/vars`, `PUT|POST /v1/devices/{id}/vars`
 
@@ -1062,7 +1071,7 @@ set: `{"ok": true, "vars": {…}}`.
 ### `POST /v1/devices/{id}/eval`
 
 ```sh
-curl -s -H "$H" $D/v1/devices/29271FDH200ABP/eval -d '{"script": "maestro.copiedText.length"}'
+curl -s -H "$H" $D/v1/devices/FAKEPIXEL0002/eval -d '{"script": "maestro.copiedText.length"}'
 ```
 
 Runs JavaScript in the session's engine (same `maestro`, `output`,
@@ -1073,7 +1082,7 @@ variables and `http` as `evalScript`) and answers `{"ok": true, "value":
 
 ```sh
 D=http://127.0.0.1:7788; H='Authorization: Bearer s3cret'
-ID=29271FDH200ABP
+ID=FAKEPIXEL0002
 maestro-d start --daemon api --http ${D#http://} --token s3cret
 
 curl -sf -H "$H" $D/v1/devices/$ID/attach -d '{"appId":"co.edgesecure.app"}' >/dev/null

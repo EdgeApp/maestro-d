@@ -367,6 +367,19 @@ const devicectlConnected = `{"result":{"connectionProperties":{"tunnelIPAddress"
 
 const devicectlDisconnected = `{"result":{"connectionProperties":{"tunnelIPAddress":"fd7d::1","tunnelState":"disconnected"},"deviceProperties":{"name":"Test iPad","osVersionNumber":"26.6.1"}}}`
 
+func TestParseDevicectlDetailsReadsProductType(t *testing.T) {
+	dev, err := parseDevicectlDetails([]byte(`{"result":{"connectionProperties":{"tunnelState":"disconnected"},"deviceProperties":{"name":"Test iPad","osVersionNumber":"26.6.1"},"hardwareProperties":{"platform":"iOS","productType":"iPad14,3","reality":"physical","udid":"u"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dev.Model != "iPad14,3" || dev.Name != "Test iPad" {
+		t.Errorf("got %+v", dev)
+	}
+	if dev, _ := parseDevicectlDetails([]byte(devicectlConnected)); dev.Model != "" {
+		t.Errorf("no hardwareProperties: model %q", dev.Model)
+	}
+}
+
 func TestParseDevicectlDetails(t *testing.T) {
 	dev, err := parseDevicectlDetails([]byte(devicectlConnected))
 	if err != nil {
