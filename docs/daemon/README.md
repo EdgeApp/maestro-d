@@ -20,7 +20,8 @@ call one at a time:
 
 The [command reference](commands.md) lists every command with its fields;
 it is generated from the flow parser, so it cannot drift from what the
-runner accepts. [streaming.md](streaming.md) covers live screen streams,
+runner accepts. [network.md](network.md) covers traffic shaping through
+each host's configured shaper calls. [streaming.md](streaming.md) covers live screen streams,
 the browser viewer and recordings. [UPSTREAM.md](UPSTREAM.md) describes
 how the fork tracks maestro-runner.
 
@@ -144,6 +145,7 @@ throws a `MaestroError` carrying all of it.
 | `DEVICE_NOT_FOUND` | 4 | 404 | no such device id |
 | `INTERNAL` | 4 | 500 | a daemon bug |
 | `CAPTURE_UNAVAILABLE` | 4 | 503 | the device has no screen capture, or it failed or sent no frames; `details.reason` says why ([streaming](streaming.md#errors)) |
+| `UNSUPPORTED` | 2 | 501 | this host or device cannot do it: `setTrafficShape`/`resetTrafficShape` on a device with no traffic shaper configured on its host ([network](network.md)), or airplane mode on iOS |
 | `BUSY` | 5 | 409 | `--no-wait` and the device is running another step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon holds the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `device stop` on a device the daemon did not boot (use `--force`) |

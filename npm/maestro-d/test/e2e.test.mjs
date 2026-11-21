@@ -328,6 +328,46 @@ describe('commands', () => {
   })
 })
 
+describe('traffic shaping', () => {
+  test('setTrafficShape and resetTrafficShape send the host\'s configured calls', async () => {
+    const calls = []
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        calls.push(`${req.method} ${req.url} ${body}`.trim())
+        res.end()
+      })
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${server.address().port}`
+    const cfg = path.join(process.env.MAESTRO_D_HOME, 'network.json')
+    try {
+      fs.writeFileSync(cfg, JSON.stringify({ devices: { 'mock-1': {
+        setTrafficShape: { method: 'POST', url: `${base}/shape`, body: { mbit: '${mbit}', loss: '${lossPct}', dir: '${direction}' } },
+        resetTrafficShape: { method: 'DELETE', url: `${base}/shape` },
+      } } }), { mode: 0o600 })
+      const res = await dev.setTrafficShape({ mbit: 1.5, direction: 'upload' })
+      assert.equal(res.ok, true)
+      await dev.resetTrafficShape()
+      assert.deepEqual(calls, ['POST /shape {"dir":"upload","loss":0,"mbit":1.5}', 'DELETE /shape'])
+      const listed = await daemon.devices()
+      assert.equal(listed.find((d) => d.id === 'mock-1')?.trafficShaping, true)
+
+      // Without a config the device cannot be shaped: UNSUPPORTED, exit 2.
+      fs.rmSync(cfg)
+      await rejects(() => dev.setTrafficShape({ lossPct: 100 }), (err) => {
+        assert.ok(isMaestroError(err, 'UNSUPPORTED'), String(err))
+        assert.equal(err.exitCode, 2)
+      })
+      assert.equal(calls.length, 2)
+    } finally {
+      fs.rmSync(cfg, { force: true })
+      server.close()
+    }
+  })
+})
+
 describe('variables and scripts', () => {
   test('setVars / vars / eval share the device JS scope', async () => {
     const vars = await dev.setVars({ USER: 'alice', N: '2' })

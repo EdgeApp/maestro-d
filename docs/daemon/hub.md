@@ -71,6 +71,7 @@ token of every request it is forwarded) and the **same peer token**.
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it |
 | `--allow-remote-shell` | off | Let remote callers run `runShell` |
 | `--pass-env NAME` | none (repeatable) | A variable of the hub's environment that sessions may import |
+| `--network-config FILE` | `<home>/network.json` | The [traffic-shaping](network.md) config: each device's `setTrafficShape` and `resetTrafficShape` calls. The hub that owns a device makes its calls, so each hub keeps the config for its own devices; listings show `trafficShaping: true` for the devices it can shape |
 | `--foreground` | off | Run in the foreground, for launchd or another supervisor |
 | `--daemon NAME` | `hub` | The daemon name the hub runs under (its run directory and unix socket) |
 

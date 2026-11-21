@@ -183,6 +183,7 @@ attaches are retried the same way.
 | `DEVICE_NOT_FOUND` | 404 | 4 | no such device id |
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
 | `CAPTURE_UNAVAILABLE` | 503 | 4 | `GET …/stream`: the device has no screen capture, it failed, or it sent no frames within 10 s; `details.reason` names why ([streaming](streaming.md#errors)) |
+| `UNSUPPORTED` | 501 | 2 | this host or device cannot do it: `setTrafficShape`/`resetTrafficShape` on a device with no traffic shaper configured on its host ([network](network.md)), or airplane mode on iOS |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |
@@ -330,6 +331,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
 | `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
+| `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its `network.json` ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
 | `machine`, `addresses` | hub only: the machine the device is attached to — its host name (`os.Hostname()`), and the owning hub's `--advertise` address (when set) followed by that machine's non-loopback IPs. Set by the owner and carried through the mesh, so a client compares them with its own host name and IPs to find the devices on its own machine, whichever hub it asked |

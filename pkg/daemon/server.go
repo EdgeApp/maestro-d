@@ -71,6 +71,9 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
+	// NetworkConfig is the traffic-shaping config (default
+	// <home>/network.json).
+	NetworkConfig string
 	// BlobsDir is the blob store's root (default <home>/blobs).
 	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
@@ -609,6 +612,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	devs := s.visible(r, s.registry.List(strings.ToLower(r.URL.Query().Get("platform"))))
+	s.markTrafficShaping(devs)
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
@@ -624,7 +628,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		s.annotate(devs)
 		info = devs[0]
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(info)})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
@@ -685,6 +689,7 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 // deleted, if this daemon holds one.
 func (s *Server) detachForStop(id string) {
 	if a := s.takeAttached(id); a != nil {
+		defer s.finishDetach(a) // even if the teardown panics
 		a.close()
 		s.registry.MarkDetached(id)
 		s.events.Publish(Event{Type: "device.detached", Device: id})
@@ -710,7 +715,7 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.deviceInfo(a)})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(s.deviceInfo(a))})
 }
 
 func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
@@ -720,6 +725,7 @@ func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id))
 		return
 	}
+	defer s.finishDetach(a) // even if the teardown panics
 	a.close()
 	s.registry.MarkDetached(id)
 	s.events.Publish(Event{Type: "device.detached", Device: id})
@@ -739,12 +745,30 @@ func (s *Server) getAttached(id string) *attached {
 	return s.attached[id]
 }
 
+// takeAttached removes a device's attachment for its caller to close, and
+// keeps the id reserved until finishDetach: an attach of the same device
+// waits for the teardown, whose cleanup (a reset, airplane mode off) would
+// otherwise reach the device after the new session had set it up.
 func (s *Server) takeAttached(id string) *attached {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.attached[id]
 	delete(s.attached, id)
+	if a != nil && s.attaching[id] == nil {
+		a.closing = make(chan struct{})
+		s.attaching[id] = a.closing
+	}
 	return a
+}
+
+// finishDetach releases the id takeAttached reserved.
+func (s *Server) finishDetach(a *attached) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a.closing != nil && s.attaching[a.id] == a.closing {
+		delete(s.attaching, a.id)
+		close(a.closing)
+	}
 }
 
 // ensureAttached returns the attached device, opening it when cfg is

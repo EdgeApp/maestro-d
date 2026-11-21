@@ -106,4 +106,5 @@ var stepTypeOrder = []StepType{
 	StepMockNetwork, StepBlockNetwork, StepSetNetworkConditions, StepWaitForRequest, StepClearNetworkMocks,
 	StepTakeScreenshot, StepAssertScreenshot, StepStartRecording, StepStopRecording, StepAddMedia, StepRemoveMedia,
 	StepPressKey, StepWaitForAnimationToEnd, StepDefineVariables,
+	StepSetTrafficShape, StepResetTrafficShape,
 }

@@ -278,7 +278,8 @@ func isStepType(key string) bool {
 		StepMockNetwork, StepBlockNetwork, StepSetNetworkConditions, StepWaitForRequest, StepClearNetworkMocks,
 		StepTakeScreenshot, StepStartRecording,
 		StepStopRecording, StepAddMedia, StepRemoveMedia, StepPressKey, StepWaitForAnimationToEnd,
-		StepDefineVariables, StepDragAndDrop:
+		StepDefineVariables, StepDragAndDrop,
+		StepSetTrafficShape, StepResetTrafficShape: // maestro-d
 		return true
 	}
 	return false
@@ -655,6 +656,14 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 
 	case StepToggleAirplaneMode:
 		return &ToggleAirplaneModeStep{BaseStep: BaseStep{StepType: stepType}}, nil
+
+	case StepSetTrafficShape: // maestro-d (trafficshape.go)
+		var s SetTrafficShapeStep
+		return decodeSetTrafficShape(&s, valueNode, sourcePath)
+
+	case StepResetTrafficShape: // maestro-d (trafficshape.go)
+		var s ResetTrafficShapeStep
+		return decodeResetTrafficShape(&s, valueNode, sourcePath)
 
 	case StepSetDarkMode:
 		var s SetDarkModeStep

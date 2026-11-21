@@ -570,6 +570,8 @@ var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
 		func(o *daemonOpts, v string) { o.TLSCert = v }),
 	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
+	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
+		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import when --http listens beyond loopback (repeatable); no other one is imported",
 		apply: func(o *daemonOpts, v string) error {
 			o.PassEnv = append(o.PassEnv, v)
@@ -600,17 +602,18 @@ var daemonServeCommand = &cli.Command{
 		}
 		defer logger.Close()
 		srv := daemon.New(daemon.Config{
-			KeepRunDir:  serviceInstalled,
-			Name:        o.Name,
-			HTTPAddr:    o.HTTPAddr,
-			Token:       o.Token,
-			TLSCert:     o.TLSCert,
-			TLSKey:      o.TLSKey,
-			PassEnv:     o.PassEnv,
-			IdleTimeout: idle,
-			ReportsDir:  daemon.ReportsDir(o.Name),
-			StartArgs:   os.Args[1:],
-			Ready:       os.Stdout,
+			KeepRunDir:    serviceInstalled,
+			Name:          o.Name,
+			HTTPAddr:      o.HTTPAddr,
+			Token:         o.Token,
+			TLSCert:       o.TLSCert,
+			TLSKey:        o.TLSKey,
+			PassEnv:       o.PassEnv,
+			IdleTimeout:   idle,
+			ReportsDir:    daemon.ReportsDir(o.Name),
+			NetworkConfig: o.NetworkConfig,
+			StartArgs:     os.Args[1:],
+			Ready:         os.Stdout,
 		}, daemonDeps())
 		if err := srv.Run(context.Background()); err != nil {
 			logger.Error("daemon exited: %v", err)

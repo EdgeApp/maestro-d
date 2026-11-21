@@ -6,6 +6,7 @@ export const EXIT_CODES: Record<ErrorCode, number> = {
   USAGE: 2,
   DEVICE_NOT_ATTACHED: 2,
   FORBIDDEN: 2,
+  UNSUPPORTED: 2,
   DAEMON_UNAVAILABLE: 3,
   PEER_UNAVAILABLE: 3,
   DEVICE_ERROR: 4,
@@ -42,6 +43,7 @@ export const HTTP_STATUS: Record<ErrorCode, number> = {
   DEVICE_NOT_ATTACHED: 404,
   INTERRUPTED: 499,
   INTERNAL: 500,
+  UNSUPPORTED: 501,
 }
 
 /**
@@ -79,6 +81,8 @@ export function codeFromStatus(status: number): ErrorCode {
       return 'BUSY'
     case 404:
       return 'DEVICE_NOT_FOUND'
+    case 501:
+      return 'UNSUPPORTED'
     default:
       return 'INTERNAL'
   }

@@ -955,6 +955,15 @@ export interface ResetPermissionsParams {
   platform?: string
 }
 
+/** Removes the device's network shape through the call its host's network.json configures for it. */
+export interface ResetTrafficShapeParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+}
+
 /** Retries steps on failure. */
 export interface RetryParams {
   optional?: boolean
@@ -1091,7 +1100,7 @@ export interface ScrollUntilVisibleParams {
   engine?: string
 }
 
-/** Sets airplane mode. */
+/** Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). */
 export interface SetAirplaneModeParams {
   optional?: boolean
   label?: string
@@ -1180,6 +1189,25 @@ export interface SetPermissionsParams {
   platform?: string
   appId?: string
   permissions?: Record<string, string>
+}
+
+/** Sets the device's whole network shape through the call its host's network.json configures for it. */
+export interface SetTrafficShapeParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** Bandwidth cap in megabits per second, fractions allowed; 0 = no cap */
+  mbit?: number
+  /** Random packet loss, 0–100 */
+  lossPct?: number
+  /** Added one-way latency in milliseconds */
+  latencyMs?: number
+  /** Latency jitter in milliseconds */
+  jitterMs?: number
+  /** download, upload or both (default both); ${VAR} allowed */
+  direction?: string
 }
 
 /** Starts recording. */
@@ -1358,7 +1386,7 @@ export interface TapOnPointParams {
   waitToSettleTimeoutMs?: number
 }
 
-/** Toggles airplane mode. */
+/** Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). */
 export interface ToggleAirplaneModeParams {
   optional?: boolean
   label?: string
@@ -1576,6 +1604,7 @@ export const COMMANDS = {
   removeMedia: { name: 'removeMedia', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },
+  resetTrafficShape: { name: 'resetTrafficShape', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Removes the device\'s network shape through the call its host\'s network.json configures for it.' },
   retry: { name: 'retry', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Retries steps on failure.', files: { file: { kind: 'flow' } } },
   runBrowserScript: { name: 'runBrowserScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in the browser page context.', files: { file: { kind: 'path' } } },
   runFlow: { name: 'runFlow', scalar: 'file', bareField: 'file', valueLess: false, compound: true, doc: 'Runs another flow.', files: { file: { kind: 'flow' }, else: { kind: 'flow' } } },
@@ -1585,7 +1614,7 @@ export const COMMANDS = {
   saveAuthState: { name: 'saveAuthState', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Saves cookies + localStorage + sessionStorage to a JSON file.', files: { path: { kind: 'output' } } },
   scroll: { name: 'scroll', scalar: 'direction', bareField: 'direction', valueLess: false, compound: false, doc: 'Scrolls the screen.' },
   scrollUntilVisible: { name: 'scrollUntilVisible', scalar: 'element.text', bareField: 'element.text', valueLess: false, compound: false, doc: 'Scrolls until element is visible.' },
-  setAirplaneMode: { name: 'setAirplaneMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Sets airplane mode.' },
+  setAirplaneMode: { name: 'setAirplaneMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).' },
   setClipboard: { name: 'setClipboard', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Sets the clipboard to a specific text value.' },
   setCookies: { name: 'setCookies', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets browser cookies via CDP.' },
   setDarkMode: { name: 'setDarkMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Switches the system UI between dark and light appearance.' },
@@ -1593,6 +1622,7 @@ export const COMMANDS = {
   setNetworkConditions: { name: 'setNetworkConditions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Simulates network throttling or offline mode.' },
   setOrientation: { name: 'setOrientation', scalar: 'orientation', bareField: 'orientation', valueLess: false, compound: false, doc: 'Sets device orientation.' },
   setPermissions: { name: 'setPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all' },
+  setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s network.json configures for it.' },
   startRecording: { name: 'startRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Starts recording.' },
   stopApp: { name: 'stopApp', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Stops an app.' },
   stopRecording: { name: 'stopRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Stops recording.' },
@@ -1601,7 +1631,7 @@ export const COMMANDS = {
   takeScreenshot: { name: 'takeScreenshot', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro\'s takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot).', files: { path: { kind: 'output' } } },
   tapOn: { name: 'tapOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Taps on an element.' },
   tapOnPoint: { name: 'tapOnPoint', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Taps on specific coordinates.' },
-  toggleAirplaneMode: { name: 'toggleAirplaneMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Toggles airplane mode.' },
+  toggleAirplaneMode: { name: 'toggleAirplaneMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).' },
   toggleDarkMode: { name: 'toggleDarkMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Flips the current appearance.' },
   travel: { name: 'travel', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Simulates travel.' },
   uploadFile: { name: 'uploadFile', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets files on a file input element.', files: { path: { kind: 'path' }, paths: { kind: 'path' } } },
@@ -1668,6 +1698,7 @@ export interface CommandParams {
   removeMedia: RemoveMediaParams
   repeat: RepeatParams
   resetPermissions: ResetPermissionsParams
+  resetTrafficShape: ResetTrafficShapeParams
   retry: RetryParams
   runBrowserScript: RunBrowserScriptParams
   runFlow: RunFlowParams
@@ -1685,6 +1716,7 @@ export interface CommandParams {
   setNetworkConditions: SetNetworkConditionsParams
   setOrientation: SetOrientationParams
   setPermissions: SetPermissionsParams
+  setTrafficShape: SetTrafficShapeParams
   startRecording: StartRecordingParams
   stopApp: StopAppParams
   stopRecording: StopRecordingParams

@@ -68,6 +68,8 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
 	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
+	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
+		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import (repeatable); no other one is imported",
 		apply: func(o *daemonOpts, v string) error { o.PassEnv = append(o.PassEnv, v); return nil }},
 	boolFlag("foreground", "Run in the foreground instead of detaching (for launchd or another supervisor)", nil,
@@ -261,6 +263,9 @@ func hubChildArgs(o *daemonOpts) []string {
 	for _, n := range o.PassEnv {
 		args = append(args, "--pass-env", n)
 	}
+	if o.NetworkConfig != "" {
+		args = append(args, "--network-config", abs(o.NetworkConfig))
+	}
 	return args
 }
 
@@ -400,6 +405,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		AllowRemoteShell: o.hub.remoteShell,
 		PassEnv:          o.PassEnv,
 		ReportsDir:       daemon.ReportsDir(o.Name),
+		NetworkConfig:    o.NetworkConfig,
 		StartArgs:        redactArgs(os.Args[1:]),
 		Ready:            os.Stdout,
 		Mesh:             mesh,

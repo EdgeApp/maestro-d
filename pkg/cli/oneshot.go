@@ -64,6 +64,7 @@ var valueOptional = map[string]bool{
 	"launchApp": true, "stopApp": true, "killApp": true, "clearState": true,
 	"takeScreenshot": true, "scroll": true, "eraseText": true,
 	"waitForAnimationToEnd": true, "startRecording": true, "stopRecording": true,
+	"setTrafficShape": true, // every field defaults: no flags sends the unshaped shape
 }
 
 func oneShotArgsUsage(spec daemon.CommandSpec) string {
