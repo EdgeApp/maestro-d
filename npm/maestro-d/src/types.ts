@@ -354,6 +354,59 @@ export interface CloudCatalog {
   models: CloudModel[]
 }
 
+/** An app uploaded to a cloud provider. */
+export interface AppRef {
+  /** The provider's upload reference (an ARN). */
+  appRef: string
+  name: string
+  type?: string
+  status?: string
+  created?: string
+  /** True when an identical earlier upload was reused. */
+  reused?: boolean
+}
+
+/** `md.devicefarm.account()`. */
+export interface ProviderAccount extends Envelope {
+  provider: string
+  hub?: string
+  /** trialMinutes {total, remaining}, unmeteredDevices, … */
+  account: Record<string, unknown>
+}
+
+/** `md.devicefarm.apps()`. */
+export interface ProviderApps extends Envelope {
+  provider: string
+  hub?: string
+  apps: AppRef[]
+}
+
+/** `md.devicefarm.upload()`. */
+export interface ProviderUpload extends Envelope, AppRef {
+  provider: string
+  hub?: string
+}
+
+/** One provider session. */
+export interface ProviderSession {
+  /** The device id maestro-d gave it. */
+  name: string
+  ref: string
+  status: string
+  result?: string
+  /** The device model, e.g. "Google Pixel 8". */
+  model?: string
+  created?: string
+  deviceMinutes?: DeviceMinutes
+}
+
+/** `md.devicefarm.sessions()`. */
+export interface ProviderSessions extends Envelope {
+  provider: string
+  hub?: string
+  sessions: ProviderSession[]
+}
+
 /** A cloud provider a daemon or hub launches devices on. */
 export interface CloudStatus {
   provider: string

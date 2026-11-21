@@ -622,6 +622,45 @@ cannot see it and the daemon does not hold it.
 
 ## Cloud providers
 
+These routes reach a provider without a device. `{provider}` is
+`devicefarm`; a daemon or hub without that provider's credentials answers
+`USAGE`. On a hub they go where a cloud launch would: the hub `?hub=` names,
+else the hub you ask when it has the provider, else the first linked hub by
+name that has it; the answer then carries `"hub"`. Every caller may read;
+only a local caller uploads.
+
+### `GET /v1/providers/{provider}/account`
+
+The account: the free trial's minutes, the unmetered device slots and the
+job timeout.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "account": { "trialMinutes": { "total": 1000, "remaining": 941 }, "unmeteredDevices": {},
+               "unmeteredRemoteAccessDevices": {}, "maxJobTimeoutMinutes": 150 } }
+```
+
+### `GET /v1/providers/{provider}/apps`
+
+The project's uploaded apps (`.apk` and `.ipa`). maestro-d names each upload
+`maestro-d-<first 20 hex digits of its SHA-256>.apk|.ipa`, so an identical
+file is recognised.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "apps": [ { "appRef": "arn:aws:devicefarm:…:upload:…", "name": "maestro-d-3f2a9c1e0b4d5a6f7e81.apk",
+              "type": "ANDROID_APP", "status": "SUCCEEDED", "created": "2026-11-20T14:02:11Z" } ] }
+```
+
+### `POST /v1/providers/{provider}/apps`
+
+Uploads an `.apk` or `.ipa` from the daemon's own disk: `{"app": "/abs/path/app.apk"}`.
+A `SUCCEEDED` upload of the same content younger than 30 days is reused
+instead (`"reused": true`). The answer is one entry of the list above. A
+remote caller is refused `FORBIDDEN`: its app goes up under a lease with
+`POST /v1/devices/{id}/apps` on the leased cloud device. A failed upload
+is `DEVICE_ERROR`; no `app` is `USAGE`.
+
 ### `GET /v1/providers/{provider}/sessions`
 
 The provider's sessions, newest first: for Device Farm, the remote access
@@ -1063,9 +1102,26 @@ the device imply. The answer names the app:
 (the newest `build-tools` under `$ANDROID_HOME`); without `aapt2` it is
 left out. An installer failure is `DEVICE_ERROR`.
 
+On a cloud device the app is uploaded to the provider (reused when an
+identical one was uploaded in the last 30 days, as in
+`POST /v1/providers/{provider}/apps`) and installed into the running
+session. The provider installs asynchronously (Device Farm's iOS installs
+land 10-20 s after it answers), so when the app id is known the daemon
+then asks the device until it lists the app (`mobile: isAppInstalled`), up
+to 120 s, and answers `DEVICE_ERROR` if it never does. When the device is
+attached, its WebDriver session is then reopened with the same
+capabilities (tried three times, 2 s apart, as a device can refuse a new
+session for a moment after an install), so the next step sees the new
+app.
+The device keeps its id and its session. An install waits for a step in
+flight on the device (`?wait=false` answers `BUSY` instead), and the idle
+release does not count the time it takes. `reinstall` is ignored: Device
+Farm installs over the existing app.
+
 ### `DELETE /v1/devices/{id}/apps/{appId}`
 
-Uninstalls by bundle id or package name.
+Uninstalls by bundle id or package name. A cloud device has no uninstall
+during its session: `USAGE` (release the device instead).
 
 ## Artifacts
 

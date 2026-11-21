@@ -106,6 +106,7 @@ type Session struct {
 	Caps          []map[string]any // alwaysMatch of every WebDriver session opened on it
 	WebDrivers    int              // WebDriver sessions open now
 	Token         string           // the endpoint path token
+	installedAt   time.Time
 	pinned        bool
 	everRan       bool
 	wd            map[string]bool
@@ -162,9 +163,12 @@ type Fake struct {
 	trialTotal  float64
 	trialLeft   float64
 	uploadDelay time.Duration
-	failUpload  *apiErr
-	failWD      bool
-	noStopMins  bool
+	// installLatency: how long after an install the device lists the app
+	// (mobile: isAppInstalled), as Device Farm installs asynchronously.
+	installLatency time.Duration
+	failUpload     *apiErr
+	failWD         bool
+	noStopMins     bool
 }
 
 // New starts a fake and closes it when the test ends.
@@ -310,6 +314,14 @@ func (f *Fake) SetUploadDelay(d time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.uploadDelay = d
+}
+
+// SetInstallLatency makes an installed app appear on the device (to mobile:
+// isAppInstalled) only d after InstallToRemoteAccessSession answered.
+func (f *Fake) SetInstallLatency(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.installLatency = d
 }
 
 // FailWebDriver makes POST /session on every Appium endpoint fail.
@@ -649,6 +661,7 @@ func (f *Fake) serveAWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Installed = append(s.Installed, u.ARN)
+		s.installedAt = time.Now()
 		writeJSON(w, map[string]any{"appUpload": f.uploadJSON(u)})
 	default:
 		writeErr(w, "UnknownOperationException", "the fake does not serve "+op)
@@ -1040,6 +1053,8 @@ func (f *Fake) serveAppium(w http.ResponseWriter, r *http.Request) {
 		}
 	case cmd == "/appium/device/terminate_app":
 		wdOK(w, true)
+	case cmd == "/execute/sync" && bytes.Contains(body, []byte("mobile: isAppInstalled")):
+		wdOK(w, s.installedAt.IsZero() || time.Since(s.installedAt) >= f.installLatency)
 	default: // settings, actions, activate_app, execute/sync, timeouts …
 		wdOK(w, nil)
 	}

@@ -40,7 +40,7 @@ func (stubProvider) Upload(context.Context, string) (*cloudprov.AppRef, error) {
 func (stubProvider) Apps(context.Context) ([]cloudprov.AppRef, error)          { return nil, nil }
 func (stubProvider) Account(context.Context) (map[string]any, error)           { return nil, nil }
 func (stubProvider) Sessions(context.Context) ([]cloudprov.SessionSummary, error) {
-	return nil, nil
+	return []cloudprov.SessionSummary{{Name: "df-1", Ref: "arn:s", Status: "COMPLETED", Model: "Google Pixel 8"}}, nil
 }
 func (stubProvider) Redact(s string) string { return s }
 
@@ -217,6 +217,45 @@ func TestCloud_LeaseWithNoHubWithCredentials(t *testing.T) {
 	_, err := a.client().AcquireLease(context.Background(), daemon.LeaseRequest{Select: &daemon.LeaseSelector{Location: "cloud", Platform: "ios"}})
 	var de *daemon.Error
 	if !asErr(err, &de) || de.Code != daemon.CodeUsage || !strings.Contains(de.Message, "no hub in this mesh") {
+		t.Fatalf("no hub: %v", err)
+	}
+}
+
+func TestCloud_ProviderUtilitiesRouted(t *testing.T) {
+	a, b := twoHubs(t, withCloud(1))
+	ctx := context.Background()
+	c := a.client()
+	res, err := c.ProviderAccount(ctx, "devicefarm", "")
+	if err != nil || res.Hub != "hub-b" {
+		t.Fatalf("routed account: %+v %v", res, err)
+	}
+	if b.count("GET /v1/providers/devicefarm/account") != 1 {
+		t.Fatalf("b served %d", b.count("GET /v1/providers/devicefarm/account"))
+	}
+	// The model passes through as is; only device ids are qualified.
+	if res, err := c.ProviderSessions(ctx, "devicefarm", ""); err != nil || res.Hub != "hub-b" || len(res.Sessions) != 1 || res.Sessions[0].Model != "Google Pixel 8" {
+		t.Fatalf("routed sessions: %+v %v", res, err)
+	}
+	// Named, a answers itself: it has no credentials.
+	var de *daemon.Error
+	if _, err := c.ProviderApps(ctx, "devicefarm", "hub-a"); !asErr(err, &de) || de.Code != daemon.CodeUsage {
+		t.Fatalf("named a: %v", err)
+	}
+	// At b itself it is served locally.
+	if res, err := b.client().ProviderApps(ctx, "devicefarm", ""); err != nil || res.Hub != "hub-b" {
+		t.Fatalf("at b: %+v %v", res, err)
+	}
+	// An upload through the mesh is a remote caller's: refused.
+	if _, err := c.ProviderUpload(ctx, "devicefarm", "", "/etc/hosts"); !asErr(err, &de) || de.Code != daemon.CodeForbidden {
+		t.Fatalf("routed upload: %v", err)
+	}
+}
+
+func TestCloud_ProviderUtilitiesWithNoHubWithCredentials(t *testing.T) {
+	a, _ := twoHubs(t)
+	_, err := a.client().ProviderAccount(context.Background(), "devicefarm", "")
+	var de *daemon.Error
+	if !asErr(err, &de) || de.Code != daemon.CodeUsage {
 		t.Fatalf("no hub: %v", err)
 	}
 }

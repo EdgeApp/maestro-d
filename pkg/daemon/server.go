@@ -476,6 +476,9 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	mux.HandleFunc("GET /v1/providers/{provider}/sessions", s.handleProviderSessions)
+	mux.HandleFunc("GET /v1/providers/{provider}/account", s.handleProviderAccount)
+	mux.HandleFunc("GET /v1/providers/{provider}/apps", s.handleProviderApps)
+	mux.HandleFunc("POST /v1/providers/{provider}/apps", s.handleProviderUpload)
 	mux.HandleFunc("GET /v1/viewer", s.handleViewer)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
@@ -845,6 +848,14 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 		s.attaching[id] = ch
 		s.mu.Unlock()
 
+		// A cloud device's install restarts the driver an attach adopts:
+		// the attach waits for an install under way, and is registered
+		// before the next install looks for it.
+		unlockInstall := func() {}
+		if rd := s.remote(id); rd != nil {
+			rd.installMu.Lock()
+			unlockInstall = rd.installMu.Unlock
+		}
 		s.idle.Hold()
 		a, e := s.attachDevice(ctx, id, *cfg)
 		s.idle.Release()
@@ -855,12 +866,14 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 		if e == nil {
 			if s.shuttingDown.Load() {
 				s.mu.Unlock()
+				unlockInstall()
 				a.close()
 				return nil, Errorf(CodeDaemonUnavailable, "daemon is shutting down")
 			}
 			s.attached[id] = a
 		}
 		s.mu.Unlock()
+		unlockInstall()
 		return a, e
 	}
 }

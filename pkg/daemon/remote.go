@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,13 @@ type cloudTiming struct {
 	capMargin, warnWithin time.Duration
 	tick                  time.Duration
 	releaseTimeout        time.Duration
+	// installWait: how long an install waits for its app to appear on the
+	// device (the provider answers first; Device Farm's iOS installs land
+	// 10-20 s later); installPoll: the check's period.
+	installWait, installPoll time.Duration
+	// restartRetry: the pause between attempts to reopen the WebDriver
+	// session after an install.
+	restartRetry time.Duration
 	// releaseRetry: the pause between background retries of a release
 	// that failed.
 	releaseRetry time.Duration
@@ -49,9 +57,11 @@ func cloudTimings() cloudTiming {
 	t := cloudTiming{minIdle: 60 * time.Second, maxIdle: 9000 * time.Second, defaultIdle: 600 * time.Second,
 		keepaliveAfter: 60 * time.Second, keepaliveEvery: 60 * time.Second, capMargin: 30 * time.Second,
 		warnWithin: 10 * time.Minute, tick: 5 * time.Second, releaseTimeout: 60 * time.Second,
+		installWait: 120 * time.Second, installPoll: 2 * time.Second, restartRetry: 2 * time.Second,
 		releaseRetry: 30 * time.Second}
 	if os.Getenv(envFastCloud) == "1" {
 		t.minIdle, t.keepaliveAfter, t.keepaliveEvery, t.tick = time.Second, time.Second, time.Second, 100*time.Millisecond
+		t.installWait, t.installPoll, t.restartRetry = 3*time.Second, 100*time.Millisecond, 100*time.Millisecond
 		t.releaseRetry = 100 * time.Millisecond
 	}
 	return t
@@ -82,6 +92,9 @@ type remoteDevice struct {
 	// driverMu serialises a keepalive ping with a session restart on a
 	// device that is not attached.
 	driverMu sync.Mutex
+	// installMu serialises an install with an attach: an attach waits for
+	// an install under way, and an install sees an attach that came first.
+	installMu sync.Mutex
 
 	// lease is the hub lease the device was launched for (nil in direct
 	// mode): its release ends the lease, and the lease's end releases it.
@@ -964,4 +977,251 @@ func firstNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Installing apps
+
+// handleInstallCloud installs the app at path (already materialized) into
+// cloud device rd for POST /v1/devices/{id}/apps. The whole install counts
+// on the device's idle clock. The upload runs first. Then the install holds
+// the device's installMu, which an attach also takes, and on an attached
+// device the step lock (honouring ?wait=false), so the install and the
+// WebDriver session's restart wait for any step in flight, and no step or
+// attach starts while they run.
+func (s *Server) handleInstallCloud(w http.ResponseWriter, r *http.Request, rd *remoteDevice, path string) {
+	done, e := s.cloudBusy(rd.id)
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	defer done()
+	s.idle.Hold()
+	defer s.idle.Release()
+	ref, err := rd.provider.Upload(r.Context(), path)
+	if err != nil {
+		writeError(w, cloudError(err))
+		return
+	}
+	rd.installMu.Lock()
+	defer rd.installMu.Unlock()
+	if a := s.getAttached(rd.id); a != nil {
+		if !s.acquire(w, r, a) {
+			return
+		}
+		defer s.release(a)
+	}
+	appID := s.appIDOf(path)
+	if e := s.installRef(r.Context(), rd, *ref, appID); e != nil {
+		writeError(w, e)
+		return
+	}
+	logger.Info("Installed %s (%s) on cloud device %s for %s", filepath.Base(path), appID, rd.id, describeCaller(CallerFrom(r.Context())))
+	s.events.Publish(Event{Type: "app.installed", Device: rd.id, Message: appID})
+	writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: rd.id, AppID: appID})
+}
+
+// installCloud installs path into rd while it is being attached (attach's
+// appFile): nothing else drives it yet. It returns the app's id.
+func (s *Server) installCloud(ctx context.Context, rd *remoteDevice, path string, _ *attached) (string, *Error) {
+	done, e := s.cloudBusy(rd.id)
+	if e != nil {
+		return "", e
+	}
+	defer done()
+	ref, err := rd.provider.Upload(ctx, path)
+	if err != nil {
+		return "", cloudError(err)
+	}
+	appID := s.appIDOf(path)
+	if e := s.installRef(ctx, rd, *ref, appID); e != nil {
+		return "", e
+	}
+	s.events.Publish(Event{Type: "app.installed", Device: rd.id, Message: appID})
+	return appID, nil
+}
+
+// installRef installs an uploaded app into rd's session, waits until the
+// device has it (when its id is known), and restarts the WebDriver
+// session, so the next steps see the app. The checks and the restart hold
+// driverMu, which a keepalive ping takes too.
+func (s *Server) installRef(ctx context.Context, rd *remoteDevice, ref cloudprov.AppRef, appID string) *Error {
+	if _, err := rd.provider.Install(ctx, rd.alloc, ref); err != nil {
+		return cloudError(err)
+	}
+	if e := s.waitInstalled(ctx, rd, appID); e != nil {
+		return e
+	}
+	// Right after an install the device can refuse a new session for a
+	// moment (Android: "UiAutomation not connected"), so the restart is
+	// tried a few times.
+	t := cloudTimings()
+	var err error
+	for attempt := 1; attempt <= restartAttempts; attempt++ {
+		rd.driverMu.Lock()
+		err = rd.driver.RestartSession()
+		rd.driverMu.Unlock()
+		if err == nil {
+			return nil
+		}
+		if attempt == restartAttempts {
+			break
+		}
+		logger.Info("cloud device %s: restarting the WebDriver session after the install (attempt %d): %s", rd.id, attempt, rd.provider.Redact(err.Error()))
+		select {
+		case <-ctx.Done():
+			return Errorf(CodeDeviceError, "cloud device %s: the install was cancelled while the WebDriver session restarted", rd.id)
+		case <-time.After(t.restartRetry):
+		}
+	}
+	return Errorf(CodeDeviceError, "cloud device %s: restarting the WebDriver session after the install: %s", rd.id, rd.provider.Redact(err.Error()))
+}
+
+// restartAttempts is how many times an install tries to reopen the
+// WebDriver session.
+const restartAttempts = 3
+
+// waitInstalled polls the device until appID is installed. Without an app
+// id, or when the device cannot answer (a check that fails or does not
+// answer a boolean), it returns at once: the WebDriver restart and the next
+// step report a missing app then.
+func (s *Server) waitInstalled(ctx context.Context, rd *remoteDevice, appID string) *Error {
+	if appID == "" {
+		return nil
+	}
+	t := cloudTimings()
+	deadline := time.Now().Add(t.installWait)
+	for {
+		rd.driverMu.Lock()
+		ok, err := rd.driver.AppInstalled(appID)
+		rd.driverMu.Unlock()
+		if err != nil {
+			logger.Info("cloud device %s: cannot tell whether %s is installed (%s); not waiting", rd.id, appID, rd.provider.Redact(err.Error()))
+			return nil
+		}
+		if ok {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return Errorf(CodeDeviceError, "cloud device %s: %s accepted the install, but %s was not on the device after %s",
+				rd.id, rd.provider.Name(), appID, t.installWait.Round(time.Second))
+		}
+		select {
+		case <-ctx.Done():
+			return Errorf(CodeDeviceError, "cloud device %s: the install of %s was cancelled while waiting for it", rd.id, appID)
+		case <-time.After(t.installPoll):
+		}
+	}
+}
+
+// appIDOf reads an app file's id ("" when it cannot be read).
+func (s *Server) appIDOf(path string) string {
+	if s.deps.AppID == nil {
+		return ""
+	}
+	id, err := s.deps.AppID(path)
+	if err != nil {
+		logger.Info("install %s: app id not read: %v", filepath.Base(path), err)
+		return ""
+	}
+	return id
+}
+
+// ---------------------------------------------------------------------------
+// Provider utilities: GET /v1/providers/{provider}/account, GET and POST
+// /v1/providers/{provider}/apps. They need credentials, not a device.
+
+// ProviderAccountResult answers GET /v1/providers/{provider}/account.
+type ProviderAccountResult struct {
+	Envelope
+	Provider string         `json:"provider"`
+	Hub      string         `json:"hub,omitempty"`
+	Account  map[string]any `json:"account"`
+}
+
+// ProviderAppsResult answers GET /v1/providers/{provider}/apps.
+type ProviderAppsResult struct {
+	Envelope
+	Provider string             `json:"provider"`
+	Hub      string             `json:"hub,omitempty"`
+	Apps     []cloudprov.AppRef `json:"apps"`
+}
+
+// ProviderUploadRequest is POST /v1/providers/{provider}/apps.
+type ProviderUploadRequest struct {
+	// App is a path on the daemon's host (local callers only).
+	App string `json:"app"`
+}
+
+// ProviderUploadResult answers POST /v1/providers/{provider}/apps.
+type ProviderUploadResult struct {
+	Envelope
+	Provider string `json:"provider"`
+	Hub      string `json:"hub,omitempty"`
+	cloudprov.AppRef
+}
+
+func (s *Server) handleProviderAccount(w http.ResponseWriter, r *http.Request) {
+	p, e := s.provider(r.PathValue("provider"))
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	acct, err := p.Account(r.Context())
+	if err != nil {
+		writeError(w, cloudError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, ProviderAccountResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Account: acct})
+}
+
+func (s *Server) handleProviderApps(w http.ResponseWriter, r *http.Request) {
+	p, e := s.provider(r.PathValue("provider"))
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	apps, err := p.Apps(r.Context())
+	if err != nil {
+		writeError(w, cloudError(err))
+		return
+	}
+	if apps == nil {
+		apps = []cloudprov.AppRef{}
+	}
+	writeJSON(w, http.StatusOK, ProviderAppsResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Apps: apps})
+}
+
+// handleProviderUpload uploads an app from the daemon's own disk: a local
+// caller's only. A remote caller's app reaches the provider through the
+// install route on a leased cloud device.
+func (s *Server) handleProviderUpload(w http.ResponseWriter, r *http.Request) {
+	if CallerFrom(r.Context()).Remote {
+		e := forbidden("upload reads a file on the daemon's own machine; a remote caller installs through install on a leased cloud device (the app is uploaded under the lease)")
+		s.logForbidden(r, e)
+		writeError(w, e)
+		return
+	}
+	var req ProviderUploadRequest
+	if e := decodeBody(r, &req); e != nil {
+		writeError(w, e)
+		return
+	}
+	if req.App == "" {
+		writeError(w, Errorf(CodeUsage, "upload: app is required (a path on this machine)").WithDetails("field", "app"))
+		return
+	}
+	p, e := s.provider(r.PathValue("provider"))
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	s.idle.Hold()
+	defer s.idle.Release()
+	ref, err := p.Upload(r.Context(), req.App)
+	if err != nil {
+		writeError(w, cloudError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, ProviderUploadResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), AppRef: *ref})
 }

@@ -39,7 +39,7 @@ describes still works — run it as `maestro-d test flows/`. The top-level
 - Runs Maestro YAML flows on real devices, emulators, simulators, and desktop browsers
 - Supports Android (UIAutomator2), iOS (WebDriverAgent), Web (Chrome CDP), and cloud (Appium)
 - Built-in parallel execution, HTML/JUnit/Allure reports, and JavaScript scripting
-- Addresses [78% of the top 100 most-discussed open issues](docs/maestro-issues-analysis.md) on Maestro's GitHub
+- Addresses [78% of the top 100 most-discussed open issues](maestro-issues-analysis.md) on Maestro's GitHub
 
 > **AI context:** [`llms.txt`](llms.txt) — structured summary for AI assistants answering questions about this project.
 
@@ -184,8 +184,9 @@ maestro-runner runs Maestro YAML flows on cloud device grids via the Appium driv
 maestro-runner --driver appium --appium-url <HUB_URL> --caps caps.json test flows/
 ```
 
-- **[TestingBot](docs/cloud-providers/testingbot.md)** — Setup guide for running on TestingBot's real device cloud
-- **[Sauce Labs](docs/cloud-providers/saucelabs.md)** — Setup guide for running on Sauce Labs Appium cloud
+- **[TestingBot](cloud-providers/testingbot.md)** — Setup guide for running on TestingBot's real device cloud
+- **[Sauce Labs](cloud-providers/saucelabs.md)** — Setup guide for running on Sauce Labs Appium cloud
+- **[AWS Device Farm](cloud-providers/devicefarm.md)** — maestro-d launches, holds and releases real phones on Device Farm ([Cloud devices](daemon/cloud.md))
 
 ## Contributing
 

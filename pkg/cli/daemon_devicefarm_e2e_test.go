@@ -6,8 +6,11 @@ package cli
 // driving and releasing cloud devices.
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -557,4 +560,107 @@ func TestE2E_DeviceFarmRelease(t *testing.T) {
 	}
 	e.mustOK(env, "stop", "--daemon", "dfrel")
 	assertNoSecrets(t, e.home, fake)
+}
+
+// writeFakeApp writes a stand-in app file under dir.
+func writeFakeApp(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("PK fake "+name), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// writeFakeIPA writes an .ipa whose Info.plist names bundleID, so the
+// daemon can read its app id.
+func writeFakeIPA(t *testing.T, dir, name, bundleID string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("Payload/B.app/Info.plist")
+	_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>`+bundleID+`</string></dict></plist>`)
+	_ = zw.Close()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestE2E_DeviceFarmInstall(t *testing.T) {
+	e := newE2E(t)
+	fake := dftest.New(t)
+	env := dfEnv(t, e, fake, true)
+	d := []string{"--daemon", "dfinst"}
+	dev := dfLaunch(t, e, env, append([]string{"--platform", "ios", "--name", "Apple iPhone 15"}, d...)...)
+	id := append([]string{"--device", dev.ID}, d...)
+	e.mustOK(env, append([]string{"tapOn", "Button"}, id...)...)
+	// Device Farm answers the install before the device has the app: the
+	// install waits until the device lists it.
+	fake.SetInstallLatency(1500 * time.Millisecond)
+	start := time.Now()
+	r := e.mustOK(env, append([]string{"install", writeFakeIPA(t, e.cwd, "b.ipa", "org.b")}, id...)...)
+	if !strings.Contains(r.stdout, "org.b") {
+		t.Fatalf("install: %s", r.stdout)
+	}
+	if took := time.Since(start); took < 1500*time.Millisecond {
+		t.Fatalf("the install answered after %s, before the device had the app", took)
+	}
+	s, _ := fake.Session(dev.ProviderRef)
+	if len(s.Installed) != 1 || len(s.Caps) != 2 || s.Caps[1]["appium:udid"] != nil {
+		t.Fatalf("install into the session and reopen: installed %v, WebDriver sessions %d", s.Installed, len(s.Caps))
+	}
+	e.mustOK(env, append([]string{"tapOn", "Button"}, id...)...)
+	if r := e.runEnv(env, append([]string{"uninstall", "org.b"}, id...)...); r.code != 2 || !strings.Contains(r.stderr, "no uninstall during a session") {
+		t.Fatalf("uninstall: exit %d\n%s", r.code, r.stderr)
+	}
+	// A flow that records: the step and the run say the device has no
+	// screen capture, and no Go type reaches the output.
+	flowPath := filepath.Join(e.cwd, "rec-flow.yaml")
+	if err := os.WriteFile(flowPath, []byte("appId: org.b\n---\n- startRecording: rec\n- tapOn: Button\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r = e.runEnv(env, append([]string{"run", flowPath}, id...)...)
+	if r.code == 0 || !strings.Contains(r.stdout+r.stderr, "no screen capture") || strings.Contains(r.stdout+r.stderr, "*flow.") {
+		t.Fatalf("a recording flow: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	e.mustOK(env, append([]string{"device", "delete", dev.ID}, d...)...)
+}
+
+func TestE2E_DeviceFarmUtilities(t *testing.T) {
+	e := newE2E(t)
+	fake := dftest.New(t)
+	env := dfEnv(t, e, fake, true)
+	d := []string{"--daemon", "dfutil", "--json"}
+	r := e.mustOK(env, append([]string{"devicefarm", "account"}, d...)...)
+	if !strings.Contains(r.stdout, `"trialMinutes"`) || strings.Contains(r.stdout, "maxSlots") {
+		t.Fatalf("account: %s", r.stdout)
+	}
+	apk := writeFakeApp(t, e.cwd, "a.apk")
+	r = e.mustOK(env, append([]string{"devicefarm", "upload", apk}, d...)...)
+	var up daemon.ProviderUploadResult
+	if json.Unmarshal([]byte(r.stdout), &up) != nil || up.Ref == "" || up.Reused {
+		t.Fatalf("upload: %s", r.stdout)
+	}
+	r = e.mustOK(env, append([]string{"devicefarm", "upload", apk}, d...)...)
+	if json.Unmarshal([]byte(r.stdout), &up) != nil || !up.Reused || fake.CountOp("CreateUpload") != 1 {
+		t.Fatalf("second upload: %s (CreateUpload %d)", r.stdout, fake.CountOp("CreateUpload"))
+	}
+	r = e.mustOK(env, append([]string{"devicefarm", "apps"}, d...)...)
+	if !strings.Contains(r.stdout, up.Name) {
+		t.Fatalf("apps: %s", r.stdout)
+	}
+	e.mustOK(env, append([]string{"devicefarm", "sessions"}, d...)...)
+	// The tables.
+	for _, sub := range []string{"account", "apps", "sessions"} {
+		e.mustOK(env, "devicefarm", sub, "--daemon", "dfutil")
+	}
+	r = e.mustOK(env, "devicefarm", "upload", apk, "--daemon", "dfutil")
+	if !strings.Contains(r.stdout, "reused") {
+		t.Fatalf("upload table: %s", r.stdout)
+	}
+	if r := e.runEnv(env, "devicefarm", "upload", "--daemon", "dfutil"); r.code != 2 {
+		t.Fatalf("upload without a file: exit %d", r.code)
+	}
 }

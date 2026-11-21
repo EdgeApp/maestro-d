@@ -21,6 +21,10 @@ import type {
   CatalogQuery,
   CatalogResult,
   CloudSpec,
+  ProviderAccount,
+  ProviderApps,
+  ProviderSessions,
+  ProviderUpload,
   CreateDeviceOptions,
   DaemonEvent,
   DaemonInfo,
@@ -128,6 +132,13 @@ export class MaestroD {
   readonly leaseKey: string
   /** The handles holding the leases this process took, by device id; `close()` releases them. */
   private readonly leased = new Map<string, MaestroDevice>()
+  /**
+   * AWS Device Farm itself, without a device: the account, the uploaded
+   * apps, an upload from the daemon's machine (a local caller only) and the
+   * remote access sessions. Through a hub they reach the hub that holds the
+   * credentials; `hub` names one.
+   */
+  readonly devicefarm: DeviceFarmUtilities
 
   private constructor(
     name: string,
@@ -141,6 +152,7 @@ export class MaestroD {
     this.transport = transport
     this.started = started
     this.leaseKey = leaseKey
+    this.devicefarm = new DeviceFarmUtilities(transport, () => this.signal)
     if (info) this.info = info
     if (signal) this.signal = signal
     // A lease the hub reports expired leaves leases.json too.
@@ -572,6 +584,46 @@ export function withQuery(path: string, q: Record<string, unknown>): string {
   }
   const qs = p.toString()
   return qs ? `${path}?${qs}` : path
+}
+
+/** `md.devicefarm`: AWS Device Farm without a device. */
+export class DeviceFarmUtilities {
+  constructor(
+    private readonly transport: Transport,
+    private readonly signal: () => AbortSignal | undefined,
+  ) {}
+
+  private path(what: string, hub?: string): string {
+    return withQuery(`/v1/providers/devicefarm/${what}`, { hub })
+  }
+
+  /** Trial minutes and unmetered devices (`GET /v1/providers/devicefarm/account`). */
+  async account(opts: { hub?: string } = {}): Promise<ProviderAccount> {
+    return this.transport.json<ProviderAccount>(this.path('account', opts.hub), { signal: this.signal() })
+  }
+
+  /** The project's uploaded apps. */
+  async apps(opts: { hub?: string } = {}): Promise<ProviderApps> {
+    return this.transport.json<ProviderApps>(this.path('apps', opts.hub), { signal: this.signal() })
+  }
+
+  /**
+   * Upload an .apk or .ipa from the daemon's machine, reusing an identical
+   * upload from the last 30 days. A remote caller is refused: install an app
+   * on a leased cloud device instead.
+   */
+  async upload(file: string, opts: { hub?: string } = {}): Promise<ProviderUpload> {
+    return this.transport.json<ProviderUpload>(this.path('apps', opts.hub), {
+      method: 'POST',
+      body: { app: path.resolve(file) },
+      signal: this.signal(),
+    })
+  }
+
+  /** The project's remote access sessions, each named with its device id. */
+  async sessions(opts: { hub?: string } = {}): Promise<ProviderSessions> {
+    return this.transport.json<ProviderSessions>(this.path('sessions', opts.hub), { signal: this.signal() })
+  }
 }
 
 /**

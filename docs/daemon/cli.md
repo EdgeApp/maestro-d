@@ -307,6 +307,9 @@ maestro-d stop --all
 | `device delete ID\|NAME [--force]` | delete a simulator or AVD (by UDID, name, `avd:<name>` or a running emulator's serial), detaching and stopping it first; only ones `device create` made without `--force` (`DEVICE_EXTERNAL`). A cloud device is released, with its minutes |
 | `lease --location cloud --platform ios\|android [--provider P] [--name MODEL] [--os-min V --os-max V] [--hub H] [--ttl D] [--idle-release D] [--appium-version 2\|3] [--attach]` | launch a cloud device for a lease on the hub that holds the provider's credentials (`hub start --devicefarm`), and attach it; the lease's end releases it, and `release` prints the device minutes. See [Cloud devices](cloud.md) |
 | `devicefarm sessions [--hub NAME]` | the Device Farm project's remote access sessions: NAME (the device id), STATUS, RESULT, MODEL, MINUTES (the billed figure once the session has COMPLETED) |
+| `devicefarm account [--hub NAME]` | the Device Farm account: trial minutes left of the total, the unmetered device slots and the job timeout |
+| `devicefarm apps [--hub NAME]` | the project's uploaded apps: NAME (`maestro-d-<content hash>.apk\|.ipa`), TYPE, STATUS, CREATED, REF (the upload ARN) |
+| `devicefarm upload FILE [--hub NAME]` | upload an `.apk` or `.ipa` from this machine and print its ARN, for `device create --app ARN`; an identical upload from the last 30 days is reused (`already uploaded (reused)`). Through a remote hub it is refused (`FORBIDDEN`): install the app on a leased cloud device instead |
 | `attach --device ID [flags]` | open a driver on a device now rather than on the first command |
 | `detach [--device ID \| --all]` | close the driver; the device stays as it is |
 
@@ -372,8 +375,8 @@ maestro-d eval 'maestro.copiedText'
 
 | command | |
 | --- | --- |
-| `install FILE [--reinstall] [--platform P]` | install an `.apk`, `.app` or `.ipa` on `--device` without attaching, and print its app id when it can be read (an `.apk`'s needs `aapt2`); with `--target-hub` the file is uploaded first, unless the daemon has it |
-| `uninstall APP_ID` | remove an app by bundle id or package name |
+| `install FILE [--reinstall] [--platform P]` | install an `.apk`, `.app` or `.ipa` on `--device` without attaching, and print its app id when it can be read (an `.apk`'s needs `aapt2`); with `--target-hub` the file is uploaded first, unless the daemon has it. On a cloud device the app is installed into the running session, which keeps its id (`.apk` or `.ipa`) |
+| `uninstall APP_ID` | remove an app by bundle id or package name; a cloud device refuses it (`USAGE`) |
 | `pack PATH… [--json]` | print each file's upload unit: sha256, size and `blob:` ref. A directory (an iOS `.app`) is zipped with sorted entries and fixed timestamps, so it always hashes the same |
 | `pack --flow FILE… [--base DIR] [-e K=V] [--include GLOB] [--json]` | pack flow files (the first is the root) with their dependency closure into one bundle: `runFlow` files and `else`, `retry` files, the `onFlowStart`/`onFlowComplete` hooks, `runScript` `.js` files, `addMedia`, existing `assertScreenshot` references, the other file inputs, and the root flow's `config.yaml`. `${VAR}` in a path is expanded from `-e`; an unresolvable or absolute path, or an output path with `..`, is `USAGE` naming the step. Prints the manifest `{root, files: {relPath: sha256}}`, relative to the files' common directory, and its sha256. `--base DIR` places the first file as if it sat in `DIR` (the JS library's inline steps) |
 

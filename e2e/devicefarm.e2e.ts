@@ -31,6 +31,12 @@
 // iOS drives BStackSampleApp.ipa (com.browserstack.Sample-iOS) and
 // e2e/fixtures/devicefarm/ios-text.yaml (both are public sample apps:
 // https://www.browserstack.com/app-automate/sample-apps/<android|ios>/<file>).
+// With MAESTRO_D_DF_SECOND_APP=<.apk or .ipa> MAESTRO_D_DF_SECOND_APP_ID=<id>
+// MAESTRO_D_DF_SECOND_TEXT=<text on its first screen>, the script then
+// installs that app into the running session (installApp), checks the
+// app.installed event and that the device kept its id, launches it and
+// asserts the text (LocalSample.apk: com.example.android.basicnetworking;
+// LocalSample.ipa: com.browserstack.SampleLocalApp).
 // Each step is checked and the script exits 1 at the first failure. The
 // device is released in a finally, so a failed run leaves nothing billing.
 import assert from 'node:assert/strict'
@@ -65,6 +71,10 @@ const osVersion = optional('MAESTRO_D_DF_OS')
 const appPath = mode === 'hub' ? optional('MAESTRO_D_DF_APP') : required('MAESTRO_D_DF_APP')
 const app = appPath ? path.resolve(appPath) : undefined
 const appId = app ? required('MAESTRO_D_DF_APP_ID') : platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'
+const secondPath = optional('MAESTRO_D_DF_SECOND_APP')
+const second = secondPath
+  ? { app: path.resolve(secondPath), appId: required('MAESTRO_D_DF_SECOND_APP_ID'), text: required('MAESTRO_D_DF_SECOND_TEXT') }
+  : undefined
 const artifactDir = optional('MAESTRO_D_ARTIFACT_DIR')
 const clientRoot = path.resolve(repoRoot, optional('MAESTRO_D_CLIENT_ROOT') ?? 'npm/maestro-d')
 if (mode !== 'direct' && mode !== 'hub') throw new Error(`MAESTRO_D_DF_MODE ${mode}: direct or hub`)
@@ -156,6 +166,32 @@ async function main(): Promise<void> {
     const res = await d.flow({ file: path.join(repoRoot, plan.flow) })
     assert.ok(res.ok, `flow ${plan.flow}`)
     log(`flow ${plan.flow} ok in ${res.durationMs} ms`)
+
+    if (second) {
+      // Install a second app into the running session: the device keeps its
+      // id, and the executor session reopens on it.
+      const events = d.events({ signal: AbortSignal.timeout(600_000) })[Symbol.asyncIterator]()
+      const installStarted = Date.now()
+      const inst = await d.installApp(second.app)
+      log(`installApp ${path.basename(second.app)} ok in ${Math.round((Date.now() - installStarted) / 1000)} s (${JSON.stringify(inst)})`)
+      for (;;) {
+        const { value, done } = await events.next()
+        assert.ok(!done, 'an app.installed event')
+        if (value.type === 'app.installed' && value.message === second.appId) {
+          log(`event app.installed ${value.message} on ${value.device}`)
+          break
+        }
+      }
+      await events.return?.()
+      const after = (await md.devices({ location: 'cloud' })).find((x) => x.id === dev?.id)
+      assert.ok(after, `${dev.id} is still listed after the install`)
+      await d.launchApp({ appId: second.appId })
+      await d.assertVisible(second.text)
+      log(`launchApp ${second.appId} and assertVisible ${JSON.stringify(second.text)} ok on the same device ${after.id}`)
+      const installedShot = path.join(artifactDir ?? '.', `devicefarm-${platform}-installed.png`)
+      await d.takeScreenshot(installedShot)
+      log(`takeScreenshot ok → ${path.basename(installedShot)} (${fs.statSync(installedShot).size} bytes)`)
+    }
   } finally {
     if (leased) {
       const rel = await leased.release()
