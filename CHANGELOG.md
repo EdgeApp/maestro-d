@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- added: `pkg/devicefarm`, an AWS Device Farm client for cloud devices: the remote-access device catalog, projects, app uploads that reuse an identical earlier upload, remote access sessions with the managed Appium endpoint (Appium 3 on iOS 27 and later), install into a running session, account minutes, and errors classified by kind with endpoint paths, presigned queries and access key ids redacted. `pkg/cloudprov` is the provider contract the daemon drives every cloud provider through, and `pkg/devicefarm/dftest` a fake Device Farm for tests. The module now needs Go 1.24, the AWS SDK's minimum.
 - added: Device listings (`GET /v1/devices`, `maestro-d device list`, `maestro-runner devices --json`, JS `devices()`, and every hub's) carry each ready Android phone's name, model and Android version, read once per adb connection, and running emulators carry their model and Android version beside their AVD name. Every entry gains `model`: `ro.product.model` on Android, the product type (`iPhone14,2`) on iOS phones and Apple TVs, and the device type's model identifier on simulators. `device list` shows it after the name.
 
 ## 3.2.0 (2026-11-20)
