@@ -502,11 +502,34 @@ func (c *Client) StartDevice(ctx context.Context, req BootRequest) (*DeviceInfo,
 
 // StopDevice detaches (if attached) and shuts a device down.
 func (c *Client) StopDevice(ctx context.Context, id string, force bool) error {
-	var out Envelope
+	_, err := c.StopDeviceResult(ctx, id, force)
+	return err
+}
+
+// StopDeviceResult is StopDevice with the answer: for a cloud device the
+// released device, carrying the minutes its session used; for any other
+// device an empty Device.
+func (c *Client) StopDeviceResult(ctx context.Context, id string, force bool) (*DeviceResult, error) {
+	var out DeviceResult
 	if e := c.call(ctx, http.MethodDelete, devPath(id, ""), StopDeviceRequest{Force: force}, &out); e != nil {
-		return e
+		return nil, e
 	}
-	return nil
+	return &out, nil
+}
+
+// ProviderSessions lists a cloud provider's sessions
+// (GET /v1/providers/{provider}/sessions); on a hub, hub names the hub that
+// answers.
+func (c *Client) ProviderSessions(ctx context.Context, provider, hub string) (*ProviderSessionsResult, error) {
+	var out ProviderSessionsResult
+	path := "/v1/providers/" + url.PathEscape(provider) + "/sessions"
+	if hub != "" {
+		path += "?hub=" + url.QueryEscape(hub)
+	}
+	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
 }
 
 // Catalog lists what `device create` can make; platform "" means both.

@@ -122,3 +122,62 @@ describe('the cloud catalog', () => {
     assert.deepEqual(st.cloud, [{ provider: 'devicefarm', held: 0 }])
   })
 })
+
+describe('direct mode', () => {
+  test('createDevice({cloud}) launches, attach drives it, deleteDevice releases it', async () => {
+    const app = path.join(tmp, 'sample.ipa')
+    fs.writeFileSync(app, 'PK fake ipa')
+    const dev = await md.createDevice({
+      cloud: { provider: 'devicefarm', platform: 'ios', name: 'Apple iPhone 15', app, appId: 'org.example', idleReleaseSec: 900 },
+    })
+    assert.match(dev.id, /^df-[0-9a-f]{8}$/)
+    assert.equal(dev.location, 'cloud')
+    assert.equal(dev.provider, 'devicefarm')
+    assert.equal(dev.idleReleaseSec, 900)
+    assert.equal(dev.name, 'Apple iPhone 15')
+    const session = fake.sessions.find((s) => s.name === dev.id)
+    assert.ok(session, 'the session is named with the device id')
+    assert.equal(session.parameters['appium:version'], '2')
+    assert.ok(fake.uploads.some((u) => u.type === 'IOS_APP'), 'the app was uploaded')
+
+    const handle = await md.attach({ device: dev.id })
+    await handle.tapOn('Button')
+    await handle.flow({ yaml: 'appId: org.example\n---\n- tapOn: Button\n' })
+    assert.equal(session.caps?.['appium:udid'], undefined)
+
+    const del = await md.deleteDevice(dev.id)
+    assert.equal(del.id, dev.id)
+    assert.ok(del.deviceMinutes && del.deviceMinutes.total >= 1)
+    assert.equal(session.status, 'COMPLETED')
+    assert.deepEqual(await md.devices({ location: 'cloud' }), [])
+  })
+
+  test('stopDevice resolves with the minutes', async () => {
+    const dev = await md.createDevice({ cloud: { platform: 'android', name: 'Google Pixel 8' } })
+    const res = await md.stopDevice(dev.id)
+    assert.ok(res.deviceMinutes && res.deviceMinutes.total >= 1)
+    // A device that is not a cloud device resolves without minutes.
+    assert.deepEqual(await md.stopDevice('mock-1', { force: true }), {})
+  })
+
+  test('createDevice({cloud}) sends app files absolute', async () => {
+    // The daemon runs from another directory than this process now does.
+    const dir = fs.mkdtempSync(path.join(tmp, 'rel-'))
+    fs.writeFileSync(path.join(dir, 'rel.apk'), 'PK relative apk')
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      const before = fake.uploads.length
+      const dev = await md.createDevice({ cloud: { platform: 'android', name: 'Google Pixel 8', app: 'rel.apk', appId: 'org.rel' } })
+      assert.equal(fake.uploads.length, before + 1, 'the relative app was uploaded')
+      await md.deleteDevice(dev.id)
+    } finally {
+      process.chdir(cwd)
+    }
+  })
+
+  test('createDevice({cloud}) needs cloud.platform', async () => {
+    await assert.rejects(md.createDevice({ cloud: {} }), TypeError)
+    await assert.rejects(md.createDevice({ cloud: { platform: 'android', idleReleaseSec: 99999 } }), (err) => isMaestroError(err) && err.code === 'USAGE')
+  })
+})

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/capture"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -94,13 +95,20 @@ type Config struct {
 type Server struct {
 	cfg  Config
 	deps Deps
-	// cloud holds the cloud providers constructed so far (cloud.go).
+	// cloud holds the cloud providers constructed so far (cloud.go), and
+	// remotes the cloud devices this daemon holds (remote.go).
 	cloud    providerSet
-	registry *Registry
-	events   *EventBus
-	idle     *idleTimer
-	idem     *idemCache
-	blobs    *BlobStore
+	remoteMu sync.Mutex
+	remotes  map[string]*remoteDevice
+	// launches is cancelled when the daemon shuts down: every cloud launch
+	// joins it, so none registers a device after the teardown ran.
+	launches       context.Context
+	cancelLaunches context.CancelFunc
+	registry       *Registry
+	events         *EventBus
+	idle           *idleTimer
+	idem           *idemCache
+	blobs          *BlobStore
 	// leases are a hub's device leases; leaseMu serialises granting and
 	// ending them.
 	leases  *leaseTable
@@ -149,20 +157,23 @@ func New(cfg Config, deps Deps) *Server {
 	if cfg.BlobsDir == "" {
 		cfg.BlobsDir = DefaultBlobRoot()
 	}
+	launches, cancelLaunches := context.WithCancel(context.Background())
 	s := &Server{
-		cfg:       cfg,
-		deps:      deps,
-		registry:  NewRegistry(cfg.Name, deps.ListDevices),
-		events:    NewEventBus(0),
-		idem:      newIdemCache(),
-		blobs:     NewBlobStore(cfg.BlobsDir),
-		leases:    newLeaseTable(),
-		sharedIDs: map[string]bool{},
-		shareSeen: map[string]shareAnswer{},
-		idemGrace: idemGrace,
-		attached:  map[string]*attached{},
-		attaching: map[string]chan struct{}{},
-		done:      make(chan struct{}),
+		launches:       launches,
+		cancelLaunches: cancelLaunches,
+		cfg:            cfg,
+		deps:           deps,
+		registry:       NewRegistry(cfg.Name, deps.ListDevices),
+		events:         NewEventBus(0),
+		idem:           newIdemCache(),
+		blobs:          NewBlobStore(cfg.BlobsDir),
+		leases:         newLeaseTable(),
+		sharedIDs:      map[string]bool{},
+		shareSeen:      map[string]shareAnswer{},
+		idemGrace:      idemGrace,
+		attached:       map[string]*attached{},
+		attaching:      map[string]chan struct{}{},
+		done:           make(chan struct{}),
 	}
 	s.registry.deps = deps
 	s.events.observe = s.forgetShared
@@ -372,6 +383,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.cfg.Ready != nil {
 		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
 	}
+	// Cloud sessions an earlier run of this daemon left (a crash, kill -9,
+	// a launchd restart) are released once it serves, so a spawning client
+	// never waits on it.
+	go s.selfRelease()
 
 	select {
 	case <-s.done:
@@ -397,6 +412,10 @@ func (s *Server) Done() <-chan struct{} { return s.done }
 func (s *Server) Shutdown(reason string) {
 	s.shutdownOnce.Do(func() {
 		s.shuttingDown.Store(true)
+		if s.cancelLaunches != nil {
+			// Cloud launches under way stop, and release what they made.
+			s.cancelLaunches()
+		}
 		s.idle.Stop()
 		go func() {
 			defer close(s.done)
@@ -411,6 +430,7 @@ func (s *Server) Shutdown(reason string) {
 			}
 			s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
 			s.detachAll()
+			s.releaseAllRemote("daemon-exit")
 			s.registry.ShutdownOwned()
 			RemoveRunFiles(s.cfg.Name)
 			// Close listeners after cleanup so a `stop` caller can still
@@ -455,6 +475,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/shutdown", s.handleShutdown)
 	mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
+	mux.HandleFunc("GET /v1/providers/{provider}/sessions", s.handleProviderSessions)
 	mux.HandleFunc("GET /v1/viewer", s.handleViewer)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
@@ -467,8 +488,21 @@ func (s *Server) routes(tcp bool) http.Handler {
 	// shared devices, and on a hub the request carries the device's lease.
 	open, leased := func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseOpen, h) },
 		func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseNeeded, h) }
+	// busy counts a request on a cloud device's idle clock, for the routes
+	// that do not take the step lock (acquire does that for the rest).
+	busy := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			done, e := s.cloudBusy(r.PathValue("id"))
+			if e != nil {
+				writeError(w, e)
+				return
+			}
+			defer done()
+			h(w, r)
+		}
+	}
 	mux.HandleFunc("DELETE /v1/devices/{id}", s.dev(leaseIfHeld, s.handleStopDevice))
-	mux.HandleFunc("POST /v1/devices/{id}/attach", leased(s.handleAttach))
+	mux.HandleFunc("POST /v1/devices/{id}/attach", leased(busy(s.handleAttach)))
 	mux.HandleFunc("POST /v1/devices/{id}/detach", leased(s.handleDetach))
 	mux.HandleFunc("GET /v1/devices/{id}", open(s.handleGetDevice))
 	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", leased(s.idempotent(s.handleCommand)))
@@ -478,14 +512,16 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/devices/{id}/stream", leased(s.handleStream))
 	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", leased(s.handleHierarchy))
 	mux.HandleFunc("GET /v1/devices/{id}/state", leased(s.handleState))
+	// info reads cached data, and any caller may ask: it does not hold a
+	// cloud device's idle clock.
 	mux.HandleFunc("GET /v1/devices/{id}/info", open(s.handleInfo))
-	mux.HandleFunc("GET /v1/devices/{id}/vars", leased(s.handleGetVars))
-	mux.HandleFunc("PUT /v1/devices/{id}/vars", leased(s.handleSetVars))
-	mux.HandleFunc("POST /v1/devices/{id}/vars", leased(s.handleSetVars))
+	mux.HandleFunc("GET /v1/devices/{id}/vars", leased(busy(s.handleGetVars)))
+	mux.HandleFunc("PUT /v1/devices/{id}/vars", leased(busy(s.handleSetVars)))
+	mux.HandleFunc("POST /v1/devices/{id}/vars", leased(busy(s.handleSetVars)))
 	mux.HandleFunc("POST /v1/devices/{id}/eval", leased(s.handleEval))
-	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobHead))
-	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", leased(s.handleBlobPut))
-	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(s.idempotent(s.handleInstallApp)))
+	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", leased(busy(s.handleBlobHead)))
+	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", leased(busy(s.handleBlobPut)))
+	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(busy(s.idempotent(s.handleInstallApp))))
 	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", leased(s.handleUninstallApp))
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts", leased(s.handleListArtifacts))
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", leased(s.handleGetArtifact))
@@ -629,6 +665,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		annotateAvailable(devs, otherOwners(s.cfg.Name))
 	}
 	SetLocations(devs, s.callerMachine(r))
+	s.decorateCloud(devs)
 	devs = q.Filter(devs)
 	s.markTrafficShaping(devs)
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
@@ -648,6 +685,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		devs[0].Machine = MachineName()
 	}
 	SetLocations(devs, s.callerMachine(r))
+	s.decorateCloud(devs)
 	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(devs[0])})
 }
 
@@ -655,6 +693,12 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 	var req BootRequest
 	if e := decodeBody(r, &req); e != nil {
 		writeError(w, e)
+		return
+	}
+	// A cloud create goes to remote.go before the share and simulator
+	// checks, so a hub always answers it with the lease hint.
+	if req.Create != nil && req.Create.Cloud != nil {
+		s.handleCreateCloud(w, r, req)
 		return
 	}
 	if e := s.checkShareBoot(r, req); e != nil {
@@ -688,6 +732,10 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("delete") == "true" {
 		req.Delete = true
+	}
+	if rd := s.remote(id); rd != nil {
+		s.handleStopCloud(w, r, rd, req.Delete)
+		return
 	}
 	if req.Delete {
 		s.handleDeleteDevice(w, r, id, req.Force)
@@ -853,6 +901,10 @@ func (s *Server) requireAttached(w http.ResponseWriter, r *http.Request) *attach
 	id := r.PathValue("id")
 	a := s.getAttached(id)
 	if a == nil {
+		if e := s.cloudGone(id); e != nil {
+			writeError(w, e)
+			return nil
+		}
 		s.mu.Lock()
 		ids := s.attachedIDs()
 		s.mu.Unlock()
@@ -865,12 +917,22 @@ func (s *Server) requireAttached(w http.ResponseWriter, r *http.Request) *attach
 // acquire takes the device's busy lock, honouring ?wait=false.
 func (s *Server) acquire(w http.ResponseWriter, r *http.Request, a *attached) bool {
 	if r.URL.Query().Get("wait") == "false" {
-		if !a.busy.TryLock() {
+		// A cloud device's keepalive holds the lock for one ping: that is
+		// not a step in flight, so wait it out.
+		if !a.busy.TryLock() && !(s.isPinging(a.id) && lockWithin(&a.busy, 5*time.Second)) {
 			writeError(w, Errorf(CodeBusy, "device %s has a step in flight", a.id))
 			return false
 		}
 	} else {
 		a.busy.Lock()
+	}
+	// A cloud device counts the request on its idle clock (remote.go).
+	if rd := s.remote(a.id); rd != nil {
+		if e := rd.begin(); e != nil {
+			a.busy.Unlock()
+			writeError(w, e)
+			return false
+		}
 	}
 	atomic.AddInt32(&a.inFlite, 1)
 	s.registry.SetBusy(a.id, true)
@@ -883,7 +945,65 @@ func (s *Server) release(a *attached) {
 	if atomic.AddInt32(&a.inFlite, -1) == 0 {
 		s.registry.SetBusy(a.id, false)
 	}
+	if rd := s.remote(a.id); rd != nil {
+		rd.end()
+	}
 	a.busy.Unlock()
+}
+
+// lockWithin takes mu, giving up after d.
+func lockWithin(mu *sync.Mutex, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for !mu.TryLock() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return true
+}
+
+// sessionAnswers reports whether rd's WebDriver session still answers (the
+// keepalive's cheap command). A failed step asks the provider whether the
+// session ended only when it does not, so ordinary failures (an assertion,
+// an element not found) cost no provider call.
+func (s *Server) sessionAnswers(rd *remoteDevice) bool {
+	rd.driverMu.Lock()
+	defer rd.driverMu.Unlock()
+	return rd.driver.Keepalive() == nil
+}
+
+// cloudResult adds a cloud device's warnings to a step result, answers a
+// recording step with CAPTURE_UNAVAILABLE, and turns a failure on a device
+// whose provider session has ended into DEVICE_ERROR with the reason.
+func (s *Server) cloudResult(res *StepResult) {
+	rd := s.remote(res.Device)
+	if rd == nil {
+		return
+	}
+	res.Warnings = append(res.Warnings, s.cloudWarnings(res.Device)...)
+	if res.OK || res.Error == nil || res.Error.Code == CodeInterrupted || res.Error.Code == CodeForbidden {
+		return
+	}
+	// The held driver has no screen capture and refuses recording steps
+	// itself (remoteAppium); answer them as the stream does.
+	if res.Type == string(flow.StepStartRecording) || res.Type == string(flow.StepStopRecording) {
+		e := unavailableErr(&capture.Unavailable{Reason: capture.ReasonUnsupportedPlatform,
+			Message: fmt.Sprintf("cloud device %s has no screen capture, so it cannot record (the provider keeps its own session video)", res.Device)}, "")
+		res.Error = &ErrorBody{Code: e.Code, Message: e.Message, Step: res.Error.Step, Details: e.Details}
+		res.Message = e.Message
+		res.ExitCode = CodeCaptureUnavailable.ExitCode()
+		return
+	}
+	if s.sessionAnswers(rd) || !s.checkRemote(rd) {
+		return
+	}
+	rd.mu.Lock()
+	reason := rd.ended
+	rd.mu.Unlock()
+	res.Error = &ErrorBody{Code: CodeDeviceError, Message: fmt.Sprintf("cloud device %s is gone: %s", rd.id, reason), Step: res.Error.Step,
+		Details: map[string]any{"reason": reason}}
+	res.ExitCode = CodeDeviceError.ExitCode()
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +1048,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := a.session.Execute(ctx, step)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	s.cloudResult(&res)
 	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
 		res.ForRemote(a.reportDir)
 	}
@@ -995,6 +1116,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	results := make([]StepResult, 0, len(outs))
 	for _, o := range outs {
 		res := ResultFromOutcome(a.id, a.reportDir, o)
+		s.cloudResult(&res)
 		if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
 			res.ForRemote(a.reportDir)
 		}
@@ -1097,6 +1219,7 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := a.session.RunFlow(ctx, *f)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
+	s.cloudResult(&res)
 	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
 		res.ForRemote(a.reportDir)
 	}

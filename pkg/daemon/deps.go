@@ -53,4 +53,20 @@ type Deps struct {
 	// use, from its own credentials; a hub is given only the providers it
 	// was started with (`hub start --devicefarm`).
 	Providers map[string]func() (cloudprov.RemoteProvider, error)
+	// NewRemoteDriver opens a WebDriver session on a cloud device's Appium
+	// endpoint with caps, never touching local discovery or adb (remote.go).
+	NewRemoteDriver func(ctx context.Context, endpoint string, caps map[string]any) (RemoteDriver, DriverInfo, error)
+}
+
+// RemoteDriver is the Appium driver the daemon holds for a cloud device.
+type RemoteDriver interface {
+	core.Driver
+	// Keepalive sends a cheap session command so the provider does not end
+	// an idle session.
+	Keepalive() error
+	// RestartSession ends the WebDriver session and opens a new one with
+	// the same capabilities, on the same driver (after an install).
+	RestartSession() error
+	// Close ends the WebDriver session.
+	Close() error
 }

@@ -96,6 +96,78 @@ Device Farm credentials".
 launches on in `cloud`, with the number of cloud devices it holds (`held`)
 and, on a hub, its cap (`maxDevices`).
 
+## Direct mode: a cloud device on your own daemon
+
+Your own daemon launches a cloud device with its own AWS credentials (the
+environment, `AWS_PROFILE`, or `~/.aws/credentials`; the daemon reads them
+when it starts, so start it, or `maestro-d stop` it, from a shell that has
+them):
+
+```
+$ maestro-d device create --provider devicefarm --platform android --name 'Google Pixel 8' \
+    --app WikipediaSample.apk --app-id org.wikipedia.alpha
+df-c302205a launched: Google Pixel 8 15 (android, devicefarm); released after 600s idle, by 2026-11-21T03:15:24Z at the latest
+$ maestro-d launchApp org.wikipedia.alpha --device df-c302205a
+$ maestro-d run search.yaml --device df-c302205a
+$ maestro-d device delete df-c302205a
+df-c302205a deleted: Google Pixel 8 (android) (about 1.4 device minutes so far; Device Farm also bills its cleanup, so the billed figure is higher: devicefarm sessions shows it once the session completes)
+```
+
+The JavaScript library does the same with `md.createDevice({cloud: {…}})`,
+and REST with `POST /v1/devices` and `create.cloud` ([rest.md](rest.md)).
+Only a daemon's local callers launch cloud devices; a hub launches them for
+leases.
+
+The daemon holds the device's Appium driver, behind a loopback proxy, so
+the provider's endpoint URL (itself a credential) never reaches a log, a
+step result or a run file. Attach, one-shot commands, REST steps, flows and
+`run` drive it as they drive any device, except what the provider does not
+allow ([devicefarm.md](../cloud-providers/devicefarm.md#what-does-not-work)).
+
+## Release
+
+A cloud device costs money while it runs, so the daemon releases it:
+
+- **When it is idle.** Any request that uses the device (a step, a flow, a
+  screenshot, the hierarchy, state, vars, an attach, an install, a blob
+  upload, a lease renewal) counts; reading its listing or `info` does not.
+  A request still running holds the
+  clock, and it restarts when the last one ends. After `--idle-release`
+  (`idleReleaseSec`; default 10 minutes, 1 to 150) without one, the device
+  is released. Until then the daemon pings the provider's session every
+  minute, so the provider's own 5-minute idle limit never ends it. A held
+  cloud device keeps its daemon running past the daemon's own idle timeout.
+- **At the provider's cap.** Device Farm ends a session after 150 minutes;
+  the daemon releases it 30 s before (`expiresAt`), and in the last 10
+  minutes every step result warns `cloud session ends at …`.
+- **When you stop or delete it**, and **when the daemon stops**. A release
+  the provider refuses (a timeout, a 5xx) is retried in the background
+  every 30 s until it succeeds, and the session stays in the cloud ledger
+  meanwhile.
+- **After a crash.** Every session is recorded in `<home>/run/cloud.json`
+  the moment it is created, before the daemon waits for it. A daemon that
+  starts under the name of one that crashed releases that one's sessions
+  once it is serving; `maestro-d device stop --orphans` releases the
+  sessions of every dead daemon, with this shell's AWS credentials or
+  `--devicefarm-credentials-file` / `--devicefarm-profile`, and lists any it
+  could not release with their ARNs. Both report each released session's
+  minutes.
+
+Every release reports the device minutes the session used
+(`device.released` events, the stop and delete answers, `release`, `device
+stop --orphans`). Device Farm settles its billed figure only once a session
+has completed, and it bills the cleanup after the release too, which for
+an iPhone can be ten minutes or more. Until then the minutes are counted
+from the session's creation to the release, rounded down to a tenth, and
+marked `estimated: true`, printed as "about N device minutes so far"; the
+billed figure is higher by the cleanup.
+`maestro-d devicefarm sessions` lists every session with its billed
+minutes.
+
+A session the provider ends on its own turns the device `state: ended`,
+with `endedReason`, and later requests answer `DEVICE_ERROR` with that
+reason until you delete it.
+
 ## Providers
 
 A cloud provider implements one Go interface, `cloudprov.RemoteProvider`

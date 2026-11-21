@@ -246,6 +246,65 @@ export interface DeviceInfo {
   location?: DeviceLocation
   /** The cloud provider that holds the device (`devicefarm`); absent otherwise. */
   provider?: string
+  /** A cloud device's provider session (a Device Farm session ARN). */
+  providerRef?: string
+  /** The session's page in the provider's console. */
+  dashboardUrl?: string
+  /** RFC 3339: when the provider ends the session. */
+  expiresAt?: string
+  /** Seconds without a request before the cloud device is released. */
+  idleReleaseSec?: number
+  /** RFC 3339: when it is released if no request comes. */
+  idleReleaseAt?: string
+  /** Why a cloud device's session ended (`state: 'ended'`). */
+  endedReason?: string
+  /** The device time a released cloud session used. */
+  deviceMinutes?: DeviceMinutes
+  formFactor?: string
+  manufacturer?: string
+  /** The Appium major version a cloud device's provider runs (`2` or `3`). */
+  appiumVersion?: string
+}
+
+/** The device time a cloud session used. */
+export interface DeviceMinutes {
+  metered: number
+  total: number
+  /**
+   * True until the provider settles its figure: then the minutes run from
+   * the session's creation to its release, and the billed figure is higher,
+   * because the provider also bills the cleanup after the release.
+   */
+  estimated?: boolean
+}
+
+/** What a cloud device launch asks for. */
+export interface CloudSpec {
+  /** Default `devicefarm`. */
+  provider?: string
+  platform: 'ios' | 'android' | string
+  /** The model: exact name, catalog id or a regular expression. */
+  name?: string
+  osVersion?: string
+  osVersionMin?: string
+  osVersionMax?: string
+  /**
+   * An .apk or .ipa on the daemon's machine (a relative path is resolved
+   * against this process's directory), a `blob:` ref, or an upload ARN.
+   */
+  app?: string
+  /** At most 3 more apps to install, as `app`. */
+  auxiliaryApps?: string[]
+  /** The app's id, the default for attach. */
+  appId?: string
+  /** '2' or '3' (default '3' on iOS 27 and later). */
+  appiumVersion?: string
+  /** Merged into the WebDriver session's capabilities. */
+  caps?: Record<string, unknown>
+  /** Seconds without a request before release: default 600, 60–9000. */
+  idleReleaseSec?: number
+  /** Seconds to wait for the provider's session (default 900). */
+  bootTimeoutSec?: number
 }
 
 /** Where a device is, relative to the caller's computer. */
@@ -443,9 +502,12 @@ export interface BootOptions {
 
 /** Options for `createDevice()`: a simulator (`type`, `runtime`) or an AVD (`image`, `profile`, …). */
 export interface CreateDeviceOptions {
-  platform: 'ios' | 'android' | string
-  /** Name of the new simulator or AVD. */
-  name: string
+  /** Required for a simulator or AVD; a cloud device takes `cloud.platform`. */
+  platform?: 'ios' | 'android' | string
+  /** Name of the new simulator or AVD (required for one). */
+  name?: string
+  /** Launch a cloud device instead (direct mode, on this computer's daemon). */
+  cloud?: CloudSpec
   /** iOS device type name or id (default: the newest iPhone the runtime supports). */
   type?: string
   /** iOS runtime, e.g. 'iOS-26-5' or '26.5' (default: the newest installed). */
