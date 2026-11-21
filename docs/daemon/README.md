@@ -144,6 +144,7 @@ throws a `MaestroError` carrying all of it.
 | `DEVICE_NOT_FOUND` | 4 | 404 | no such device id |
 | `INTERNAL` | 4 | 500 | a daemon bug |
 | `CAPTURE_UNAVAILABLE` | 4 | 503 | the device has no screen capture, or it failed or sent no frames; `details.reason` says why ([streaming](streaming.md#errors)) |
+| `UNSUPPORTED` | 2 | 501 | this host or device cannot do it: `setTrafficShape`/`resetTrafficShape` on a device with no traffic shaper configured on its host, or airplane mode on iOS |
 | `BUSY` | 5 | 409 | `--no-wait` and the device is running another step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon holds the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `device stop` on a device the daemon did not boot (use `--force`) |

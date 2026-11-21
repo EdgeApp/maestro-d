@@ -527,6 +527,7 @@ func TestCodes_Table(t *testing.T) {
 		{CodeDeviceNotFound, 4, 404}, {CodeDeviceNotAttached, 2, 404}, {CodeInterrupted, 130, 499}, {CodeInternal, 4, 500},
 		{CodeForbidden, 2, 403}, {CodePeerUnavailable, 3, 503}, {CodeHubNameTaken, 5, 409}, {CodeHubVersion, 5, 409},
 		{CodeLeaseRequired, 5, 409}, {CodeLeaseExpired, 5, 409}, {CodeCaptureUnavailable, 4, 503},
+		{CodeUnsupported, 2, 501},
 	}
 	if len(cases)-1 != len(Codes) {
 		t.Fatalf("the table covers %d codes, Codes has %d", len(cases)-1, len(Codes))
@@ -542,7 +543,8 @@ func TestCodes_Table(t *testing.T) {
 	// CodeFromHTTPStatus inverts HTTPStatus where a status has one code;
 	// 401 (the token check) is USAGE and 403 FORBIDDEN.
 	for status, want := range map[int]Code{422: CodeCommandFailed, 400: CodeUsage, 401: CodeUsage, 403: CodeForbidden,
-		503: CodeDaemonUnavailable, 502: CodeDeviceError, 409: CodeBusy, 404: CodeDeviceNotFound, 418: CodeInternal} {
+		503: CodeDaemonUnavailable, 502: CodeDeviceError, 409: CodeBusy, 404: CodeDeviceNotFound, 501: CodeUnsupported,
+		418: CodeInternal} {
 		if got := CodeFromHTTPStatus(status); got != want {
 			t.Errorf("CodeFromHTTPStatus(%d) = %s, want %s", status, got, want)
 		}

@@ -747,7 +747,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: ""},
 		{Key: "engine", Type: "string", Doc: "Engine selects the scroll backend. See ScrollStep.Engine."},
 	}},
-	"setAirplaneMode": {Name: "setAirplaneMode", Scalar: "enabled", BareField: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets airplane mode.", Fields: []FieldSpec{
+	"setAirplaneMode": {Name: "setAirplaneMode", Scalar: "enabled", BareField: "enabled", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -923,7 +923,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "retryTapIfNoChange", Type: "*bool", Doc: ""},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: ""},
 	}},
-	"toggleAirplaneMode": {Name: "toggleAirplaneMode", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Toggles airplane mode.", Fields: []FieldSpec{
+	"toggleAirplaneMode": {Name: "toggleAirplaneMode", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},

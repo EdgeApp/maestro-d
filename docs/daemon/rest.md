@@ -183,6 +183,7 @@ attaches are retried the same way.
 | `DEVICE_NOT_FOUND` | 404 | 4 | no such device id |
 | `INTERNAL` | 500 | 4 | a daemon bug (a panic is caught and reported here) |
 | `CAPTURE_UNAVAILABLE` | 503 | 4 | `GET …/stream`: the device has no screen capture, it failed, or it sent no frames within 10 s; `details.reason` names why ([streaming](streaming.md#errors)) |
+| `UNSUPPORTED` | 501 | 2 | this host or device cannot do it: `setTrafficShape`/`resetTrafficShape` on a device with no traffic shaper configured on its host, or airplane mode on iOS |
 | `BUSY` | 409 | 5 | `?wait=false` and the device is running another step |
 | `DEVICE_IN_USE` | 409 | 5 | another daemon holds the device, or (hub) another client's lease does; `details` name the owner or the holder and `expiresAt` |
 | `DEVICE_EXTERNAL` | 409 | 5 | `DELETE` on a device the daemon did not boot, or `?delete=true` on one maestro-d did not create (use `force`) |

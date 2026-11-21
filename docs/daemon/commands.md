@@ -74,7 +74,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`saveAuthState`](#saveauthstate) | `path` | Saves cookies + localStorage + sessionStorage to a JSON file. |
 | [`scroll`](#scroll) | `direction` | Scrolls the screen. |
 | [`scrollUntilVisible`](#scrolluntilvisible) | `element.text` | Scrolls until element is visible. |
-| [`setAirplaneMode`](#setairplanemode) | `enabled` | Sets airplane mode. |
+| [`setAirplaneMode`](#setairplanemode) | `enabled` | Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). |
 | [`setClipboard`](#setclipboard) | `text` | Sets the clipboard to a specific text value. |
 | [`setCookies`](#setcookies) | — | Sets browser cookies via CDP. |
 | [`setDarkMode`](#setdarkmode) | `enabled` | Switches the system UI between dark and light appearance. |
@@ -90,7 +90,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`takeScreenshot`](#takescreenshot) | `path` | Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro's takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot). |
 | [`tapOn`](#tapon) | `text` | Taps on an element. |
 | [`tapOnPoint`](#taponpoint) | — | Taps on specific coordinates. |
-| [`toggleAirplaneMode`](#toggleairplanemode) | _none_ | Toggles airplane mode. |
+| [`toggleAirplaneMode`](#toggleairplanemode) | _none_ | Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). |
 | [`toggleDarkMode`](#toggledarkmode) | _none_ | Flips the current appearance. |
 | [`travel`](#travel) | — | Simulates travel. |
 | [`uploadFile`](#uploadfile) | — | Sets files on a file input element. |
@@ -1625,7 +1625,7 @@ await m.scrollUntilVisible({ element.text: '<element.text>', … })
 
 ## `setAirplaneMode`
 
-Sets airplane mode.
+Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).
 
 ```sh
 maestro-d setAirplaneMode <enabled>
@@ -2013,7 +2013,7 @@ await m.tapOnPoint({ … })
 
 ## `toggleAirplaneMode`
 
-Toggles airplane mode.
+Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).
 
 ```sh
 maestro-d toggleAirplaneMode

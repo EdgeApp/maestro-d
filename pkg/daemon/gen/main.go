@@ -46,6 +46,13 @@ var commandOverrides = map[string]func(*Command){
 		c.Doc = "Defines session variables; the value is a map of NAME: value."
 		c.Fields = nil
 	},
+	// iOS refuses airplane mode before the driver (executor/unsupported.go).
+	"setAirplaneMode": func(c *Command) {
+		c.Doc = "Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100)."
+	},
+	"toggleAirplaneMode": func(c *Command) {
+		c.Doc = "Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100)."
+	},
 	// Nested steps are tagged `yaml:"-"` and read by hand in the parser.
 	"repeat": func(c *Command) {
 		c.Fields = append(c.Fields, nestedField("commands", "Steps to repeat"))

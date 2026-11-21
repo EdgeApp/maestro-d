@@ -1091,7 +1091,7 @@ export interface ScrollUntilVisibleParams {
   engine?: string
 }
 
-/** Sets airplane mode. */
+/** Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). */
 export interface SetAirplaneModeParams {
   optional?: boolean
   label?: string
@@ -1358,7 +1358,7 @@ export interface TapOnPointParams {
   waitToSettleTimeoutMs?: number
 }
 
-/** Toggles airplane mode. */
+/** Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). */
 export interface ToggleAirplaneModeParams {
   optional?: boolean
   label?: string
@@ -1585,7 +1585,7 @@ export const COMMANDS = {
   saveAuthState: { name: 'saveAuthState', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Saves cookies + localStorage + sessionStorage to a JSON file.', files: { path: { kind: 'output' } } },
   scroll: { name: 'scroll', scalar: 'direction', bareField: 'direction', valueLess: false, compound: false, doc: 'Scrolls the screen.' },
   scrollUntilVisible: { name: 'scrollUntilVisible', scalar: 'element.text', bareField: 'element.text', valueLess: false, compound: false, doc: 'Scrolls until element is visible.' },
-  setAirplaneMode: { name: 'setAirplaneMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Sets airplane mode.' },
+  setAirplaneMode: { name: 'setAirplaneMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).' },
   setClipboard: { name: 'setClipboard', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Sets the clipboard to a specific text value.' },
   setCookies: { name: 'setCookies', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets browser cookies via CDP.' },
   setDarkMode: { name: 'setDarkMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Switches the system UI between dark and light appearance.' },
@@ -1601,7 +1601,7 @@ export const COMMANDS = {
   takeScreenshot: { name: 'takeScreenshot', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro\'s takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot).', files: { path: { kind: 'output' } } },
   tapOn: { name: 'tapOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Taps on an element.' },
   tapOnPoint: { name: 'tapOnPoint', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Taps on specific coordinates.' },
-  toggleAirplaneMode: { name: 'toggleAirplaneMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Toggles airplane mode.' },
+  toggleAirplaneMode: { name: 'toggleAirplaneMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).' },
   toggleDarkMode: { name: 'toggleDarkMode', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Flips the current appearance.' },
   travel: { name: 'travel', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Simulates travel.' },
   uploadFile: { name: 'uploadFile', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets files on a file input element.', files: { path: { kind: 'path' }, paths: { kind: 'path' } } },

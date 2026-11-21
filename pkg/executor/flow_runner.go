@@ -552,6 +552,8 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 
 	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
 		result = fr.executeRecordingStep(step)
+	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep: // maestro-d: refused on iOS (unsupported.go)
+		result = fr.executeAirplaneStep(step)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -1624,6 +1626,9 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
 		fr.script.ExpandStep(step)
 		result = fr.executeRecordingStep(step)
+	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep: // maestro-d: refused on iOS (unsupported.go)
+		fr.script.ExpandStep(step)
+		result = fr.executeAirplaneStep(step)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)

@@ -81,6 +81,7 @@ export type ErrorCode =
   | 'LEASE_REQUIRED'
   | 'LEASE_EXPIRED'
   | 'CAPTURE_UNAVAILABLE'
+  | 'UNSUPPORTED'
 
 export interface ErrorBody {
   code: ErrorCode

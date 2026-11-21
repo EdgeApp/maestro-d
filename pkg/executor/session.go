@@ -104,6 +104,10 @@ type StepOutcome struct {
 	// Outputs name the files a remote call's output fields wrote, relative
 	// to the report directory (outputs/<path>), nested steps included.
 	Outputs []string `json:"outputs,omitempty"`
+	// Code is the daemon error code a failure carries when it is not an
+	// ordinary step failure: UNSUPPORTED (the host or device cannot do the
+	// step) or USAGE (a bad network.json). Empty otherwise.
+	Code string `json:"code,omitempty"`
 }
 
 // Err returns the outcome as a Go error (nil on success).
@@ -754,6 +758,7 @@ func (s *Session) finishStep(ctx context.Context, idx int, desc, typ string, opt
 			}
 		}
 		out.Error = errInfo
+		out.Code = outcomeCode(result.Error)
 		if optional {
 			out.Success = true
 			status = report.StatusPassed

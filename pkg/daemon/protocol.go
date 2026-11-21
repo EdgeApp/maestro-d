@@ -87,6 +87,10 @@ const (
 	// unsupported-platform, no-frames, …). The X-Maestro-Error-Code header
 	// tells it from DAEMON_UNAVAILABLE's 503.
 	CodeCaptureUnavailable Code = "CAPTURE_UNAVAILABLE"
+	// CodeUnsupported: this host or device cannot do what was asked — a
+	// device with no traffic shaper configured on its host, or airplane
+	// mode on iOS. Exit 2 / HTTP 501.
+	CodeUnsupported Code = "UNSUPPORTED"
 )
 
 // Codes lists every code, for tables and tests.
@@ -94,7 +98,7 @@ var Codes = []Code{
 	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
-	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeCaptureUnavailable,
+	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeCaptureUnavailable, CodeUnsupported,
 }
 
 // ExitCode returns the CLI exit status for the code.
@@ -104,7 +108,7 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached, CodeForbidden:
+	case CodeUsage, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
@@ -141,6 +145,8 @@ func (c Code) HTTPStatus() int {
 		return 499
 	case CodeInternal:
 		return http.StatusInternalServerError
+	case CodeUnsupported:
+		return http.StatusNotImplemented
 	}
 	return http.StatusInternalServerError
 }
@@ -179,6 +185,8 @@ func CodeFromHTTPStatus(status int) Code {
 		return CodeBusy
 	case http.StatusNotFound:
 		return CodeDeviceNotFound
+	case http.StatusNotImplemented:
+		return CodeUnsupported
 	}
 	return CodeInternal
 }
@@ -318,6 +326,8 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 			body.Code = CodeDeviceError
 		} else if o.Cancelled {
 			body.Code = CodeInterrupted
+		} else if o.Code != "" { // maestro-d: UNSUPPORTED or USAGE from the executor
+			body.Code = Code(o.Code)
 		}
 		details := map[string]any{}
 		if o.Error.Type != "" {

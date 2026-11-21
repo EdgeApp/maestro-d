@@ -319,6 +319,7 @@ class MaestroError extends Error {
 | `DEVICE_NOT_FOUND` | 4 | 404 | no such device id |
 | `INTERNAL` | 4 | 500 | daemon bug |
 | `CAPTURE_UNAVAILABLE` | 4 | 503 | `stream()`: the device has no screen capture, or it failed or sent no frames; `details.reason` says why |
+| `UNSUPPORTED` | 2 | 501 | the host or device cannot do it: traffic shaping on a device whose host has no shaper configured for it, or airplane mode on iOS |
 | `BUSY` | 5 | 409 | `wait: false` and the device is running a step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon has the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot, or `deleteDevice` on one maestro-d did not create |
