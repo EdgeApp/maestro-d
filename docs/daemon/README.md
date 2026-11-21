@@ -42,7 +42,8 @@ curl http://127.0.0.1:7788 ──┘   (or TCP)         (one process per --daemo
    `daemon.json` and answer on its socket, then proceed. This is the
    Edge CLI engine pattern: the caller never manages the process.
 2. **The daemon attaches devices.** Attaching opens a driver on a device
-   (UIAutomator2, WebDriverAgent, Playwright, …) exactly as
+   (UIAutomator2, WebDriverAgent, Playwright, the computer device's VNC
+   connection to its own Mac — [macos.md](../macos.md) — …) exactly as
    `maestro-runner test` would, using the same run configuration
    (`--platform`, `--team-id`, `--app-file`, …). A daemon can hold several
    devices; each has its own session — variables, JavaScript engine, report
@@ -120,6 +121,8 @@ runners prune their build caches when they start.
 | `cache/wda-builds/<config>/results/` | the running test's result bundle | when the runner stops |
 | `cache/devicelab-ios-runner-builds/`, `cache/embedded-runner-src/` | the runner build and source in use | unused for 30 days |
 | `bin/`, `drivers/`, `browsers/`, `profiles/`, `hub/`, `leases.json` | always | never |
+| `computer.json` (in `$MAESTRO_D_HOME`) | the computer device's Screen Sharing and macOS credentials, mode 0600 ([macos.md](../macos.md)) | never |
+| `cache/text-helper/<hash>/MaestroDText` | the computer device's text-recognition helper, built on first use | when its source changes |
 
 On Windows, where neither a daemon's lock nor its pid can be tested, the
 sweep leaves report and run directories alone and deletes only blobs and

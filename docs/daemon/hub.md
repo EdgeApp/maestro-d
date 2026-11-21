@@ -68,6 +68,7 @@ token of every request it is forwarded) and the **same peer token**.
 | `--peer-ca F` | system roots | Trust root for peers' TLS |
 | `--share-device ID\|NAME` | every device (repeatable) | Only these local devices join the pool; the rest stay private to this machine. Never a TV: TVs join only through `--share-tv` |
 | `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner. Naming a TV leaves `--share-device`'s pool as it is |
+| (the computer, `mac`) | never shared | The [computer device](../macos.md) is local only: no `--share-device` puts it in the pool. Local callers on the hub's socket lease it (`lease --device mac`, or a selector with `kind: computer` or `platform: macos`); peers and remote callers never see it |
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it. A cloud device's lease is at most 150 minutes, its provider's session |
 | `--devicefarm` | off | Launch AWS Device Farm devices for the mesh's cloud leases ([Cloud devices](cloud.md#hub-mode-cloud-devices-for-every-client)), with this hub's AWS credentials: the standard chain, or the two flags below. At start the hub checks them with one account call and refuses to start when it fails |
 | `--devicefarm-credentials-file F` | none | An AWS shared credentials file: a regular file, mode 0600 or stricter |
