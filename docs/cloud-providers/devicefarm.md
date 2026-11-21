@@ -66,6 +66,17 @@ Device Farm's own profile.
 iOS 27 and later run Appium 3 (`--appium-version` overrides; earlier iOS
 and Android run Appium 2).
 
+## Through a hub
+
+`maestro-d hub start --devicefarm --devicefarm-credentials-file F
+[--devicefarm-profile P] [--devicefarm-project NAME|ARN]
+[--cloud-max-devices N]` gives a hub the credentials; any client of the
+mesh then leases cloud devices (`lease --location cloud`). The credentials
+file must be a regular file with mode 0600 or stricter, and `hub service
+install` records its path, never the keys. At start the hub reads the
+account once (`cloud: devicefarm ready (trial minutes left N)` in its log)
+and refuses to start when that fails.
+
 ## Limits
 
 - **Session length:** 150 minutes; maestro-d releases the device 30 s before.

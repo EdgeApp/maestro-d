@@ -1611,7 +1611,7 @@ func TestLeases_ClientForgetsExpiredLease(t *testing.T) {
 	env := newHubEnv(t, Config{})
 	ctx := context.Background()
 	var told []string
-	env.remote.OnLeaseExpired = func(device, lease string) { told = append(told, device+"="+lease) }
+	env.remote.OnLeaseExpired = func(device, lease, _ string) { told = append(told, device+"="+lease) }
 	env.remote.SetLease("mock-1", "gone")
 	_, err := env.remote.Command(ctx, "mock-1", "tapOn", "x", true)
 	wantErrCode(t, err, CodeLeaseExpired)

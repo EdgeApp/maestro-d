@@ -852,6 +852,23 @@ func TestRemote_UnknownSessionEndsTheDevice(t *testing.T) {
 	})
 }
 
+// On a plain daemon serving remote callers, a direct-mode cloud device
+// follows --share-device: unlisted, a remote caller cannot see or drive it.
+func TestRemote_PlainDaemonDoesNotShareCloudDevices(t *testing.T) {
+	e := newRemoteEnv(t, func(c *Config) { c.ShareDevices = []string{"mock-1"} })
+	dev := e.launch(cloudprov.CloudSpec{})
+	if !e.s.sharedInfo(DeviceInfo{ID: "mock-1"}) {
+		t.Fatal("mock-1 is listed")
+	}
+	if e.s.sharedInfo(DeviceInfo{ID: dev.ID, Provider: "devicefarm"}) {
+		t.Fatal("a plain daemon shared its cloud device past --share-device")
+	}
+	hub := &Server{cfg: Config{Hub: true, ShareDevices: []string{"mock-1"}}}
+	if !hub.sharedInfo(DeviceInfo{ID: dev.ID, Provider: "devicefarm"}) {
+		t.Fatal("a hub's cloud device is not in its pool")
+	}
+}
+
 // A launch that fails after its session exists, and whose release the
 // provider refuses, releases it in the background: after the WebDriver
 // session failed to open, and after the provider gave up a session it could

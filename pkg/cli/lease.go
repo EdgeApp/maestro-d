@@ -29,6 +29,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -188,9 +189,13 @@ func wireLeases(c *daemon.Client, o *daemonOpts) {
 	for _, r := range leasesFor(key) {
 		c.SetLease(r.Device, r.ID)
 	}
-	c.OnLeaseExpired = func(device, lease string) {
+	c.OnLeaseExpired = func(device, lease, hint string) {
 		dropLease(key, lease)
-		if !o.JSON {
+		switch {
+		case o.JSON:
+		case hint != "":
+			progress("Lease %s on %s has ended, and the device is gone with it; take a new one with `%s`", lease, device, hint)
+		default:
 			progress("Lease %s on %s has expired; take a new one with `maestro-d lease --device %s`", lease, device, device)
 		}
 	}
@@ -289,6 +294,15 @@ var leaseFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag
 		func(o *daemonOpts, v string) { o.lease.sel.Hub = v }),
 	boolFlag("boot", "Let the selector pick a shut-down simulator or AVD, which the hub boots for the lease", nil,
 		func(o *daemonOpts, v bool) { o.lease.sel.Boot = v }),
+	strFlag("location", "cloud: launch a cloud device for the lease, on the hub that holds the provider's credentials (--name is then the model)", nil,
+		func(o *daemonOpts, v string) { o.lease.sel.Location = v }),
+	strFlag("provider", "Cloud: the provider (default devicefarm)", nil, func(o *daemonOpts, v string) { o.lease.sel.Provider = v }),
+	strFlag("os-min", "Cloud: the lowest OS version", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMin = v }),
+	strFlag("os-max", "Cloud: the highest OS version, at its own precision (17 admits 17.5)", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMax = v }),
+	strFlag("idle-release", "Cloud: release the device (and end the lease) after this long without a request (default 10m, 60s–150m)", nil,
+		func(o *daemonOpts, v string) { o.lease.idleRelease = v }),
+	strFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
+		func(o *daemonOpts, v string) { o.lease.appiumVersion = v }),
 	ttlFlag("The lease's window: a duration (8h, 90m) or seconds (default the hub's, 8h or the device's maximum); using the lease never extends it"),
 	strFlag("holder", "Who holds the lease, as listings show it (default user@host)", nil,
 		func(o *daemonOpts, v string) { o.lease.holder = v }),
@@ -356,6 +370,15 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 	} else {
 		sel := o.lease.sel
 		req.Select = &sel
+		if strings.EqualFold(sel.Location, daemon.LocationCloud) {
+			spec, err := leaseCloudSpec(o)
+			if err != nil {
+				return err
+			}
+			req.Cloud = spec
+		} else if o.lease.idleRelease != "" || o.lease.appiumVersion != "" {
+			return daemon.Errorf(daemon.CodeUsage, "--idle-release and --appium-version apply only to a cloud lease (--location cloud)")
+		}
 	}
 	// Without an app to upload first, the hub attaches in the lease request
 	// itself, under the lease: no gap in which a short TTL can run out.
@@ -380,6 +403,19 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		}
 	}
 	return printLease(o, l, info)
+}
+
+// leaseCloudSpec is a cloud lease's launch settings from the flags.
+func leaseCloudSpec(o *daemonOpts) (*cloudprov.CloudSpec, error) {
+	spec := &cloudprov.CloudSpec{AppiumVersion: o.lease.appiumVersion, AppID: o.Attach.AppID}
+	if o.lease.idleRelease != "" {
+		sec, err := durationSeconds(o.lease.idleRelease)
+		if err != nil {
+			return nil, daemon.Errorf(daemon.CodeUsage, "--idle-release %q: %v", o.lease.idleRelease, err)
+		}
+		spec.IdleReleaseSec = sec
+	}
+	return spec, nil
 }
 
 func printLease(o *daemonOpts, l daemon.Lease, info *daemon.DeviceInfo) error {
@@ -559,15 +595,28 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 	if len(recs) == 0 {
 		return done("No lease on file to release.")
 	}
+	minutes := map[string]*cloudprov.DeviceMinutes{}
 	for _, r := range recs {
-		if _, err := c.ReleaseLease(ctx, r.ID); err != nil && !isCode(err, daemon.CodeLeaseExpired) {
+		res, err := c.ReleaseLease(ctx, r.ID)
+		if err != nil && !isCode(err, daemon.CodeLeaseExpired) {
 			return err
 		}
 		dropLease(key, r.ID)
 		released = append(released, r.ID)
-		if !o.JSON {
-			fmt.Printf("%s released (lease %s)\n", r.Device, r.ID)
+		note := ""
+		if res != nil && res.DeviceMinutes != nil {
+			minutes[r.ID] = res.DeviceMinutes
+			note = minutesNote(res.DeviceMinutes)
+		} else if err == nil && strings.HasPrefix(r.Device, "df-") {
+			note = " (minutes in the device.released event)"
 		}
+		if !o.JSON {
+			fmt.Printf("%s released (lease %s)%s\n", r.Device, r.ID, note)
+		}
+	}
+	if o.JSON && len(minutes) > 0 {
+		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "released": released, "deviceMinutes": minutes})
+		return nil
 	}
 	return done("")
 }

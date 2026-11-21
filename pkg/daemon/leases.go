@@ -32,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
@@ -93,6 +95,14 @@ type LeaseSelector struct {
 	Name      string `json:"name,omitempty"`
 	OSVersion string `json:"osVersion,omitempty"`
 	Hub       string `json:"hub,omitempty"`
+	// Location "cloud" launches a cloud device for the lease (remote.go):
+	// Provider (default devicefarm), Platform, Name (the model), OSVersion
+	// and the OSVersionMin/Max range pick it. In a mesh it goes to the
+	// hub the launch routing rule names (cloudroute.go).
+	Location     string `json:"location,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	OSVersionMin string `json:"osVersionMin,omitempty"`
+	OSVersionMax string `json:"osVersionMax,omitempty"`
 	// Boot makes shut-down simulators and AVDs candidates too: the hub
 	// boots the one it picks, and shuts it down when the lease ends.
 	Boot bool `json:"boot,omitempty"`
@@ -109,6 +119,10 @@ type LeaseRequest struct {
 	Holder string `json:"holder,omitempty"`
 	// Attach, when given, attaches the device in the same call.
 	Attach *AttachConfig `json:"attach,omitempty"`
+	// Cloud tunes a cloud launch (Select.Location "cloud"): idle release,
+	// Appium version, capabilities, app id. Apps are installed after the
+	// lease, through the install route.
+	Cloud *cloudprov.CloudSpec `json:"cloud,omitempty"`
 }
 
 // RenewRequest is the body of POST /v1/leases/{lid}/renew.
@@ -130,6 +144,9 @@ type LeaseResult struct {
 	Envelope
 	Lease  Lease       `json:"lease"`
 	Device *DeviceInfo `json:"device,omitempty"`
+	// DeviceMinutes, on a release, is the time the lease's cloud device
+	// used (absent when its release was still pending or failed).
+	DeviceMinutes *cloudprov.DeviceMinutes `json:"deviceMinutes,omitempty"`
 }
 
 // LeasesResult answers GET /v1/leases.
@@ -163,6 +180,12 @@ type leaseEntry struct {
 	// stopped is set once the holder has stopped or deleted the device
 	// under the lease: its teardown does not shut it down again.
 	stopped atomic.Bool
+	// cloud is the cloud device the lease launched (remote.go): the lease's
+	// end releases it, and its release ends the lease. cloudDone is closed
+	// once it is released, with its minutes in cloudMinutes.
+	cloud        *remoteDevice
+	cloudDone    chan struct{}
+	cloudMinutes *cloudprov.DeviceMinutes
 }
 
 // The reasons a lease ends, as the hub logs them; leaseEndEvent names the
@@ -174,6 +197,9 @@ const (
 	endStopped      = "ended (device stopped)"
 	endDeleted      = "ended (device deleted)"
 	endHubStopped   = "ended (hub stopped)"
+	// endCloudReleased: the lease's cloud device was released by its idle
+	// timeout or the provider's session cap.
+	endCloudReleased = "ended (cloud device released)"
 )
 
 // leaseEndEvent is the event an ended lease publishes: lease.expired when
@@ -181,7 +207,7 @@ const (
 // device stopped or deleted, the attach in its request failing, the hub
 // stopping).
 func leaseEndEvent(reason string) string {
-	if reason == endExpired {
+	if reason == endExpired || reason == endCloudReleased {
 		return "lease.expired"
 	}
 	return "lease.released"
@@ -427,10 +453,15 @@ func (t *leaseTable) renew(id string, ttlSec int) (Lease, *Error) {
 	return e.view(), nil
 }
 
-// overMax is the USAGE error for a window over a device's maximum.
+// overMax is the USAGE error for a window over a device's maximum; device
+// "" is a cloud device not launched yet.
 func overMax(device string, ttlSec int, maxTTL time.Duration) *Error {
-	return Errorf(CodeUsage, "leases: a window of ttlSec %d is over device %s's maximum of %s (maxSec %d)",
-		ttlSec, device, maxTTL, int(maxTTL/time.Second)).
+	whose := "device " + device + "'s"
+	if device == "" {
+		whose = "a cloud device's"
+	}
+	return Errorf(CodeUsage, "leases: a window of ttlSec %d is over %s maximum of %s (maxSec %d)",
+		ttlSec, whose, maxTTL, int(maxTTL/time.Second)).
 		WithDetails("maxSec", int(maxTTL/time.Second), "ttlSec", ttlSec)
 }
 
@@ -470,6 +501,34 @@ func (t *leaseTable) remove(e *leaseEntry) bool {
 	}
 	close(e.ended)
 	return true
+}
+
+// goneLeaseErr is LEASE_EXPIRED for a lease whose device went away with it.
+// A cloud device's hint is a new cloud lease, since its id never comes back.
+func (s *Server) goneLeaseErr(lease, id string) *Error {
+	hint := "maestro-d device list"
+	if local, _, _ := strings.Cut(id, "@"); len(s.deps.Providers) > 0 && cloudIDPattern.MatchString(local) {
+		hint = "maestro-d lease --location cloud --platform ios|android"
+	}
+	return Errorf(CodeLeaseExpired, "lease %s on device %s has ended, and the device is gone with it; take a new lease (%s)", lease, id, hint).
+		WithDetails("lease", lease, "hint", hint)
+}
+
+// cloudIDPattern matches the ids launchCloud gives (newCloudID).
+var cloudIDPattern = regexp.MustCompile(`^[a-z0-9]+-[0-9a-f]{8}$`)
+
+// known reports whether this daemon can see device id at all.
+func (s *Server) known(id string) bool {
+	_, ok := s.registry.Lookup(id)
+	return ok
+}
+
+// isLive reports whether lease id is held and live.
+func (t *leaseTable) isLive(id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e := t.byID[id]
+	return e != nil && e.liveAt(t.now())
 }
 
 // lookup returns the entry for id, live or not.
@@ -629,6 +688,12 @@ func shareMatches(entry string, d DeviceInfo) bool {
 // a TV is in it only when --share-tv names it (see Config.ShareTVs); any other
 // device when --share-device names it, or when that list is empty.
 func (s *Server) sharedInfo(d DeviceInfo) bool {
+	// A cloud device a hub launched for a lease is always in its pool. On a
+	// plain daemon a cloud device (its owner's credentials pay for it)
+	// follows --share-device like any other.
+	if s.cfg.Hub && d.Provider != "" {
+		return true
+	}
 	if s.cfg.Hub && strings.EqualFold(d.Kind, "tv") {
 		return s.sharedTV(d)
 	}
@@ -833,7 +898,8 @@ func (s *Server) annotate(devs []DeviceInfo) {
 		}
 		d.MaxSec = int(s.leaseMaxInfo(*d) / time.Second)
 		d.Machine, d.Addresses = machine, addrs
-		d.Available = d.Ready && d.Lease == nil && !d.Attached && d.Owner == "" && !strings.HasPrefix(d.ID, AVDPrefix)
+		// A cloud device belongs to the lease that launched it: never free.
+		d.Available = d.Ready && d.Lease == nil && !d.Attached && d.Owner == "" && !strings.HasPrefix(d.ID, AVDPrefix) && d.Provider == ""
 		if d.Available && s.leases.reserved(*d) {
 			// Booting for a selector lease, or still being released.
 			d.Available = false
@@ -886,6 +952,14 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 			id = target.ID
 		}
 		if !s.sharedWith(r, id) {
+			// A device that went away with its lease (a cloud device's
+			// idle release, the session cap) answers a request under that
+			// lease LEASE_EXPIRED, so clients forget the lease. A device
+			// that still exists but is not shared stays not found.
+			if header := r.Header.Get(HeaderLease); s.cfg.Hub && mode != leaseOpen && header != "" && !s.leases.isLive(header) && !s.known(id) {
+				writeError(w, s.goneLeaseErr(header, id))
+				return
+			}
 			writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
 			return
 		}
@@ -895,6 +969,16 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 		}
 		e, le := s.leases.use(id, r.Header.Get(HeaderLease), mode == leaseNeeded)
 		if le != nil {
+			// A device that went away (a released cloud device) is not
+			// offered for a lease: without one it is not found, and an
+			// ended lease on it says the device went too.
+			if (le.Code == CodeLeaseRequired || le.Code == CodeLeaseExpired) && !s.known(id) {
+				if header := r.Header.Get(HeaderLease); header != "" {
+					le = s.goneLeaseErr(header, id)
+				} else {
+					le = Errorf(CodeDeviceNotFound, "device %s not found", id)
+				}
+			}
 			writeError(w, le)
 			return
 		}
@@ -1221,7 +1305,7 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 		}
 		entry, e = s.leaseDevice(d, holder, req.TTLSec, claimNone)
 	} else {
-		entry, e = s.leaseSelect(r, *req.Select, holder, req.TTLSec)
+		entry, e = s.leaseSelect(r, *req.Select, req.Cloud, holder, req.TTLSec)
 	}
 	if e != nil {
 		writeError(w, e)
@@ -1325,14 +1409,22 @@ const (
 // fresh session. When that lease had booted the device, its teardown shut
 // it down, so the device is looked up again: one no longer listed (an
 // emulator's serial) is DEVICE_NOT_FOUND.
-func (s *Server) leaseDevice(d DeviceInfo, holder string, ttlSec int, claim bootClaim) (*leaseEntry, *Error) {
+// bind, when given, runs on the granted entry before leaseMu is released,
+// so nothing that ends the lease sees it half set up.
+func (s *Server) leaseDevice(d DeviceInfo, holder string, ttlSec int, claim bootClaim, bind ...func(*leaseEntry)) (*leaseEntry, *Error) {
 	device := d.ID
 	for range 3 {
 		s.leaseMu.Lock()
 		old := s.leases.expiredOn(device)
 		if old == nil {
 			defer s.leaseMu.Unlock()
-			return s.leaseDeviceLocked(d, holder, ttlSec, claim)
+			e, le := s.leaseDeviceLocked(d, holder, ttlSec, claim)
+			if le == nil {
+				for _, f := range bind {
+					f(e)
+				}
+			}
+			return e, le
 		}
 		teardown := s.endLeaseLocked(old, endExpired)
 		s.leaseMu.Unlock()
@@ -1410,13 +1502,23 @@ func leaseWindow(device string, ttlSec int, maxTTL time.Duration) (time.Duration
 // the first --lease-max DEVICE=DURATION that names it (by id or name),
 // else the hub's --lease-max, else DefaultLeaseMax.
 func (s *Server) leaseMaxInfo(d DeviceInfo) time.Duration {
+	max := s.hubLeaseMax()
 	for _, m := range s.cfg.LeaseMaxDevices {
 		if shareMatches(m.Device, d) {
-			return m.Max
+			max = m.Max
+			break
 		}
 	}
-	return s.hubLeaseMax()
+	if d.Provider != "" {
+		// A cloud device lives at most as long as its provider's session.
+		max = min(max, cloudLeaseMax)
+	}
+	return max
 }
+
+// cloudLeaseMax is the longest lease on a cloud device: Device Farm's
+// 150-minute session.
+const cloudLeaseMax = 9000 * time.Second
 
 // leaseMaxNote lists the per-device maximums for the hub's start line.
 func leaseMaxNote(devs []LeaseMax) string {
@@ -1437,13 +1539,35 @@ func (s *Server) hubLeaseMax() time.Duration {
 // leaseSelect leases the first free device that matches sel: a ready one,
 // neither leased nor attached; with sel.Boot, else a shut-down simulator or
 // AVD, which the hub boots for the lease.
-func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, holder string, ttlSec int) (*leaseEntry, *Error) {
+func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudprov.CloudSpec, holder string, ttlSec int) (*leaseEntry, *Error) {
 	notFound := Errorf(CodeDeviceNotFound, "no device matches the selector %s", sel.String()).WithDetails("select", sel)
 	if sel.Hub != "" && !strings.EqualFold(sel.Hub, s.hubName()) {
 		return nil, notFound
 	}
+	if strings.EqualFold(sel.Location, LocationCloud) {
+		return s.leaseCloud(r, sel, cloud, holder, ttlSec)
+	}
+	if sel.Location != "" {
+		return nil, Errorf(CodeUsage, "lease: select.location %q: only cloud launches a device; leave it out to lease one of the hub's", sel.Location)
+	}
+	// What only a cloud launch reads is refused elsewhere, never ignored.
+	if sel.Provider != "" {
+		return nil, Errorf(CodeUsage, "lease: select.provider applies only with select.location cloud").WithDetails("field", "provider")
+	}
+	if cloud != nil {
+		return nil, Errorf(CodeUsage, "lease: cloud (idle release, Appium version, …) applies only with select.location cloud").WithDetails("field", "cloud")
+	}
+	for f, v := range map[string]string{"osVersionMin": sel.OSVersionMin, "osVersionMax": sel.OSVersionMax} {
+		if _, ok := cloudprov.ParseVersion(v); v != "" && !ok {
+			return nil, Errorf(CodeUsage, "lease: select.%s %q is not a version", f, v).WithDetails("field", f)
+		}
+	}
 	var matches []DeviceInfo
 	for _, d := range s.visible(r, s.registry.List(strings.ToLower(sel.Platform))) {
+		// A cloud device belongs to the lease that launched it.
+		if d.Provider != "" {
+			continue
+		}
 		if sel.matches(d) {
 			matches = append(matches, d)
 		}
@@ -1594,7 +1718,10 @@ func (sel LeaseSelector) matches(d DeviceInfo) bool {
 	if sel.Name != "" && sel.Name != d.ID && !strings.EqualFold(sel.Name, d.Name) {
 		return false
 	}
-	if sel.OSVersion != "" && d.OSVersion != sel.OSVersion && !strings.HasPrefix(d.OSVersion, sel.OSVersion+".") {
+	if !cloudprov.OSVersionMatches(d.OSVersion, sel.OSVersion) {
+		return false
+	}
+	if (sel.OSVersionMin != "" || sel.OSVersionMax != "") && !VersionInRange(d.OSVersion, sel.OSVersionMin, sel.OSVersionMax) {
 		return false
 	}
 	return true
@@ -1603,7 +1730,8 @@ func (sel LeaseSelector) matches(d DeviceInfo) bool {
 // String renders the selector for messages: {platform=ios kind=simulator}.
 func (sel LeaseSelector) String() string {
 	var parts []string
-	for _, kv := range [][2]string{{"platform", sel.Platform}, {"kind", sel.Kind}, {"name", sel.Name}, {"osVersion", sel.OSVersion}, {"hub", sel.Hub}} {
+	for _, kv := range [][2]string{{"platform", sel.Platform}, {"kind", sel.Kind}, {"name", sel.Name}, {"osVersion", sel.OSVersion},
+		{"osVersionMin", sel.OSVersionMin}, {"osVersionMax", sel.OSVersionMax}, {"hub", sel.Hub}} {
 		if kv[1] != "" {
 			parts = append(parts, kv[0]+"="+kv[1])
 		}
@@ -1673,9 +1801,14 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeUsage, "leases: ttlSec must be positive"))
 		return
 	}
-	if s.visibleLease(r, id) == nil {
+	le := s.visibleLease(r, id)
+	if le == nil {
 		s.leaseGone(w, id)
 		return
+	}
+	// A renewal is activity on the lease's cloud device.
+	if done, ce := s.cloudBusy(le.device); ce == nil {
+		defer done()
 	}
 	l, e := s.leases.renew(id, req.TTLSec)
 	if e != nil {
@@ -1698,8 +1831,26 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 	}
 	l := e.view()
 	s.endLease(e, endReleased)
-	writeJSON(w, http.StatusOK, LeaseResult{Envelope: Envelope{OK: true}, Lease: l})
+	res := LeaseResult{Envelope: Envelope{OK: true}, Lease: l}
+	if e.cloud != nil {
+		// The cloud device's release runs in the lease's teardown, at once
+		// or once work under the lease unwinds: wait for its minutes a
+		// while. A release still pending, or failed, answers without them;
+		// device.released carries them either way.
+		select {
+		case <-e.cloudDone:
+			res.DeviceMinutes = e.cloudMinutes
+		case <-time.After(cloudLeaseReleaseWait):
+		}
+	}
+	writeJSON(w, http.StatusOK, res)
 }
+
+// cloudLeaseReleaseWait bounds how long a lease release waits for its cloud
+// device's minutes once the lease has ended. A lease with no work in flight
+// tears its device down inline first, under the provider release's own
+// timeout (cloudTiming.releaseTimeout), so the answer can take longer.
+var cloudLeaseReleaseWait = 30 * time.Second
 
 // ---------------------------------------------------------------------------
 // Ending leases
@@ -1743,6 +1894,14 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 		}()
 		logger.Info("lease %s: %s %s (holder %s)", e.id, e.device, reason, HolderName(e.holder))
 		s.detachForStop(e.device)
+		if e.cloud != nil {
+			// The lease launched the device: it goes with the lease.
+			e.cloudMinutes, _ = s.releaseRemote(e.cloud, "lease-end")
+			s.forgetRemote(e.cloud)
+			close(e.cloudDone)
+			s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
+			return
+		}
 		switch {
 		case !e.booted, e.stopped.Load():
 			// Not the hub's to shut down, or the holder stopped or

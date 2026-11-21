@@ -4,12 +4,13 @@
 // releasing cloud devices. No credentials or network.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 import { CLIENT_MACHINE_HEADER, MaestroD, isMaestroError, machineName, withQuery } from '../dist/esm/index.js'
 import { FakeDeviceFarm, fakeEnv } from './fakeDeviceFarm.mjs'
@@ -20,6 +21,7 @@ const repoRoot = path.resolve(here, '..', '..', '..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-df-'))
 const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
 const fake = new FakeDeviceFarm()
+const execFileAsync = promisify(execFile)
 
 /** @type {MaestroD} */
 let md
@@ -179,5 +181,60 @@ describe('direct mode', () => {
   test('createDevice({cloud}) needs cloud.platform', async () => {
     await assert.rejects(md.createDevice({ cloud: {} }), TypeError)
     await assert.rejects(md.createDevice({ cloud: { platform: 'android', idleReleaseSec: 99999 } }), (err) => isMaestroError(err) && err.code === 'USAGE')
+  })
+})
+
+describe('hub mode', () => {
+  const homes = { a: path.join(tmp, 'hub-a'), b: path.join(tmp, 'hub-b') }
+  /** @type {{a?: string, b?: string}} */
+  const addrs = {}
+  const hubEnv = (name) => ({ ...process.env, MAESTRO_D_HOME: homes[name], MAESTRO_D_TEST_MACHINE: `machine-${name}` })
+  // Asynchronously: hub-b's start check calls the fake, which runs in this
+  // process's event loop.
+  const start = async (name, extra) => {
+    const { stdout } = await execFileAsync(bin, ['hub', 'start', '--daemon', `jsdf-${name}`, '--name', `hub-${name}`, '--listen', '127.0.0.1:0',
+      '--no-mdns', '--token', 'jsdf-tok', '--peer-token', 'jsdf-peer', '--json', ...extra], { env: hubEnv(name) })
+    return JSON.parse(stdout).daemon.httpAddr
+  }
+  /** @type {MaestroD} */
+  let hubClient
+
+  before(async () => {
+    addrs.a = await start('a', [])
+    addrs.b = await start('b', ['--peer', addrs.a, '--devicefarm', '--cloud-max-devices', '1'])
+    hubClient = await MaestroD.connect({ hub: `http://${addrs.a}`, token: 'jsdf-tok' })
+    // Wait for the link: a learns from b's hello that b launches cloud devices.
+    for (let i = 0; i < 100; i++) {
+      const st = await hubClient.hubStatus()
+      if (st.peers.some((p) => p.state === 'linked' && p.cloud?.includes('devicefarm'))) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error('the hubs did not link')
+  })
+
+  after(async () => {
+    for (const name of ['b', 'a']) {
+      await execFileAsync(bin, ['hub', 'stop', '--daemon', `jsdf-${name}`], { env: hubEnv(name) }).catch(() => undefined)
+    }
+  })
+
+  test('lease({select: {location: cloud}}) launches through the hub that has credentials', async () => {
+    const dev = await hubClient.lease({ select: { location: 'cloud', platform: 'android', name: 'Google Pixel 8' }, ttlSec: 900,
+      cloud: { idleReleaseSec: 600 }, attach: {} })
+    assert.match(dev.id, /^df-[0-9a-f]{8}@hub-b$/)
+    await dev.tapOn('Button')
+    const listed = await hubClient.devices({ location: 'cloud' })
+    assert.deepEqual(listed.map((d) => [d.id, d.hub, d.provider]), [[dev.id, 'hub-b', 'devicefarm']])
+    const res = await dev.release()
+    assert.ok(res.deviceMinutes && res.deviceMinutes.total >= 1, 'release resolves with the minutes')
+    assert.deepEqual(await hubClient.devices({ location: 'cloud' }), [])
+    // A device that is not a cloud device releases with nothing to report.
+    const mock = await hubClient.lease({ select: { platform: 'mock' }, attach: false }).catch(() => undefined)
+    if (mock) assert.deepEqual(await mock.release(), {})
+  })
+
+  test('the cloud catalog through a hub names the hub that answers', async () => {
+    const res = await hubClient.catalog({ location: 'cloud', platform: 'ios', hub: 'hub-b' })
+    assert.equal(res.cloud[0].hub, 'hub-b')
   })
 })

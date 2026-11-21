@@ -192,3 +192,96 @@ func TestPrintOrphansAndSessions(t *testing.T) {
 		t.Fatal(b.String())
 	}
 }
+
+func TestLeaseCloudFlags(t *testing.T) {
+	o, _ := parseFor(t, leaseFlags, "--location", "cloud", "--platform", "ios", "--provider", "devicefarm", "--name", "Apple iPhone 15",
+		"--os-min", "17", "--os-max", "18", "--hub", "b", "--ttl", "1h", "--idle-release", "30m", "--appium-version", "3", "--app-id", "org.x")
+	sel := o.lease.sel
+	if sel.Location != "cloud" || sel.Provider != "devicefarm" || sel.Name != "Apple iPhone 15" || sel.OSVersionMin != "17" || sel.OSVersionMax != "18" ||
+		sel.Hub != "b" || o.lease.ttl != 3600 {
+		t.Fatalf("selector %+v ttl %d", sel, o.lease.ttl)
+	}
+	spec, err := leaseCloudSpec(o)
+	if err != nil || spec.IdleReleaseSec != 1800 || spec.AppiumVersion != "3" || spec.AppID != "org.x" {
+		t.Fatalf("spec %+v %v", spec, err)
+	}
+	o, _ = parseFor(t, leaseFlags, "--location", "cloud", "--idle-release", "soon")
+	if _, err := leaseCloudSpec(o); err == nil {
+		t.Fatal("a bad --idle-release")
+	}
+}
+
+func TestHubCloudFlags(t *testing.T) {
+	creds := filepath.Join(t.TempDir(), "creds")
+	writeCreds(t, creds)
+	o, _ := parseFor(t, hubStartFlags, "--devicefarm", "--devicefarm-credentials-file", creds, "--devicefarm-profile", "p",
+		"--devicefarm-project", "proj", "--cloud-max-devices", "3")
+	if err := checkCloudFlags(o); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(hubChildArgs(o), " ")
+	for _, want := range []string{"--devicefarm", "--devicefarm-credentials-file " + creds, "--devicefarm-profile p", "--devicefarm-project proj", "--cloud-max-devices 3"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("child args lack %q: %s", want, args)
+		}
+	}
+	// The child's args, which the service records, name the file, never a key.
+	if strings.Contains(args, fakeKeyID) {
+		t.Fatalf("a key in the child args: %s", args)
+	}
+	o, _ = parseFor(t, hubStartFlags, "--devicefarm")
+	if err := checkCloudFlags(o); err != nil || o.hub.cloudMax != defaultCloudMaxDevices {
+		t.Fatalf("default cap: %d %v", o.hub.cloudMax, err)
+	}
+	loose := filepath.Join(t.TempDir(), "loose")
+	writeCreds(t, loose)
+	_ = os.Chmod(loose, 0o640)
+	for _, bad := range [][]string{
+		{"--cloud-max-devices", "2"},
+		{"--devicefarm", "--cloud-max-devices", "21"},
+		{"--devicefarm", "--cloud-max-devices", "-1"},
+		{"--devicefarm", "--devicefarm-credentials-file", "/nonexistent/creds"},
+		{"--devicefarm", "--devicefarm-credentials-file", t.TempDir()},
+		{"--devicefarm", "--devicefarm-credentials-file", loose},
+	} {
+		o, _ := parseFor(t, hubStartFlags, bad...)
+		if err := checkCloudFlags(o); err == nil {
+			t.Errorf("%v: no error", bad)
+		}
+	}
+	// The start check: a provider that cannot be built, or an account call
+	// that fails, stops the hub.
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	fake := dftest.New(t)
+	if _, err := hubDeviceFarm(devicefarm.Options{Endpoint: fake.URL()}); err == nil || !strings.Contains(err.Error(), "--devicefarm") {
+		t.Fatalf("no credentials: %v", err)
+	}
+	fake.FailOp("GetAccountSettings", "AccessDeniedException", "not authorized to perform: devicefarm:GetAccountSettings")
+	if _, err := hubDeviceFarm(devicefarm.Options{Endpoint: fake.URL(), CredentialsFile: creds}); err == nil {
+		t.Fatal("a failing start check")
+	}
+	fake2 := dftest.New(t)
+	if p, err := hubDeviceFarm(devicefarm.Options{Endpoint: fake2.URL(), CredentialsFile: creds}); err != nil || p == nil {
+		t.Fatalf("start check: %v", err)
+	}
+	o, _ = parseFor(t, hubStartFlags, "--devicefarm")
+	o.hub.dfOpts = devicefarm.Options{Endpoint: fake2.URL(), CredentialsFile: creds}
+	deps, err := hubDeps(o)
+	if err != nil || deps.Providers["devicefarm"] == nil {
+		t.Fatalf("hubDeps: %v", err)
+	}
+	if p, err := deps.Providers["devicefarm"](); err != nil || p.Name() != "devicefarm" {
+		t.Fatalf("provider: %v", err)
+	}
+	if names := providerNames(deps); strings.Join(names, ",") != "devicefarm" {
+		t.Fatalf("names %v", names)
+	}
+	if deps, _ := hubDeps(&daemonOpts{}); deps.Providers != nil {
+		t.Fatal("a hub without --devicefarm has a provider")
+	}
+}

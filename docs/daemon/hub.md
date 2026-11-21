@@ -68,7 +68,12 @@ token of every request it is forwarded) and the **same peer token**.
 | `--peer-ca F` | system roots | Trust root for peers' TLS |
 | `--share-device ID\|NAME` | every device (repeatable) | Only these local devices join the pool; the rest stay private to this machine. Never a TV: TVs join only through `--share-tv` |
 | `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner. Naming a TV leaves `--share-device`'s pool as it is |
-| `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it |
+| `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it. A cloud device's lease is at most 150 minutes, its provider's session |
+| `--devicefarm` | off | Launch AWS Device Farm devices for the mesh's cloud leases ([Cloud devices](cloud.md#hub-mode-cloud-devices-for-every-client)), with this hub's AWS credentials: the standard chain, or the two flags below. At start the hub checks them with one account call and refuses to start when it fails |
+| `--devicefarm-credentials-file F` | none | An AWS shared credentials file: a regular file, mode 0600 or stricter |
+| `--devicefarm-profile P` | none | An AWS profile |
+| `--devicefarm-project NAME\|ARN` | `maestro-d` | The Device Farm project the sessions and uploads go in |
+| `--cloud-max-devices N` | 2 | How many cloud devices the hub holds at once, 0–20 (Device Farm allows 2 metered sessions per account by default). A cloud lease beyond it is `BUSY` |
 | `--allow-remote-shell` | off | Let remote callers run `runShell` |
 | `--pass-env NAME` | none (repeatable) | A variable of the hub's environment that sessions may import |
 | `--foreground` | off | Run in the foreground, for launchd or another supervisor |
@@ -88,7 +93,8 @@ detached, and they leave every peer's listing as soon as the links close.
 `hub status [--target-hub…] [--json]` (REST `GET /v1/hub`) prints the hub's
 name, version and listener, and for each peer its address, link state
 (`linked`, `down`, `stopped`, `connecting`, `refused`), direction, RTT and
-how many devices it shares.
+how many devices it shares, and the cloud providers each hub launches
+devices on (`cloud`).
 
 ## Discovery and membership
 

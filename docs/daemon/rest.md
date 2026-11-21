@@ -749,6 +749,7 @@ curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"sim
 | `ttlSec` | the window: default 28800 (8 hours), or the device's maximum when that is shorter; over the maximum is `USAGE` naming it. A selector skips a candidate whose maximum is shorter, and answers that `USAGE` when none is left |
 | `holder` | who holds it, as listings show; default the caller's address |
 | `attach` | an attach body ([`POST …/attach`](#post-v1devicesidattach)); the device is attached in the same call, and a failed attach ends the lease. Without it the device is only reserved |
+| `select.location`, `select.provider`, `select.osVersionMin`, `select.osVersionMax`, `cloud` | `osVersionMin`/`osVersionMax` bound the OS of any device, as `GET /v1/devices` filters do. `provider` and `cloud` apply only with `"location": "cloud"` (otherwise `USAGE`), which launches a cloud device for the lease instead: `platform` (required), `name` (the model: exact name, catalog id or regexp), `osVersion` (the version or a prefix, as above) or the range, and `provider` (default `devicefarm`) pick it; `cloud` takes `idleReleaseSec`, `appiumVersion`, `caps`, `appId` and `bootTimeoutSec`, but no app (install it under the lease). In a mesh it goes to the hub `select.hub` names, else the hub you ask when it has the provider, else the first linked hub by name that has it, and that hub's answer is final. The hub holds at most `--cloud-max-devices` (`BUSY` beyond), the window is at most 9000 s, and the device belongs to the lease: it is listed `available: false`, the lease's end releases it (`device.released`, `lease-end`), and its idle release or the session cap ends the lease (`lease.expired`, then `LEASE_EXPIRED`) |
 
 ```json
 {
@@ -796,7 +797,10 @@ curl -s -H "$H" -X POST $D/v1/leases/$LEASE/renew -d '{"ttlSec":1800}'
 
 Ends the lease: the device is detached (and shut down when the hub booted
 it for the lease). Answers the lease as it was; `LEASE_EXPIRED` when it had
-already ended.
+already ended. A cloud device the lease launched is released: the answer
+carries `deviceMinutes`, unless work under the lease kept the release
+waiting more than 30 s (or it failed), in which case `device.released`
+carries them.
 
 ## Steps
 

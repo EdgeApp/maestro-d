@@ -152,7 +152,12 @@ that answers. Every request sends `X-Maestro-Client-Machine` with
 and resolves with it; `md.attach({device: dev.id})` drives it like any other
 device. `md.stopDevice(id)` resolves with `{deviceMinutes}` for a cloud
 device, and `md.deleteDevice(id)`'s device carries `deviceMinutes`.
-`e2e/devicefarm.e2e.ts` runs the whole lifecycle on live Device Farm.
+Through a hub, `md.lease({select: {location: 'cloud', platform: 'ios', name:
+'Apple iPhone 15'}, ttlSec: 1800, cloud: {idleReleaseSec: 900}, attach: {}})`
+launches a cloud device on the hub that holds the credentials and resolves
+with its leased handle; `dev.release()` resolves with `{deviceMinutes}`.
+`e2e/devicefarm.e2e.ts` runs the whole lifecycle on live Device Farm, in
+direct mode and through a hub.
 
 ## How the package is built
 

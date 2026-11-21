@@ -15,6 +15,7 @@ import type {
   ArtifactInfo,
   DaemonEvent,
   DeviceInfo,
+  DeviceMinutes,
   Envelope,
   HierarchyNode,
   Lease,
@@ -538,16 +539,23 @@ export class MaestroDevice {
    * release that fails keeps it, so a later release() or `maestro-d
    * release` can try again.
    */
-  async release(opts: CallOptions = {}): Promise<void> {
+  async release(opts: CallOptions = {}): Promise<{ deviceMinutes?: DeviceMinutes }> {
     const lease = this.lease
-    if (!lease) return
+    if (!lease) return {}
+    let minutes: DeviceMinutes | undefined
     try {
-      await this.transport.json<Envelope>(`/v1/leases/${encodeURIComponent(lease.id)}`, { method: 'DELETE', signal: this.sig(opts) })
+      const res = await this.transport.json<Envelope & { deviceMinutes?: DeviceMinutes }>(`/v1/leases/${encodeURIComponent(lease.id)}`, {
+        method: 'DELETE',
+        signal: this.sig(opts),
+      })
+      minutes = res.deviceMinutes
     } catch (err) {
       if (!(err instanceof MaestroError && err.code === 'LEASE_EXPIRED')) throw err
     }
     if (this.lease?.id === lease.id) this.forgetLease()
     this.info = { ...this.info, attached: false }
+    // A cloud device the lease launched reports the minutes it used.
+    return minutes ? { deviceMinutes: minutes } : {}
   }
 
   private forgetLease(): void {

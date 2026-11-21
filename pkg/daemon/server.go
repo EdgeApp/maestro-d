@@ -97,6 +97,9 @@ type Server struct {
 	cloud    providerSet
 	remoteMu sync.Mutex
 	remotes  map[string]*remoteDevice
+	// cloudLaunching counts the cloud launches under way for leases, under
+	// leaseMu, so the hub's cap counts them.
+	cloudLaunching int
 	// launches is cancelled when the daemon shuts down: every cloud launch
 	// joins it, so none registers a device after the teardown ran.
 	launches       context.Context

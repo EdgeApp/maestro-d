@@ -432,6 +432,13 @@ export interface LeaseSelector {
   hub?: string
   /** Let a shut-down simulator or AVD be picked; the hub boots it for the lease. */
   boot?: boolean
+  /** 'cloud' launches a cloud device for the lease (name is then the model). */
+  location?: 'cloud'
+  /** The cloud provider (default devicefarm). */
+  provider?: string
+  /** A cloud lease's OS range, at max's own precision. */
+  osVersionMin?: string
+  osVersionMax?: string
 }
 
 /** Options for opening a driver on a device (`maestro-d attach`). */

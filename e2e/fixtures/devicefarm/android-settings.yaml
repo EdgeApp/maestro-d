@@ -1,0 +1,9 @@
+# Opens About phone in the Settings app of a cloud Android device (no app
+# needed).
+appId: com.android.settings
+---
+- launchApp
+- scrollUntilVisible:
+    element: "About phone"
+- tapOn: "About phone"
+- assertVisible: "Device name"

@@ -83,6 +83,10 @@ type remoteDevice struct {
 	// device that is not attached.
 	driverMu sync.Mutex
 
+	// lease is the hub lease the device was launched for (nil in direct
+	// mode): its release ends the lease, and the lease's end releases it.
+	lease *leaseEntry
+
 	stop        chan struct{}
 	releaseOnce sync.Once
 	minutes     *cloudprov.DeviceMinutes
@@ -258,7 +262,7 @@ func newCloudID(prefix string) string {
 // holds it. The provider records every session in the ledger through the
 // Created hook before it waits, and stops every session it gives up on.
 // ctx is the request's: a client that leaves cancels the launch.
-func (s *Server) launchCloud(ctx context.Context, spec cloudprov.CloudSpec) (*remoteDevice, *Error) {
+func (s *Server) launchCloud(ctx context.Context, spec cloudprov.CloudSpec, reserve ...func(id string)) (*remoteDevice, *Error) {
 	p, e := s.provider(spec.Provider)
 	if e != nil {
 		return nil, e
@@ -336,6 +340,9 @@ func (s *Server) launchCloud(ctx context.Context, spec cloudprov.CloudSpec) (*re
 		return fail(Errorf(CodeInterrupted, "launch %s cancelled", id))
 	}
 	info := s.cloudInfo(rd, spec)
+	for _, f := range reserve {
+		f(id)
+	}
 	s.remoteMu.Lock()
 	if s.shuttingDown.Load() {
 		// The teardown has run, or is about to (it reads s.remotes under
@@ -486,6 +493,7 @@ func (s *Server) endRemote(rd *remoteDevice, reason string) {
 	go func() {
 		// Read the minutes and drop the ledger entry; the session is over.
 		s.finishRemote(rd, "ended", false)
+		s.endCloudLease(rd, "ended")
 	}()
 }
 
@@ -497,7 +505,22 @@ func (s *Server) releaseRemote(rd *remoteDevice, reason string) (*cloudprov.Devi
 		rd.ended = "released: " + reason
 	}
 	rd.mu.Unlock()
-	return s.finishRemote(rd, reason, true)
+	m, e := s.finishRemote(rd, reason, true)
+	s.endCloudLease(rd, reason)
+	return m, e
+}
+
+// endCloudLease ends the lease rd was launched for when rd went for a reason
+// of its own (its idle timeout, the session cap, its provider): the lease
+// publishes lease.expired, and later requests under it answer
+// LEASE_EXPIRED.
+func (s *Server) endCloudLease(rd *remoteDevice, reason string) {
+	// The lease's own end, and a stop or delete under it (which ends the
+	// lease as stopped or deleted), are not the device ending the lease.
+	if rd.lease == nil || reason == "lease-end" || reason == "stopped" || reason == "deleted" {
+		return
+	}
+	s.endLease(rd.lease, endCloudReleased)
 }
 
 // finishRemote ends rd's session and everything the daemon held for it:
@@ -790,7 +813,11 @@ func (s *Server) handleStopCloud(w http.ResponseWriter, r *http.Request, rd *rem
 	}
 	minutes, e := s.releaseRemote(rd, reason)
 	s.forgetRemote(rd)
-	s.endStoppedLease(r.Context(), endStopped, rd.id)
+	how := endStopped
+	if del {
+		how = endDeleted
+	}
+	s.endStoppedLease(r.Context(), how, rd.id)
 	s.events.Publish(Event{Type: "device.stopped", Device: rd.id})
 	if del {
 		s.events.Publish(Event{Type: "device.deleted", Device: rd.id, Message: info.Name})
@@ -836,6 +863,105 @@ type ProviderSessionsResult struct {
 func (s *Server) hubLabel() string {
 	if s.cfg.Hub {
 		return s.hubName()
+	}
+	return ""
+}
+
+// leaseCloud launches a cloud device for a selector lease with location
+// cloud, on this hub, and leases it: the hub's --cloud-max-devices caps how
+// many it holds (BUSY when full, launches in progress included), the window
+// is at most the provider's session, and the device is reserved from its
+// launch until the lease is granted, so no other request takes it.
+func (s *Server) leaseCloud(r *http.Request, sel LeaseSelector, cloud *cloudprov.CloudSpec, holder string, ttlSec int) (*leaseEntry, *Error) {
+	spec := cloudprov.CloudSpec{}
+	if cloud != nil {
+		spec = *cloud
+	}
+	if spec.App != "" || len(spec.AuxiliaryApps) > 0 {
+		return nil, Errorf(CodeUsage, "lease: a cloud lease takes no app; install it once the device is leased (install, POST /v1/devices/{id}/apps)").
+			WithDetails("field", "cloud.app")
+	}
+	spec.Provider = firstNonEmpty(strings.ToLower(sel.Provider), strings.ToLower(spec.Provider), "devicefarm")
+	spec.Platform = firstNonEmpty(strings.ToLower(sel.Platform), strings.ToLower(spec.Platform))
+	spec.Name = firstNonEmpty(sel.Name, spec.Name)
+	spec.OSVersion = firstNonEmpty(sel.OSVersion, spec.OSVersion)
+	spec.OSVersionMin = firstNonEmpty(sel.OSVersionMin, spec.OSVersionMin)
+	spec.OSVersionMax = firstNonEmpty(sel.OSVersionMax, spec.OSVersionMax)
+	if e := validateCloudSpec(&spec, cloudTimings()); e != nil {
+		return nil, e
+	}
+	if _, e := s.provider(spec.Provider); e != nil {
+		return nil, e
+	}
+	maxTTL := min(s.hubLeaseMax(), cloudLeaseMax)
+	if sel.Name != "" {
+		// A per-device maximum named for the model is checked before the
+		// launch, so a window over it costs no session. (A model the name
+		// matches only as a pattern is checked once it is launched.)
+		maxTTL = min(maxTTL, s.leaseMaxInfo(DeviceInfo{ID: sel.Name, Name: sel.Name, Provider: spec.Provider}))
+	}
+	if _, e := leaseWindow("", ttlSec, maxTTL); e != nil {
+		return nil, e
+	}
+	// The cap counts the devices held and the launches under way.
+	s.leaseMu.Lock()
+	held := s.cloudHeld(spec.Provider) + s.cloudLaunching
+	if held >= s.cfg.CloudMaxDevices {
+		s.leaseMu.Unlock()
+		return nil, Errorf(CodeBusy, "hub %s holds %d cloud device(s), its limit (--cloud-max-devices %d); release one or try another hub",
+			s.hubName(), held, s.cfg.CloudMaxDevices).WithDetails("limit", s.cfg.CloudMaxDevices)
+	}
+	s.cloudLaunching++
+	s.leaseMu.Unlock()
+	defer func() {
+		s.leaseMu.Lock()
+		s.cloudLaunching--
+		s.leaseMu.Unlock()
+	}()
+	rd, e := s.launchCloud(r.Context(), spec, func(id string) {
+		// Reserved before it is listed: nothing else leases it first.
+		s.leases.mu.Lock()
+		s.leases.booting[id] = true
+		s.leases.mu.Unlock()
+	})
+	if e != nil {
+		return nil, e
+	}
+	defer func() {
+		s.leases.mu.Lock()
+		delete(s.leases.booting, rd.id)
+		s.leases.mu.Unlock()
+	}()
+	d, ok := s.registry.Lookup(rd.id)
+	if !ok {
+		_, _ = s.releaseRemote(rd, "lease-end")
+		return nil, Errorf(CodeDeviceError, "cloud device %s vanished before its lease was granted", rd.id)
+	}
+	if s.shuttingDown.Load() {
+		// The hub's leases have ended: no new one, and the device goes.
+		_, _ = s.releaseRemote(rd, "lease-end")
+		return nil, Errorf(CodeDaemonUnavailable, "hub %s is shutting down", s.hubName())
+	}
+	// The device is bound to the lease as it is granted, under leaseMu: a
+	// lease ended at once (the hub stopping) still releases it.
+	entry, le := s.leaseDevice(d, holder, ttlSec, claimReserved, func(e *leaseEntry) {
+		e.cloud, e.cloudDone = rd, make(chan struct{})
+		rd.lease = e
+	})
+	if le != nil {
+		_, _ = s.releaseRemote(rd, "lease-end")
+		return nil, le
+	}
+	s.events.Publish(Event{Type: "device.created", Device: rd.id, Message: d.Name})
+	s.events.Publish(Event{Type: "device.booted", Device: rd.id, Message: d.Name})
+	return entry, nil
+}
+
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if s != "" {
+			return s
+		}
 	}
 	return ""
 }

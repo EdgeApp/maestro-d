@@ -47,8 +47,9 @@ type Client struct {
 	leases  map[string]string
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
-	// forgotten first.
-	OnLeaseExpired func(device, lease string)
+	// forgotten first. hint is the daemon's details.hint, the way to a new
+	// lease when the device went away with the old one ("" otherwise).
+	OnLeaseExpired func(device, lease, hint string)
 	// Name is the daemon name this client was dialled for (informational).
 	Name string
 	// Info is daemon.json when the client was created from it.
@@ -179,7 +180,8 @@ func (c *Client) noteLeaseExpired(req *http.Request, resp *http.Response) {
 		return
 	}
 	// A HEAD's answer has no body: its code is in HeaderErrorCode.
-	if errorFromResponse(resp.StatusCode, resp.Header, data).Code != CodeLeaseExpired {
+	e := errorFromResponse(resp.StatusCode, resp.Header, data)
+	if e.Code != CodeLeaseExpired {
 		return
 	}
 	device := pathDevice(req.URL.Path)
@@ -187,7 +189,8 @@ func (c *Client) noteLeaseExpired(req *http.Request, resp *http.Response) {
 		c.ClearLease(device)
 	}
 	if c.OnLeaseExpired != nil {
-		c.OnLeaseExpired(device, lease)
+		hint, _ := e.Details["hint"].(string)
+		c.OnLeaseExpired(device, lease, hint)
 	}
 }
 
