@@ -471,6 +471,9 @@ type DeviceInfo struct {
 	// own to find the devices on its own machine, whichever hub it asked.
 	Machine   string   `json:"machine,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
+	// TrafficShaping is true when the device's host has both traffic-shaping
+	// calls configured for it in its network.json.
+	TrafficShaping bool `json:"trafficShaping,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of

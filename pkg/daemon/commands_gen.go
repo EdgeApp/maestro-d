@@ -659,6 +659,12 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
+	"resetTrafficShape": {Name: "resetTrafficShape", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Removes the device's network shape through the call its host's network.json configures for it.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+	}},
 	"retry": {Name: "retry", Scalar: "", ValueLess: false, Compound: true, FreeForm: false, Doc: "Retries steps on failure.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -807,6 +813,17 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "appId", Type: "string", Doc: ""},
 		{Key: "permissions", Type: "map[string]string", Doc: ""},
+	}},
+	"setTrafficShape": {Name: "setTrafficShape", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the device's whole network shape through the call its host's network.json configures for it.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "mbit", Type: "float64", Doc: "Bandwidth cap in megabits per second, fractions allowed; 0 = no cap"},
+		{Key: "lossPct", Type: "float64", Doc: "Random packet loss, 0–100"},
+		{Key: "latencyMs", Type: "float64", Doc: "Added one-way latency in milliseconds"},
+		{Key: "jitterMs", Type: "float64", Doc: "Latency jitter in milliseconds"},
+		{Key: "direction", Type: "string", Doc: "download, upload or both (default both); ${VAR} allowed"},
 	}},
 	"startRecording": {Name: "startRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts recording.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

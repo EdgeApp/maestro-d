@@ -65,6 +65,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`removeMedia`](#removemedia) | _none_ | Clears media added by addMedia (Android: MediaStore index). |
 | [`repeat`](#repeat) | — | Repeats steps. |
 | [`resetPermissions`](#resetpermissions) | _none_ | Resets all browser permissions. |
+| [`resetTrafficShape`](#resettrafficshape) | _none_ | Removes the device's network shape through the call its host's network.json configures for it. |
 | [`retry`](#retry) | — | Retries steps on failure. |
 | [`runBrowserScript`](#runbrowserscript) | `file` | Loads and executes a JS file in the browser page context. |
 | [`runFlow`](#runflow) | `file` | Runs another flow. |
@@ -82,6 +83,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`setNetworkConditions`](#setnetworkconditions) | — | Simulates network throttling or offline mode. |
 | [`setOrientation`](#setorientation) | `orientation` | Sets device orientation. |
 | [`setPermissions`](#setpermissions) | — | Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all |
+| [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's network.json configures for it. |
 | [`startRecording`](#startrecording) | `path` | Starts recording. |
 | [`stopApp`](#stopapp) | `appId` | Stops an app. |
 | [`stopRecording`](#stoprecording) | `path` | Stops recording. |
@@ -1407,6 +1409,24 @@ await m.resetPermissions()
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 
+## `resetTrafficShape`
+
+Removes the device's network shape through the call its host's network.json configures for it.
+
+```sh
+maestro-d resetTrafficShape
+```
+```js
+await m.resetTrafficShape()
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+
 ## `retry`
 
 Retries steps on failure.
@@ -1787,6 +1807,29 @@ await m.setPermissions({ … })
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `appId` | `string` |  |
 | `permissions` | `Record<string, string>` |  |
+
+## `setTrafficShape`
+
+Sets the device's whole network shape through the call its host's network.json configures for it.
+
+```sh
+maestro-d setTrafficShape --key value […]
+```
+```js
+await m.setTrafficShape({ … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `mbit` | `number` | Bandwidth cap in megabits per second, fractions allowed; 0 = no cap |
+| `lossPct` | `number` | Random packet loss, 0–100 |
+| `latencyMs` | `number` | Added one-way latency in milliseconds |
+| `jitterMs` | `number` | Latency jitter in milliseconds |
+| `direction` | `string` | download, upload or both (default both); ${VAR} allowed |
 
 ## `startRecording`
 

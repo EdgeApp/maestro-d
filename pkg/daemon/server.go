@@ -71,6 +71,9 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
+	// NetworkConfig is the traffic-shaping config (default
+	// <home>/network.json).
+	NetworkConfig string
 	// BlobsDir is the blob store's root (default <home>/blobs).
 	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
@@ -609,6 +612,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	devs := s.visible(r, s.registry.List(strings.ToLower(r.URL.Query().Get("platform"))))
+	s.markTrafficShaping(devs)
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
@@ -624,7 +628,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		s.annotate(devs)
 		info = devs[0]
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(info)})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
@@ -710,7 +714,7 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.deviceInfo(a)})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(s.deviceInfo(a))})
 }
 
 func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {

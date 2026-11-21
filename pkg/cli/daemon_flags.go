@@ -49,6 +49,8 @@ type daemonOpts struct {
 	// serve: TLS files and the environment names sessions may import.
 	TLSCert, TLSKey string
 	PassEnv         []string
+	// NetworkConfig is serve's and hub start's --network-config.
+	NetworkConfig string
 
 	// explicit records the table flags given on the command line (not
 	// from the environment).

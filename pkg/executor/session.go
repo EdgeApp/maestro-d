@@ -57,6 +57,9 @@ type SessionConfig struct {
 	// PassEnv names variables of the daemon's environment imported even
 	// when ImportEnv is off (--pass-env).
 	PassEnv []string
+	// TrafficShaper sends the device's setTrafficShape and resetTrafficShape
+	// calls. Nil answers both steps with UNSUPPORTED.
+	TrafficShaper TrafficShaper
 }
 
 // StepOutcome is the result of executing one step through a Session. It is
@@ -205,6 +208,7 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 		script:      NewScriptEngine(),
 		totalFlows:  1,
 		rec:         stepRecording{inReport: true},
+		shaper:      sc.TrafficShaper,
 	}
 
 	// Prelude — mirrors FlowRunner.Run() up to the first step.

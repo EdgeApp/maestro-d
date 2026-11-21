@@ -31,12 +31,14 @@ const (
 func outcomeCode(err error) string {
 	var unsupported *UnsupportedError
 	var config *netshape.ConfigError
+	var usage *UsageError
+	var value *netshape.ValueError
 	switch {
 	case err == nil:
 		return ""
 	case errors.As(err, &unsupported):
 		return codeUnsupported
-	case errors.As(err, &config):
+	case errors.As(err, &config), errors.As(err, &usage), errors.As(err, &value):
 		return codeUsage
 	}
 	return ""

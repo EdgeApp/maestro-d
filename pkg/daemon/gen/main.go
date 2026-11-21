@@ -53,6 +53,9 @@ var commandOverrides = map[string]func(*Command){
 	"toggleAirplaneMode": func(c *Command) {
 		c.Doc = "Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100)."
 	},
+	// Decoded by a helper (flow/trafficshape.go), which the AST walk does
+	// not follow: it takes a map of its fields, each optional.
+	"setTrafficShape": func(c *Command) { c.ValueLess = false },
 	// Nested steps are tagged `yaml:"-"` and read by hand in the parser.
 	"repeat": func(c *Command) {
 		c.Fields = append(c.Fields, nestedField("commands", "Steps to repeat"))

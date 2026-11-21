@@ -240,6 +240,8 @@ export interface DeviceInfo {
   machine?: string
   /** On a hub: the owning hub's advertised address, then that machine's non-loopback IPs. */
   addresses?: string[]
+  /** True when the device's host has a traffic shaper configured for it (setTrafficShape). */
+  trafficShaping?: boolean
 }
 
 /** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */

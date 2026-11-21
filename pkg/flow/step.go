@@ -111,6 +111,10 @@ const (
 	StepWaitForRequest       StepType = "waitForRequest"
 	StepClearNetworkMocks    StepType = "clearNetworkMocks"
 
+	// maestro-d: the host's traffic-shaping calls (trafficshape.go)
+	StepSetTrafficShape   StepType = "setTrafficShape"
+	StepResetTrafficShape StepType = "resetTrafficShape"
+
 	// Media
 	StepTakeScreenshot   StepType = "takeScreenshot"
 	StepAssertScreenshot StepType = "assertScreenshot"

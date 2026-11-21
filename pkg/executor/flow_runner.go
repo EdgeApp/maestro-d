@@ -40,6 +40,8 @@ type FlowRunner struct {
 	runFlowTimeout string
 	// maestro-d: startRecording/stopRecording through screen capture (recording.go)
 	rec stepRecording
+	// maestro-d: the device's traffic shaper, nil when the host has none (trafficshape.go)
+	shaper TrafficShaper
 }
 
 // Run executes the flow and returns the result.
@@ -554,6 +556,8 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		result = fr.executeRecordingStep(step)
 	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep: // maestro-d: refused on iOS (unsupported.go)
 		result = fr.executeAirplaneStep(step)
+	case *flow.SetTrafficShapeStep, *flow.ResetTrafficShapeStep: // maestro-d: the host's shaping call (trafficshape.go)
+		result = fr.executeTrafficShapeStep(step)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -1629,6 +1633,8 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep: // maestro-d: refused on iOS (unsupported.go)
 		fr.script.ExpandStep(step)
 		result = fr.executeAirplaneStep(step)
+	case *flow.SetTrafficShapeStep, *flow.ResetTrafficShapeStep: // maestro-d: the host's shaping call (trafficshape.go)
+		result = fr.executeTrafficShapeStep(step)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
