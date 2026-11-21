@@ -798,8 +798,23 @@ func (s *Server) visible(r *http.Request, devs []DeviceInfo) []DeviceInfo {
 	}
 	if s.cfg.Hub {
 		s.annotate(out)
+	} else {
+		machine := MachineName()
+		for i := range out {
+			out[i].Machine = machine
+		}
 	}
 	return out
+}
+
+// annotateAvailable sets available on a plain daemon's entries: ready, not
+// attached here or by another daemon, and not an AVD that is not running.
+// A hub's annotate also weighs its leases.
+func annotateAvailable(devs []DeviceInfo, owners map[string]string) {
+	for i := range devs {
+		d := &devs[i]
+		d.Available = d.Ready && !d.Attached && owners[d.ID] == "" && !strings.HasPrefix(d.ID, AVDPrefix)
+	}
 }
 
 // annotate sets lease, maxSec, available, owner, machine and addresses

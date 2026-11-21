@@ -278,10 +278,11 @@ func TestHub_DeviceEntriesNameTheMachine(t *testing.T) {
 			}
 		}
 	}
-	// A plain daemon's entries carry neither.
+	// A plain daemon's entries name the machine too, with no addresses
+	// (it has no peers to be dialed by), and are local to a caller on it.
 	plain := newTestEnv(t, 0)
 	pd, _ := plain.c.Devices(context.Background(), "")
-	if len(pd) == 0 || pd[0].Machine != "" || pd[0].Addresses != nil {
+	if len(pd) == 0 || pd[0].Machine != MachineName() || pd[0].Addresses != nil || pd[0].Location != LocationLocal {
 		t.Fatalf("plain daemon: %+v", pd)
 	}
 	got := hostIPs(func() ([]net.Addr, error) {

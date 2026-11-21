@@ -18,11 +18,13 @@ import { Transport } from './transport.js'
 import type {
   AttachOptions,
   BootOptions,
+  CatalogQuery,
   CatalogResult,
   CreateDeviceOptions,
   DaemonEvent,
   DaemonInfo,
   DeviceInfo,
+  DeviceQuery,
   Envelope,
   HubStatus,
   Lease,
@@ -337,10 +339,16 @@ export class MaestroD {
   // -------------------------------------------------------------------------
   // Devices
 
-  /** Connected devices, booted simulators/emulators and attached sessions. */
-  async devices(opts: { platform?: string; signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
-    const path = '/v1/devices' + (opts.platform ? `?platform=${encodeURIComponent(opts.platform)}` : '')
-    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(path, { signal: this.sig(opts.signal) })
+  /**
+   * Connected devices, booted simulators/emulators, attached sessions and
+   * cloud devices, each with its `location` relative to this computer:
+   * `local`, `mesh` or `cloud`. The options filter the list.
+   */
+  async devices(opts: DeviceQuery & { signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
+    const { signal, ...q } = opts
+    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(withQuery('/v1/devices', q), {
+      signal: this.sig(signal),
+    })
     return res.devices
   }
 
@@ -365,14 +373,13 @@ export class MaestroD {
   /**
    * What `createDevice()` can make: iOS runtimes and device types, Android
    * system images and hardware profiles. `available` adds the Android
-   * images sdkmanager can download.
+   * images sdkmanager can download. `location: 'cloud'` lists the models
+   * the cloud providers can launch instead (in `cloud`), filtered by the
+   * other options; `hub` names the hub that answers.
    */
-  async catalog(opts: { platform?: string; available?: boolean; signal?: AbortSignal } = {}): Promise<CatalogResult> {
-    const q = new URLSearchParams()
-    if (opts.platform) q.set('platform', opts.platform)
-    if (opts.available) q.set('available', 'true')
-    const qs = q.toString()
-    return this.transport.json<CatalogResult>('/v1/catalog' + (qs ? `?${qs}` : ''), { signal: this.sig(opts.signal) })
+  async catalog(opts: CatalogQuery & { signal?: AbortSignal } = {}): Promise<CatalogResult> {
+    const { signal, ...q } = opts
+    return this.transport.json<CatalogResult>(withQuery('/v1/catalog', q), { signal: this.sig(signal) })
   }
 
   /**
@@ -512,6 +519,20 @@ export class MaestroD {
       { details: { attached: attached.map((d) => d.id) } },
     )
   }
+}
+
+/**
+ * Appends a filter object to path as a query string: arrays as comma
+ * lists, true as "true", false and empty values left out.
+ */
+export function withQuery(path: string, q: Record<string, unknown>): string {
+  const p = new URLSearchParams()
+  for (const [k, v] of Object.entries(q)) {
+    if (v === undefined || v === null || v === false || v === '') continue
+    p.set(k, Array.isArray(v) ? v.join(',') : String(v))
+  }
+  const qs = p.toString()
+  return qs ? `${path}?${qs}` : path
 }
 
 /**

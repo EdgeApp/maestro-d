@@ -57,6 +57,9 @@ type Config struct {
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
 	LeaseMaxDevices []LeaseMax
+	// CloudMaxDevices, on a hub, is how many cloud devices it holds at
+	// most (--cloud-max-devices).
+	CloudMaxDevices int
 	// Advertise, on a hub, is the address peers are told to dial; device
 	// listings carry it in addresses.
 	Advertise string
@@ -86,8 +89,10 @@ type Config struct {
 
 // Server is the daemon: registry + attached devices + HTTP handlers.
 type Server struct {
-	cfg      Config
-	deps     Deps
+	cfg  Config
+	deps Deps
+	// cloud holds the cloud providers constructed so far (cloud.go).
+	cloud    providerSet
 	registry *Registry
 	events   *EventBus
 	idle     *idleTimer
@@ -570,7 +575,7 @@ func (s *Server) statusResult() StatusResult {
 	// The devices this daemon holds, from its records: no live discovery,
 	// which shells out to adb, simctl and emulator and can take seconds,
 	// while clients use status as their liveness ping.
-	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.Held()}
+	res := StatusResult{Envelope: Envelope{OK: true}, Daemon: s.info, Devices: s.registry.Held(), Cloud: s.cloudStatus()}
 	if dl := s.idle.Deadline(); !dl.IsZero() {
 		res.IdleShutdownAt = dl.Format(time.RFC3339)
 	}
@@ -607,9 +612,21 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // Device handlers
 
+// handleListDevices serves GET /v1/devices: every device the caller may
+// see, each with its location relative to the caller's machine, filtered by
+// the query (filter.go).
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	devs := s.visible(r, s.registry.List(strings.ToLower(r.URL.Query().Get("platform"))))
-	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
+	q, e := ParseDeviceQuery(r.URL.Query())
+	if e != nil {
+		writeError(w, e)
+		return
+	}
+	devs := s.visible(r, s.registry.List(q.Platform))
+	if !s.cfg.Hub {
+		annotateAvailable(devs, otherOwners(s.cfg.Name))
+	}
+	SetLocations(devs, s.callerMachine(r))
+	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: q.Filter(devs)})
 }
 
 func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
@@ -619,12 +636,14 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
 		return
 	}
+	devs := []DeviceInfo{info}
 	if s.cfg.Hub {
-		devs := []DeviceInfo{info}
 		s.annotate(devs)
-		info = devs[0]
+	} else {
+		devs[0].Machine = MachineName()
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	SetLocations(devs, s.callerMachine(r))
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: devs[0]})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {

@@ -115,8 +115,9 @@ func (r *Registry) List(platform string) []DeviceInfo {
 		}
 		out = append(out, d)
 	}
-	// Records the live list can't see (mock devices, or a device that
-	// dropped off adb while attached) still show so they can be detached.
+	// Records the live list can't see (mock devices, a cloud provider's
+	// devices, or a device that dropped off adb while attached) still show
+	// so they can be driven, detached or released.
 	for id, rec := range r.records {
 		if seen[id] {
 			continue
@@ -124,7 +125,7 @@ func (r *Registry) List(platform string) []DeviceInfo {
 		if platform != "" && rec.Platform != platform {
 			continue
 		}
-		if rec.Attached || rec.Platform == "mock" || rec.Platform == "web" {
+		if rec.Attached || rec.Platform == "mock" || rec.Platform == "web" || rec.Provider != "" {
 			out = append(out, *rec)
 		}
 	}

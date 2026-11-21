@@ -9,8 +9,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
 	"slices"
 )
 
@@ -47,6 +45,8 @@ type HubStatus struct {
 	// MDNS is false with --no-mdns.
 	MDNS  bool      `json:"mdns"`
 	Peers []HubPeer `json:"peers"`
+	// Cloud lists the cloud providers this hub launches devices on.
+	Cloud []CloudStatus `json:"cloud,omitempty"`
 }
 
 // HubPeer is one peer in GET /v1/hub.
@@ -64,6 +64,9 @@ type HubPeer struct {
 	Devices *int   `json:"devices,omitempty"`
 	Since   string `json:"since,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Cloud lists the cloud providers the peer launches devices on, from
+	// its hello (linked peers only).
+	Cloud []string `json:"cloud,omitempty"`
 }
 
 // UnreachablePeer is a hub a mesh-wide listing could not ask.
@@ -84,12 +87,13 @@ func (c *Client) Hub(ctx context.Context) (*HubStatusResult, error) {
 // DeviceList is Devices with the whole answer: on a hub it names the
 // peers that did not answer.
 func (c *Client) DeviceList(ctx context.Context, platform string) (*DevicesResult, error) {
-	path := "/v1/devices"
-	if platform != "" {
-		path += "?platform=" + url.QueryEscape(platform)
-	}
+	return c.DeviceListQuery(ctx, DeviceQuery{Platform: platform})
+}
+
+// DeviceListQuery is DeviceList filtered by q.
+func (c *Client) DeviceListQuery(ctx context.Context, q DeviceQuery) (*DevicesResult, error) {
 	var out DevicesResult
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodGet, withQuery("/v1/devices", q.Values()), nil, &out); e != nil {
 		return nil, e
 	}
 	return &out, nil
@@ -105,10 +109,10 @@ func asError(err error) *Error {
 }
 
 // hostIdentity is what a hub's device entries carry to name the machine
-// they are attached to: the host name (os.Hostname), and the hub's
+// they are attached to: the machine name (MachineName), and the hub's
 // --advertise address followed by the host's non-loopback IPs.
 func (s *Server) hostIdentity() (machine string, addrs []string) {
-	machine, _ = os.Hostname()
+	machine = MachineName()
 	if s.cfg.Advertise != "" {
 		addrs = append(addrs, s.cfg.Advertise)
 	}

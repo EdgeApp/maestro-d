@@ -21,6 +21,29 @@ type deviceManageOpts struct {
 	available bool
 	// hub names the hub whose machine catalogs, creates or boots (--hub).
 	hub string
+	// query filters device list and device catalog (location, provider,
+	// kind, name, OS range, available).
+	query daemon.DeviceQuery
+}
+
+// queryFlags are the filters device list and device catalog share.
+func queryFlags(kind bool) []dflag {
+	out := []dflag{
+		strFlag("location", "Only devices in these locations: local, mesh, cloud (comma list)", nil, func(o *daemonOpts, v string) {
+			o.manage.query.Location = strings.Split(v, ",")
+		}),
+		strFlag("provider", "Only this cloud provider's devices (devicefarm)", nil, func(o *daemonOpts, v string) { o.manage.query.Provider = v }),
+		strFlag("name", "Only devices whose name or id matches this regular expression (case-insensitive)", nil,
+			func(o *daemonOpts, v string) { o.manage.query.Name = v }),
+		strFlag("os-min", "Only devices whose OS version is at least this (e.g. 16)", nil, func(o *daemonOpts, v string) { o.manage.query.OSVersionMin = v }),
+		strFlag("os-max", "Only devices whose OS version is at most this, at its own precision (17 admits 17.5)", nil,
+			func(o *daemonOpts, v string) { o.manage.query.OSVersionMax = v }),
+	}
+	if kind {
+		out = append(out, strFlag("kind", "Only this kind: device, emulator, simulator, tv, cloud", nil,
+			func(o *daemonOpts, v string) { o.manage.query.Kind = v }))
+	}
+	return out
 }
 
 // manageHubFlag is --hub on device catalog, create and start.
@@ -32,8 +55,8 @@ func manageStr(name, usage string, set func(s *daemon.CreateSpec, v string)) dfl
 }
 
 var (
-	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
-		boolFlag("available", "Also list Android system images that sdkmanager can download", nil,
+	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), queryFlags(false), []dflag{
+		boolFlag("available", "Also list Android system images that sdkmanager can download; with --location cloud, only models available now", nil,
 			func(o *daemonOpts, v bool) { o.manage.available = v }),
 	})
 	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
@@ -111,9 +134,11 @@ without --force; anything else fails with DEVICE_EXTERNAL.`, deviceDeleteFlags),
 
 func runDeviceCatalog(ctx context.Context, c *daemon.Client, o *daemonOpts, args []string, w io.Writer) error {
 	if len(args) != 0 {
-		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device catalog [--platform ios|android] [--available]")
+		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device catalog [--platform ios|android] [--available] [--location cloud …]")
 	}
-	res, err := c.Catalog(ctx, o.Attach.Platform, o.manage.available, o.manage.hub)
+	q := o.manage.query
+	q.Platform, q.Available, q.Hub = o.Attach.Platform, o.manage.available, o.manage.hub
+	res, err := c.CatalogQuery(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -126,6 +151,9 @@ func runDeviceCatalog(ctx context.Context, c *daemon.Client, o *daemonOpts, args
 }
 
 func printCatalog(w io.Writer, res *daemon.CatalogResult) {
+	if len(res.Cloud) > 0 {
+		printCloudCatalog(w, res.Cloud)
+	}
 	if cat := res.IOS; cat != nil {
 		fmt.Fprintln(w, "iOS runtimes")
 		if len(cat.Runtimes) == 0 {
@@ -209,4 +237,23 @@ func runDeviceDelete(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 	}
 	fmt.Fprintf(w, "%s deleted: %s (%s)\n", dev.ID, dev.Name, dev.Platform)
 	return nil
+}
+
+// printCloudCatalog prints the cloud providers' models, one row each.
+func printCloudCatalog(w io.Writer, cats []daemon.CloudCatalog) {
+	fmt.Fprintf(w, "%-11s %-14s %-40s %-8s %-28s %-8s %-7s %s\n", "PROVIDER", "HUB", "ID", "PLATFORM", "NAME", "OS", "FORM", "AVAILABILITY")
+	n := 0
+	for _, c := range cats {
+		hub := c.Hub
+		if hub == "" {
+			hub = "-"
+		}
+		for _, m := range c.Models {
+			n++
+			fmt.Fprintf(w, "%-11s %-14s %-40s %-8s %-28s %-8s %-7s %s\n", c.Provider, hub, m.ID, m.Platform, m.Name, m.OSVersion, m.FormFactor, m.Availability)
+		}
+	}
+	if n == 0 {
+		fmt.Fprintln(w, "  (no models match)")
+	}
 }

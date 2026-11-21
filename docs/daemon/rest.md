@@ -20,10 +20,13 @@ curl -s -H 'Authorization: Bearer s3cret' http://127.0.0.1:7788/v1/status
 
 The examples below assume `D=http://127.0.0.1:7788` and `H='Authorization: Bearer s3cret'`.
 
-Two headers matter:
+Three headers matter:
 
 - `X-Maestro-Api-Version: 1` — optional on requests; a mismatch is refused
   with `DAEMON_UNAVAILABLE`. Every response carries it.
+- `X-Maestro-Client-Machine: <host name>` — the caller's computer, which
+  `location` in device listings is relative to; the CLI, the Go client and
+  the JavaScript library always send it.
 - `Authorization: Bearer <token>` — required on TCP when the daemon has a
   token; never checked on the unix socket (file permissions do that).
   A missing or wrong token is `401` with a `USAGE` body. A daemon whose
@@ -234,9 +237,16 @@ curl -s -H "$H" $D/v1/status
     "hub": "lab-mac"
   },
   "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
-  "idleShutdownAt": "2026-09-10T10:30:00Z"
+  "idleShutdownAt": "2026-09-10T10:30:00Z",
+  "cloud": [ { "provider": "devicefarm", "maxDevices": 2, "held": 1 } ]
 }
 ```
+
+`cloud` lists the cloud providers the daemon launches devices on
+([Cloud devices](cloud.md)): on a hub every provider it was started with
+(`--devicefarm`) and its `--cloud-max-devices` as `maxDevices`; on a plain
+daemon the providers it has used since it started. `held` is how many of
+the provider's devices it holds now.
 
 `daemon.hub` is the hub's name, present only on a hub (`hub start`):
 clients use it to know the daemon leases its devices. The name is the
@@ -290,10 +300,12 @@ stop.
 
 ## Devices
 
-### `GET /v1/devices[?platform=android|ios|web]`
+### `GET /v1/devices[?location=…&provider=…&platform=…&kind=…&name=…&osVersionMin=…&osVersionMax=…&available=true]`
 
 Everything the host can see — connected devices, simulators (booted or
-not), emulator AVDs — merged with what this and other daemons hold.
+not), emulator AVDs — merged with what this and other daemons hold, plus
+the cloud devices it holds ([Cloud devices](cloud.md)). Every entry says
+where it is relative to the caller's computer in `location`.
 
 ```json
 {
@@ -332,7 +344,38 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
-| `machine`, `addresses` | hub only: the machine the device is attached to — its host name (`os.Hostname()`), and the owning hub's `--advertise` address (when set) followed by that machine's non-loopback IPs. Set by the owner and carried through the mesh, so a client compares them with its own host name and IPs to find the devices on its own machine, whichever hub it asked |
+| `available` | on a plain daemon: `true` for a ready device that is attached by no daemon (an AVD that is not running is never available) |
+| `machine` | the machine the device is attached to: its host name (`os.Hostname()`). For a cloud device, the machine whose daemon or hub holds its session |
+| `addresses` | hub only: the owning hub's `--advertise` address (when set) followed by the machine's non-loopback IPs, carried through the mesh |
+| `location` | `local` (attached to or running on the caller's computer), `mesh` (on another computer in the hub mesh, named by `machine`) or `cloud` (held by a cloud provider) |
+| `provider` | the cloud provider of a cloud device (`devicefarm`); absent otherwise |
+
+**Location.** A device with a `provider` is `cloud`. Any other device is
+`local` when its `machine` is the caller's machine and `mesh` otherwise;
+names compare case-insensitively, ignoring a trailing `.local`. The
+caller's machine is the `X-Maestro-Client-Machine` request header, which
+the CLI, the Go client and the JavaScript library always send (their host
+name). Without the header, a request over the unix socket or from a
+loopback address is on the daemon's own machine, and a TCP request from
+elsewhere is from an unknown machine, which sees every non-cloud device as
+`mesh`. On a hub the entry hub computes `location` once it has merged the
+peers' lists, so it is relative to the client wherever the device is.
+
+**Filters.** Each applies to every entry, cloud devices included:
+
+| query | keeps |
+| --- | --- |
+| `location` | a comma list of `local`, `mesh`, `cloud` |
+| `provider` | the cloud provider's devices |
+| `platform` | `android`, `ios`, `web`, `mock` |
+| `kind` | `device`, `emulator`, `simulator`, `tv`, `cloud` |
+| `name` | a case-insensitive Go regular expression, matched against `name` and `id` |
+| `osVersionMin`, `osVersionMax` | the OS version range, inclusive. Versions compare as numbers, component by component, a missing component counting as 0; `osVersionMax` compares at its own precision, so `17` admits `17.5` and `17.2` does not admit `17.4`. A device with no `osVersion` fails either bound |
+| `available` | `true`: devices a lease or attach could take now |
+
+An unknown location word, an invalid regular expression or a version that
+is not digits and dots is `USAGE`. On a hub the peers get every filter but
+`location`, which the entry hub applies after computing it.
 
 On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
 and the list covers every hub of the mesh, with `unreachable` naming a hub
@@ -349,9 +392,10 @@ hub's life, while an emulator serial (whichever AVD boots on that port next
 reuses it) and an id outside the pool are remembered for 30 s, or until a
 device is booted, stopped, created or deleted on the hub, or a lease ends.
 
-### `GET /v1/catalog[?platform=ios|android][&available=true]`
+### `GET /v1/catalog[?platform=ios|android][&available=true][&location=cloud…]`
 
-What `create` can use. iOS comes from `simctl list runtimes -j` and
+What `create` can use, and with `location=cloud` the models a cloud
+provider can launch. iOS comes from `simctl list runtimes -j` and
 `simctl list devicetypes -j` (iPhone and iPad types only); Android from
 `sdkmanager --list_installed` (`--list` with `available=true`, which adds
 the images that can be downloaded) and `avdmanager list device -c`.
@@ -374,6 +418,29 @@ Without `platform`, a platform whose tools are missing is left out and
 named in `"errors": {"android": "sdkmanager not found; …"}`. With
 `platform`, a missing tool fails `DEVICE_ERROR` naming the tool and how to
 install it.
+
+**Cloud models.** `location=cloud` answers the cloud section instead of the
+simulator and AVD catalog (`location=local,cloud` answers both: on a hub,
+the simulator and AVD sections are the asked hub's own and the cloud
+section the launching hub's); without it no cloud provider is asked. `provider`, `platform`, `name`,
+`osVersionMin`, `osVersionMax` and `available` filter the models as they
+filter `GET /v1/devices`.
+
+```json
+{ "ok": true, "exitCode": 0,
+  "cloud": [ { "provider": "devicefarm", "hub": "lab-mac",
+    "models": [ { "id": "df:android:google-pixel-8:14", "arn": "arn:aws:devicefarm:us-west-2::device:…",
+                  "platform": "android", "name": "Google Pixel 8", "osVersion": "14", "formFactor": "phone",
+                  "manufacturer": "Google", "availability": "HIGHLY_AVAILABLE", "available": true } ] } ] }
+```
+
+`available` is true for `HIGHLY_AVAILABLE` and `AVAILABLE`. `hub` is the
+hub that launches the models (absent on a plain daemon). In a mesh the
+cloud catalog is not fanned out: it is answered by the hub named in `hub`,
+else by the hub that would launch ([the launch routing
+rule](cloud.md#which-hub-launches)). A daemon without credentials answers
+`USAGE`, naming the variables and files it read; a mesh where no hub has
+them answers `USAGE` "no hub in this mesh has Device Farm credentials".
 
 ### `POST /v1/devices` — boot, or create and boot, a simulator or emulator
 
@@ -521,11 +588,14 @@ same.
 { "ok": true, "exitCode": 0,
   "hub": { "name": "hub-b", "version": "1.1.0", "apiVersion": "1", "listen": "[::]:7433", "mdns": true,
     "peers": [ { "name": "hub-a", "addr": "10.0.0.2:7433", "state": "linked", "direction": "outbound",
-                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z" } ] } }
+                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z", "cloud": ["devicefarm"] } ],
+    "cloud": [ { "provider": "devicefarm", "maxDevices": 2, "held": 0 } ] } }
 ```
 
 `state` is `linked`, `down`, `stopped` (it shut down cleanly), `connecting`
-or `refused`. A daemon that is not a hub answers `USAGE`.
+or `refused`. A peer's `cloud` lists the cloud providers it announced when
+its link opened (its `hello`); the hub's own `cloud` is as in `GET
+/v1/status`. A daemon that is not a hub answers `USAGE`.
 
 ### `GET /v1/hub/link`
 

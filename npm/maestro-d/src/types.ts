@@ -235,10 +235,73 @@ export interface DeviceInfo {
   available?: boolean
   /** On a hub: the longest lease window the device takes, in seconds. */
   maxSec?: number
-  /** On a hub: the host name of the machine the device is attached to. */
+  /** The host name of the machine the device is attached to (for a cloud device, the machine holding its session). */
   machine?: string
   /** On a hub: the owning hub's advertised address, then that machine's non-loopback IPs. */
   addresses?: string[]
+  /** Where the device is, relative to this computer: local, mesh or cloud. */
+  location?: DeviceLocation
+  /** The cloud provider that holds the device (`devicefarm`); absent otherwise. */
+  provider?: string
+}
+
+/** Where a device is, relative to the caller's computer. */
+export type DeviceLocation = 'local' | 'mesh' | 'cloud'
+
+/** Filters for `devices()` (`GET /v1/devices`). */
+export interface DeviceQuery {
+  /** Keep only these locations. */
+  location?: DeviceLocation | DeviceLocation[]
+  /** The cloud provider (`devicefarm`). */
+  provider?: string
+  platform?: string
+  /** device | emulator | simulator | tv | cloud */
+  kind?: string
+  /** A case-insensitive regular expression matched against name and id. */
+  name?: string
+  /** Inclusive OS version bounds; max compares at its own precision (17 admits 17.5). */
+  osVersionMin?: string
+  osVersionMax?: string
+  /** Only devices a lease could take now. */
+  available?: boolean
+}
+
+/** Filters for `catalog()` (`GET /v1/catalog`). */
+export interface CatalogQuery extends Omit<DeviceQuery, 'kind'> {
+  /** On a hub: the hub whose machine (or cloud credentials) answers. */
+  hub?: string
+}
+
+/** A model a cloud provider can launch. */
+export interface CloudModel {
+  /** `df:<platform>:<slug>:<os>` */
+  id: string
+  arn: string
+  platform: string
+  name: string
+  osVersion: string
+  formFactor?: string
+  manufacturer?: string
+  /** HIGHLY_AVAILABLE | AVAILABLE | BUSY | TEMPORARY_NOT_AVAILABLE */
+  availability?: string
+  available: boolean
+}
+
+/** One cloud provider's launchable models. */
+export interface CloudCatalog {
+  provider: string
+  /** The hub that launches them (absent on a plain daemon). */
+  hub?: string
+  models: CloudModel[]
+}
+
+/** A cloud provider a daemon or hub launches devices on. */
+export interface CloudStatus {
+  provider: string
+  /** On a hub: how many cloud devices it holds at most. */
+  maxDevices?: number
+  /** How many of the provider's devices it holds now. */
+  held: number
 }
 
 /** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
@@ -253,6 +316,8 @@ export interface HubStatus {
   /** False with --no-mdns. */
   mdns: boolean
   peers: HubPeer[]
+  /** The cloud providers this hub launches devices on. */
+  cloud?: CloudStatus[]
 }
 
 /** One peer of a hub. */
@@ -268,6 +333,8 @@ export interface HubPeer {
   devices?: number
   since?: string
   error?: string
+  /** The cloud providers a linked peer launches devices on. */
+  cloud?: string[]
 }
 
 /** The lease state a hub's device listings carry. */
@@ -430,6 +497,8 @@ export interface CatalogResult extends Envelope {
   android?: { images: CatalogImage[]; profiles: string[] }
   /** Why a platform's catalog is missing, when no platform was asked for. */
   errors?: Record<string, string>
+  /** With `location: 'cloud'`: each cloud provider's launchable models. */
+  cloud?: CloudCatalog[]
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +527,8 @@ export interface StatusResult extends Envelope {
   daemon: DaemonInfo
   devices: DeviceInfo[]
   idleShutdownAt?: string
+  /** The cloud providers this daemon launches devices on. */
+  cloud?: CloudStatus[]
 }
 
 export interface DaemonEvent {
