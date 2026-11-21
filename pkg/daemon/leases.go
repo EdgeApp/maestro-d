@@ -688,6 +688,9 @@ func shareMatches(entry string, d DeviceInfo) bool {
 // a TV is in it only when --share-tv names it (see Config.ShareTVs); any other
 // device when --share-device names it, or when that list is empty.
 func (s *Server) sharedInfo(d DeviceInfo) bool {
+	if isComputer(d) {
+		return false // local only, whatever --share-device says
+	}
 	// A cloud device a hub launched for a lease is always in its pool. On a
 	// plain daemon a cloud device (its owner's credentials pay for it)
 	// follows --share-device like any other.
@@ -753,6 +756,14 @@ type shareAnswer struct {
 // them to a remote caller, look the device up once, not per request and
 // per event: a lookup runs live discovery (adb, emulator, simctl).
 func (s *Server) shared(id string) bool {
+	// The computer device is never in the pool. Checked first: the empty
+	// --share-device answer below and the positive cache would share it.
+	if id == ComputerID {
+		return false
+	}
+	if rec, ok := s.registry.Record(id); ok && isComputer(rec) {
+		return false
+	}
 	if s.cfg.Hub {
 		if tv, ok := s.tvInfo(id); ok {
 			return s.sharedTV(tv)
@@ -1712,7 +1723,13 @@ func (sel LeaseSelector) matches(d DeviceInfo) bool {
 	if sel.Kind != "" && !strings.EqualFold(sel.Kind, d.Kind) {
 		return false
 	}
+	// TVs are taken only by a selector that names their kind or name, and
+	// the computer only by one that names its kind, name or platform, so a
+	// selector for phones never lands on either.
 	if sel.Kind == "" && sel.Name == "" && strings.EqualFold(d.Kind, "tv") {
+		return false
+	}
+	if sel.Kind == "" && sel.Name == "" && sel.Platform == "" && isComputer(d) {
 		return false
 	}
 	if sel.Name != "" && sel.Name != d.ID && !strings.EqualFold(sel.Name, d.Name) {

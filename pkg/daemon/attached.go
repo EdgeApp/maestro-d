@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -132,6 +133,12 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		driver, dinfo, cleanup = rd.driver, rd.dinfo, func() {}
 	} else if driver, dinfo, cleanup, err = s.deps.NewDriver(ctx, id, cfg); err != nil {
 		cancel()
+		// A driver factory that already chose a code (USAGE for a bad
+		// computer.json) keeps it; anything else is a device fault.
+		var de *Error
+		if errors.As(err, &de) {
+			return nil, Errorf(de.Code, "attach %s: %s", id, de.Message)
+		}
 		return nil, WrapErr(CodeDeviceError, fmt.Errorf("attach %s: %w", id, err))
 	}
 	if cleanup == nil {

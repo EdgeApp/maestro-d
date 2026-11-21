@@ -279,7 +279,8 @@ func isStepType(key string) bool {
 		StepTakeScreenshot, StepStartRecording,
 		StepStopRecording, StepAddMedia, StepRemoveMedia, StepPressKey, StepWaitForAnimationToEnd,
 		StepDefineVariables, StepDragAndDrop,
-		StepSetTrafficShape, StepResetTrafficShape: // maestro-d
+		StepSetTrafficShape, StepResetTrafficShape, // maestro-d
+		StepMoveMouse, StepClickOn, StepScrollAt: // maestro-d
 		return true
 	}
 	return false
@@ -656,6 +657,34 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 
 	case StepToggleAirplaneMode:
 		return &ToggleAirplaneModeStep{BaseStep: BaseStep{StepType: stepType}}, nil
+
+	case StepMoveMouse: // maestro-d (desktop_steps.go)
+		var s MoveMouseStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Point = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validateDesktopStep(&s, valueNode, sourcePath)
+
+	case StepClickOn: // maestro-d (desktop_steps.go)
+		var s ClickOnStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Point = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validateDesktopStep(&s, valueNode, sourcePath)
+
+	case StepScrollAt: // maestro-d (desktop_steps.go)
+		var s ScrollAtStep
+		if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validateDesktopStep(&s, valueNode, sourcePath)
 
 	case StepSetTrafficShape: // maestro-d (trafficshape.go)
 		var s SetTrafficShapeStep
