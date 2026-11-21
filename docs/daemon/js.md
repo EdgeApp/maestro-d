@@ -136,6 +136,16 @@ a listed name or UDID) is `POST /v1/devices`, and `deleteDevice()` is
 `DELETE /v1/devices/{id}?delete=true`. `e2e/deviceManagement.e2e.ts` runs
 the whole lifecycle on a real simulator and emulator.
 
+`md.devices(query)` filters the listing as `GET /v1/devices` does and every
+entry carries `location` (`local`, `mesh` or `cloud`) relative to this
+computer: `md.devices({location: ['local']})`, `md.devices({platform:
+'ios', osVersionMin: '17', available: true})`, `md.devices({location:
+'cloud', provider: 'devicefarm'})`. `md.catalog({location: 'cloud',
+platform: 'android', osVersionMin: '13', available: true})` lists the
+models a cloud provider can launch in `cloud`, and `hub` names the hub
+that answers. Every request sends `X-Maestro-Client-Machine` with
+`machineName()` (the host name). See [Cloud devices](cloud.md).
+
 ## How the package is built
 
 `npm/maestro-d/` holds the library (TypeScript, no runtime

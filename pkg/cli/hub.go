@@ -21,7 +21,9 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
@@ -70,6 +72,8 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
 	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
+	boolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
+		func(o *daemonOpts, v bool) { o.hub.devicefarm = v }),
 	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import (repeatable); no other one is imported",
 		apply: func(o *daemonOpts, v string) error { o.PassEnv = append(o.PassEnv, v); return nil }},
 	boolFlag("foreground", "Run in the foreground instead of detaching (for launchd or another supervisor)", nil,
@@ -260,6 +264,9 @@ func hubChildArgs(o *daemonOpts) []string {
 	if o.hub.remoteShell {
 		args = append(args, "--allow-remote-shell")
 	}
+	if o.hub.devicefarm {
+		args = append(args, "--devicefarm")
+	}
 	for _, n := range o.PassEnv {
 		args = append(args, "--pass-env", n)
 	}
@@ -379,9 +386,10 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	// Read this host's TVs before serving, so the hub knows them (and keeps
 	// them private unless --share-tv names them) from its first request.
 	cachedTVs()
+	deps := hubDeps(o)
 	mesh := newMesh(hub.Config{
 		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
-		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version,
+		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version, Cloud: providerNames(deps),
 		Logf: func(format string, args ...any) { logger.Info(format, args...) },
 	})
 	leaseMax, leaseMaxDevices, err := parseLeaseMax(o.hub.leaseMax)
@@ -409,7 +417,8 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		StartArgs:        redactArgs(os.Args[1:]),
 		Ready:            os.Stdout,
 		Mesh:             mesh,
-	}, daemonDeps())
+		CloudMaxDevices:  defaultCloudMaxDevices,
+	}, deps)
 	if err := srv.Run(context.Background()); err != nil {
 		logger.Error("hub exited: %v", err)
 		if de, ok := err.(*daemon.Error); ok {
@@ -418,6 +427,32 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return daemon.WrapErr(daemon.CodeDaemonUnavailable, err)
 	}
 	return nil
+}
+
+// hubDeps are a hub's dependencies: a plain daemon's, with a cloud
+// provider only when the hub was started with its credentials, so a hub
+// never spends its operator's ambient AWS credentials by accident.
+func hubDeps(o *daemonOpts) daemon.Deps {
+	deps := daemonDeps()
+	deps.Providers = nil
+	if o.hub.devicefarm {
+		deps.Providers = map[string]func() (cloudprov.RemoteProvider, error){"devicefarm": deviceFarmProvider(devicefarm.Options{})}
+	}
+	return deps
+}
+
+// defaultCloudMaxDevices is how many cloud devices a hub holds at once:
+// Device Farm's default concurrency per account.
+const defaultCloudMaxDevices = 2
+
+// providerNames lists deps' cloud providers, sorted, for the hub's hello.
+func providerNames(deps daemon.Deps) []string {
+	var out []string
+	for n := range deps.Providers {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // hubClient connects hub status to its hub: --target-hub, else the local

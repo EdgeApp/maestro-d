@@ -134,7 +134,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wide := fwd == "" && r.URL.Query().Get("scope") != "local"
 	switch {
 	case path == "/v1/hub" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, daemon.HubStatusResult{Envelope: daemon.Envelope{OK: true}, Hub: m.Status(r.Context())})
+		st := m.Status(r.Context())
+		st.Cloud = rt.localCloud(r)
+		writeJSON(w, http.StatusOK, daemon.HubStatusResult{Envelope: daemon.Envelope{OK: true}, Hub: st})
 	case len(seg) >= 3 && seg[0] == "v1" && seg[1] == "devices" && seg[2] != "":
 		rt.device(w, r, seg[2], fwd)
 	case len(seg) >= 3 && seg[0] == "v1" && seg[1] == "leases" && seg[2] != "":
@@ -151,7 +153,24 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.forgetPeerIDs()
 		rt.boot(w, r, fwd)
 	case path == "/v1/catalog" && r.Method == http.MethodGet && fwd == "":
-		if h := hubName(r.URL.Query().Get("hub")); h != "" && h != m.cfg.Name {
+		h := hubName(r.URL.Query().Get("hub"))
+		if h == "" && wantsCloud(r) {
+			// The cloud catalog is not fanned out: it is answered by the
+			// hub that would launch (the launch routing rule).
+			target, e := m.routeCloud("", strings.ToLower(r.URL.Query().Get("provider")))
+			if e != nil {
+				writeError(w, 0, e)
+				return
+			}
+			h = target
+		}
+		if h != "" && h != m.cfg.Name {
+			if others := otherLocations(r); len(others) > 0 && r.URL.Query().Get("hub") == "" {
+				// A mixed request: this hub's own catalog for the other
+				// locations, the cloud section from the hub that launches.
+				rt.mixedCatalog(w, r, h, others)
+				return
+			}
 			rt.forward(w, r, h)
 			return
 		}
@@ -745,15 +764,95 @@ func (rt *router) localCapture(r *http.Request) *recorder {
 	return rec
 }
 
-// listDevices merges this hub's devices with every peer's.
+// wantsCloud reports whether a catalog request asks for the cloud section.
+func wantsCloud(r *http.Request) bool {
+	for _, w := range strings.Split(r.URL.Query().Get("location"), ",") {
+		if strings.EqualFold(strings.TrimSpace(w), daemon.LocationCloud) {
+			return true
+		}
+	}
+	return false
+}
+
+// otherLocations returns the locations a catalog request asks for besides
+// cloud.
+func otherLocations(r *http.Request) []string {
+	var out []string
+	for _, w := range strings.Split(r.URL.Query().Get("location"), ",") {
+		if w = strings.TrimSpace(w); w != "" && !strings.EqualFold(w, daemon.LocationCloud) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// mixedCatalog answers a catalog request for cloud and other locations on
+// a hub whose cloud catalog comes from hub h: the local sections from this
+// hub, the cloud section from h, merged. Either side's failure is the answer.
+func (rt *router) mixedCatalog(w http.ResponseWriter, r *http.Request, h string, others []string) {
+	with := func(loc string) *http.Request {
+		c := r.Clone(r.Context())
+		q := c.URL.Query()
+		q.Set("location", loc)
+		c.URL.RawQuery = q.Encode()
+		return c
+	}
+	local := rt.localCapture(with(strings.Join(others, ",")))
+	cloud := rt.capture(with(daemon.LocationCloud), h)
+	for _, rec := range []*recorder{local, cloud} {
+		if rec.status != http.StatusOK {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(rec.status)
+			_, _ = w.Write(rec.buf.Bytes())
+			return
+		}
+	}
+	var merged, fromCloud daemon.CatalogResult
+	if err := json.Unmarshal(local.buf.Bytes(), &merged); err != nil {
+		writeError(w, 0, daemon.Errorf(daemon.CodeInternal, "catalog: %v", err))
+		return
+	}
+	if err := json.Unmarshal(cloud.buf.Bytes(), &fromCloud); err != nil {
+		writeError(w, 0, daemon.Errorf(daemon.CodeInternal, "catalog from %s: %v", h, err))
+		return
+	}
+	merged.Cloud = fromCloud.Cloud
+	writeJSON(w, http.StatusOK, merged)
+}
+
+// localCloud is this hub's own cloud status, from its daemon's GET
+// /v1/status.
+func (rt *router) localCloud(r *http.Request) []daemon.CloudStatus {
+	sr := r.Clone(r.Context())
+	sr.URL.Path, sr.URL.RawPath, sr.URL.RawQuery = "/v1/status", "", ""
+	rec := rt.localCapture(sr)
+	var st daemon.StatusResult
+	if rec.status != http.StatusOK || json.Unmarshal(rec.buf.Bytes(), &st) != nil {
+		return nil
+	}
+	return st.Cloud
+}
+
+// listDevices merges this hub's devices with every peer's. Peers and the
+// local daemon get every filter but location; this hub computes each
+// entry's location for the caller after the merge, overwriting the peers'
+// values, and then applies the location filter.
 func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
-	rec := rt.localCapture(r)
+	dq, e := daemon.ParseDeviceQuery(r.URL.Query())
+	if e != nil {
+		writeError(w, 0, e)
+		return
+	}
+	q := r.URL.Query()
+	q.Del("location")
+	lr := r.Clone(r.Context())
+	lr.URL.RawQuery = q.Encode()
+	rec := rt.localCapture(lr)
 	var out daemon.DevicesResult
 	if rec.status != http.StatusOK || json.Unmarshal(rec.buf.Bytes(), &out) != nil {
 		rec.copyTo(w)
 		return
 	}
-	q := r.URL.Query()
 	q.Set("scope", "local")
 	for _, res := range rt.m.fanout(r.Context(), "/v1/devices", q.Encode()) {
 		var devs daemon.DevicesResult
@@ -769,6 +868,8 @@ func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
 		out.Devices = append(out.Devices, devs.Devices...)
 	}
 	out.Unreachable = append(out.Unreachable, rt.m.down()...)
+	daemon.SetLocations(out.Devices, daemon.CallerMachine(r, !rt.tcp, daemon.MachineName()))
+	out.Devices = dq.Filter(out.Devices)
 	writeJSON(w, http.StatusOK, out)
 }
 

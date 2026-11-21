@@ -388,15 +388,54 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		fmt.Fprintln(w, "No devices.")
 		return
 	}
-	// A hub's listing carries lease state: show who holds each device.
+	// A hub's listing carries lease state (every hub entry has maxSec):
+	// show who holds each device.
 	leases := false
 	for _, d := range devs {
-		leases = leases || d.Lease != nil || d.Available
+		leases = leases || d.Lease != nil || d.MaxSec > 0
+	}
+	// A cloud row shows its provider.
+	cloud := false
+	for _, d := range devs {
+		cloud = cloud || d.Provider != ""
+	}
+	loc := func(d daemon.DeviceInfo) string {
+		switch {
+		case d.Location == daemon.LocationMesh && d.Machine != "":
+			return "mesh (" + d.Machine + ")"
+		case d.Location == daemon.LocationCloud:
+			if d.Hub != "" {
+				return "cloud (" + d.Provider + "@" + d.Hub + ")"
+			}
+			return "cloud (" + d.Provider + ")"
+		case d.Location != "":
+			return d.Location
+		}
+		return "-"
+	}
+	prov := func(d daemon.DeviceInfo) string {
+		if !cloud {
+			return ""
+		}
+		p := d.Provider
+		if p == "" {
+			p = "-"
+		}
+		return fmt.Sprintf("%-11s ", p)
+	}
+	provHdr := ""
+	if cloud {
+		provHdr = fmt.Sprintf("%-11s ", "PROVIDER")
+	}
+	// LOCATION is as wide as its longest value ("cloud (devicefarm@<hub>)").
+	locW := 24
+	for _, d := range devs {
+		locW = max(locW, len(loc(d)))
 	}
 	if leases {
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", "NAME")
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", locW, "LOCATION", provHdr, "NAME")
 	} else {
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", locW, "LOCATION", provHdr, "NAME")
 	}
 	for _, d := range devs {
 		state := d.State
@@ -431,10 +470,10 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 			case d.Available:
 				lease = "available"
 			}
-			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", d.ID, d.Platform, d.Kind, state, att, lease, strings.TrimSpace(name))
+			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, lease, locW, loc(d), prov(d), strings.TrimSpace(name))
 			continue
 		}
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", d.ID, d.Platform, d.Kind, state, att, strings.TrimSpace(name))
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, locW, loc(d), prov(d), strings.TrimSpace(name))
 	}
 }
 
@@ -803,7 +842,10 @@ var daemonPsCommand = &cli.Command{
 }
 
 var (
-	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags)
+	deviceListFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, queryFlags(true), []dflag{
+		boolFlag("available", "Only devices a lease could take now (ready, not leased, not attached)", nil,
+			func(o *daemonOpts, v bool) { o.manage.query.Available = v }),
+	})
 	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		intFlag("boot-timeout", "Seconds to wait for boot (default 180)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
@@ -829,7 +871,9 @@ var daemonDeviceCommand = &cli.Command{
 				if err != nil {
 					return err
 				}
-				res, err := client.DeviceList(ctx, o.Attach.Platform)
+				q := o.manage.query
+				q.Platform = o.Attach.Platform
+				res, err := client.DeviceListQuery(ctx, q)
 				if err != nil {
 					return err
 				}

@@ -278,6 +278,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		return nil, WrapErr(CodeUsage, err)
 	}
 	req.Header.Set("X-Maestro-Api-Version", APIVersion)
+	req.Header.Set(HeaderClientMachine, MachineName())
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -461,15 +462,24 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 // Devices lists devices; platform "" means all.
 func (c *Client) Devices(ctx context.Context, platform string) ([]DeviceInfo, error) {
-	path := "/v1/devices"
-	if platform != "" {
-		path += "?platform=" + url.QueryEscape(platform)
+	return c.DevicesQuery(ctx, DeviceQuery{Platform: platform})
+}
+
+// DevicesQuery lists the devices that pass q, each with its location.
+func (c *Client) DevicesQuery(ctx context.Context, q DeviceQuery) ([]DeviceInfo, error) {
+	res, err := c.DeviceListQuery(ctx, q)
+	if err != nil {
+		return nil, err
 	}
-	var out DevicesResult
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
-		return nil, e
+	return res.Devices, nil
+}
+
+// withQuery appends v to path as a query string.
+func withQuery(path string, v url.Values) string {
+	if len(v) > 0 {
+		return path + "?" + v.Encode()
 	}
-	return out.Devices, nil
+	return path
 }
 
 // Device returns one device.
@@ -502,22 +512,17 @@ func (c *Client) StopDevice(ctx context.Context, id string, force bool) error {
 // Catalog lists what `device create` can make; platform "" means both.
 // On a hub, hub names the hub whose machine is asked ("" for this one).
 func (c *Client) Catalog(ctx context.Context, platform string, available bool, hub string) (*CatalogResult, error) {
-	q := url.Values{}
-	if hub != "" {
-		q.Set("hub", hub)
-	}
-	if platform != "" {
-		q.Set("platform", platform)
-	}
-	if available {
-		q.Set("available", "true")
-	}
-	path := "/v1/catalog"
-	if len(q) > 0 {
-		path += "?" + q.Encode()
-	}
+	return c.CatalogQuery(ctx, CatalogQuery{Platform: platform, Available: available, Hub: hub})
+}
+
+// CatalogQuery filters GET /v1/catalog. Location "cloud" adds the cloud
+// providers' models; Hub names the hub that answers.
+type CatalogQuery = DeviceQuery
+
+// CatalogQuery lists what can be created or launched, filtered by q.
+func (c *Client) CatalogQuery(ctx context.Context, q CatalogQuery) (*CatalogResult, error) {
 	var out CatalogResult
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodGet, withQuery("/v1/catalog", q.Values()), nil, &out); e != nil {
 		return nil, e
 	}
 	return &out, nil
@@ -902,6 +907,7 @@ func (c *Client) putBlob(ctx context.Context, device, hex, path string, off, siz
 	}
 	req.ContentLength = size - off
 	req.Header.Set("X-Maestro-Api-Version", APIVersion)
+	req.Header.Set(HeaderClientMachine, MachineName())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if size > 0 {

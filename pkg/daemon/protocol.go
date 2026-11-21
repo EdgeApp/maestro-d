@@ -474,6 +474,12 @@ type DeviceInfo struct {
 	// TrafficShaping is true when the device's host has both traffic-shaping
 	// calls configured for it in its network.json.
 	TrafficShaping bool `json:"trafficShaping,omitempty"`
+	// Location is where the device is, relative to the caller's computer:
+	// local, mesh or cloud. It is computed per request (location.go).
+	Location string `json:"location,omitempty"`
+	// Provider names the cloud provider that holds the device
+	// ("devicefarm"); empty for every other device.
+	Provider string `json:"provider,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -632,6 +638,18 @@ type StatusResult struct {
 	// IdleShutdownAt is when the daemon will exit if nothing happens (RFC
 	// 3339), empty when idle shutdown is disabled.
 	IdleShutdownAt string `json:"idleShutdownAt,omitempty"`
+	// Cloud lists the cloud providers this daemon launches devices on.
+	Cloud []CloudStatus `json:"cloud,omitempty"`
+}
+
+// CloudStatus is one cloud provider a daemon or hub launches devices on.
+type CloudStatus struct {
+	Provider string `json:"provider"`
+	// MaxDevices, on a hub, is how many cloud devices it holds at most
+	// (--cloud-max-devices); 0 on a plain daemon, which has no cap.
+	MaxDevices int `json:"maxDevices,omitempty"`
+	// Held is how many of the provider's devices it holds now.
+	Held int `json:"held"`
 }
 
 // Info is the content of daemon.json.

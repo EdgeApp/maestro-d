@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -237,5 +238,86 @@ func TestDaemonDepsWiresDeviceManagement(t *testing.T) {
 		if !names[n] {
 			t.Errorf("device %s is not registered", n)
 		}
+	}
+}
+
+func TestDeviceListAndCatalogFilterFlags(t *testing.T) {
+	o, _ := parseFor(t, deviceListFlags, "--location", "local,cloud", "--provider", "devicefarm", "--kind", "cloud", "--name", "pix",
+		"--os-min", "13", "--os-max", "15", "--available", "-p", "android")
+	q := o.manage.query
+	if strings.Join(q.Location, ",") != "local,cloud" || q.Provider != "devicefarm" || q.Kind != "cloud" || q.Name != "pix" ||
+		q.OSVersionMin != "13" || q.OSVersionMax != "15" || !q.Available || o.Attach.Platform != "android" {
+		t.Fatalf("list query = %+v", q)
+	}
+	o, _ = parseFor(t, deviceCatalogFlags, "--location", "cloud", "--provider", "devicefarm", "--name", "iphone", "--os-min", "16",
+		"--os-max", "18", "--available", "--hub", "b", "-p", "ios")
+	if q := o.manage.query; strings.Join(q.Location, ",") != "cloud" || q.Name != "iphone" || q.OSVersionMin != "16" || !o.manage.available || o.manage.hub != "b" {
+		t.Fatalf("catalog query = %+v %+v", q, o.manage)
+	}
+	if _, _, err := parseDaemonArgs([]string{"--kind", "cloud"}, deviceCatalogFlags, nil); err == nil {
+		t.Log("--kind is not a catalog flag") // parsed as an unknown step flag
+	}
+}
+
+func TestRunDeviceCatalog_Cloud(t *testing.T) {
+	f := &fakeDaemon{reply: daemon.CatalogResult{Envelope: daemon.Envelope{OK: true}, Cloud: []daemon.CloudCatalog{
+		{Provider: "devicefarm", Hub: "b", Models: []cloudprov.CloudModel{
+			{ID: "df:ios:apple-iphone-15:17.4", Platform: "ios", Name: "Apple iPhone 15", OSVersion: "17.4", FormFactor: "phone", Availability: "HIGHLY_AVAILABLE", Available: true},
+		}},
+		{Provider: "devicefarm", Models: nil},
+	}}}
+	c := newFakeDaemon(t, f)
+	var out bytes.Buffer
+	o := &daemonOpts{Attach: daemon.AttachConfig{Platform: "ios"}, manage: deviceManageOpts{available: true, hub: "b",
+		query: daemon.DeviceQuery{Location: []string{"cloud"}, OSVersionMin: "16"}}}
+	if err := runDeviceCatalog(context.Background(), c, o, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if f.query != "available=true&hub=b&location=cloud&osVersionMin=16&platform=ios" {
+		t.Errorf("query = %s", f.query)
+	}
+	for _, want := range []string{"PROVIDER", "HUB", "AVAILABILITY", "devicefarm  b", "df:ios:apple-iphone-15:17.4", "Apple iPhone 15", "HIGHLY_AVAILABLE"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	out.Reset()
+	printCloudCatalog(&out, []daemon.CloudCatalog{{Provider: "devicefarm"}})
+	if !strings.Contains(out.String(), "(no models match)") || !strings.Contains(out.String(), "PROVIDER") {
+		t.Errorf("empty cloud catalog:\n%s", out.String())
+	}
+}
+
+func TestPrintDevices_LocationAndProvider(t *testing.T) {
+	var b bytes.Buffer
+	printDevices(&b, []daemon.DeviceInfo{
+		{ID: "u1", Platform: "ios", Location: "local", Machine: "alex-mac"},
+		{ID: "e1@sam-mini", Platform: "android", Location: "mesh", Machine: "sam-mini"},
+		{ID: "df-1@b", Platform: "android", Location: "cloud", Provider: "devicefarm", Hub: "b"},
+		{ID: "df-2", Platform: "ios", Location: "cloud", Provider: "devicefarm"},
+		{ID: "x", Platform: "mock"},
+	})
+	out := b.String()
+	for _, want := range []string{"LOCATION", "PROVIDER", "local", "mesh (sam-mini)", "cloud (devicefarm@b)", "cloud (devicefarm)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	// A hub-held cloud row is wider than the default LOCATION column: the
+	// column widens, and every row's PROVIDER and NAME line up with the header.
+	b.Reset()
+	printDevices(&b, []daemon.DeviceInfo{
+		{ID: "df-a@devicefarm-lab", Platform: "android", Location: "cloud", Provider: "devicefarm", Hub: "devicefarm-lab", Name: "Google Pixel 8", MaxSec: 9000},
+		{ID: "mock-1@hub-a", Platform: "mock", Location: "local", Name: "Mock", MaxSec: 3600},
+	})
+	rows := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	col := strings.Index(rows[0], "PROVIDER")
+	if col < 0 || rows[1][col:col+len("devicefarm")] != "devicefarm" || rows[2][col:col+1] != "-" || strings.Index(rows[1], "Google") != strings.Index(rows[0], "NAME") {
+		t.Fatalf("columns do not line up:\n%s", b.String())
+	}
+	b.Reset()
+	printDevices(&b, []daemon.DeviceInfo{{ID: "u1", Platform: "ios", Location: "local"}})
+	if strings.Contains(b.String(), "PROVIDER") || !strings.Contains(b.String(), "LOCATION") {
+		t.Errorf("no PROVIDER column without a cloud row:\n%s", b.String())
 	}
 }

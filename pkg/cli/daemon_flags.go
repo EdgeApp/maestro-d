@@ -97,6 +97,8 @@ type hubOpts struct {
 	peerCA        string
 	// purge: hub service uninstall --purge.
 	purge bool
+	// devicefarm: the hub launches AWS Device Farm devices for leases.
+	devicefarm bool
 }
 
 // leaseOpts are lease's switches.

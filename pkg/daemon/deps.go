@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -46,4 +47,10 @@ type Deps struct {
 	// fails. nil means no TVs. A hub shares a TV only when --share-tv names
 	// it.
 	TVInfo func(id string) (name string, ok bool)
+
+	// Providers maps a cloud provider's name ("devicefarm") to its
+	// constructor (cloud.go). A plain daemon constructs a provider on first
+	// use, from its own credentials; a hub is given only the providers it
+	// was started with (`hub start --devicefarm`).
+	Providers map[string]func() (cloudprov.RemoteProvider, error)
 }

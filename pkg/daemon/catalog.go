@@ -9,8 +9,10 @@ import (
 	"context"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -32,6 +34,17 @@ type CatalogResult struct {
 	// platform was asked for (a Linux host has no simctl, a Mac may have
 	// no Android SDK).
 	Errors map[string]string `json:"errors,omitempty"`
+	// Cloud lists, with ?location=cloud, the models each cloud provider
+	// can launch.
+	Cloud []CloudCatalog `json:"cloud,omitempty"`
+}
+
+// CloudCatalog is one provider's launchable models.
+type CloudCatalog struct {
+	Provider string `json:"provider"`
+	// Hub is the hub that launches them ("" on a plain daemon).
+	Hub    string                 `json:"hub,omitempty"`
+	Models []cloudprov.CloudModel `json:"models"`
 }
 
 // Catalog lists the iOS runtimes and device types, and the Android system
@@ -327,12 +340,30 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (info D
 // ---------------------------------------------------------------------------
 // Handlers
 
+// handleCatalog serves GET /v1/catalog: the simulators and AVDs this
+// machine can create, and with ?location=cloud the models the cloud
+// providers can launch. location=cloud alone answers only the cloud
+// section; without it no provider is asked.
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	res, e := s.registry.Catalog(q.Get("platform"), q.Get("available") == "true")
+	q, e := ParseDeviceQuery(r.URL.Query())
 	if e != nil {
 		writeError(w, e)
 		return
+	}
+	res := CatalogResult{Envelope: Envelope{OK: true}}
+	if len(q.Location) == 0 || slices.Contains(q.Location, LocationLocal) || slices.Contains(q.Location, LocationMesh) {
+		if res, e = s.registry.Catalog(q.Platform, q.Available); e != nil {
+			writeError(w, e)
+			return
+		}
+	}
+	if slices.Contains(q.Location, LocationCloud) {
+		s.idle.Hold()
+		defer s.idle.Release()
+		if res.Cloud, e = s.cloudCatalog(r.Context(), q); e != nil {
+			writeError(w, e)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, res)
 }
