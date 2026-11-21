@@ -76,6 +76,8 @@ type Frame struct {
 
 	// hello and peers: the sender's linked peers.
 	Peers []PeerRef `json:"peers,omitempty"`
+	// hello: the cloud providers the sender launches devices on.
+	Cloud []string `json:"cloud,omitempty"`
 }
 
 func encodeFrame(f Frame) ([]byte, error) { return json.Marshal(f) }

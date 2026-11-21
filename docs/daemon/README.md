@@ -22,7 +22,9 @@ The [command reference](commands.md) lists every command with its fields;
 it is generated from the flow parser, so it cannot drift from what the
 runner accepts. [network.md](network.md) covers traffic shaping through
 each host's configured shaper calls. [streaming.md](streaming.md) covers live screen streams,
-the browser viewer and recordings. [UPSTREAM.md](UPSTREAM.md) describes
+the browser viewer and recordings. [cloud.md](cloud.md) covers where each
+device is (local, mesh or cloud), the listing filters, and real phones on
+AWS Device Farm. [UPSTREAM.md](UPSTREAM.md) describes
 how the fork tracks maestro-runner.
 
 ## How it works

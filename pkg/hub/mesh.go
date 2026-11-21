@@ -69,6 +69,9 @@ type Config struct {
 	PeerCA *x509.CertPool
 	// Version is maestro-d's version, sent in hello.
 	Version string
+	// Cloud lists the cloud providers this hub launches devices on, sent
+	// in hello so peers can route cloud launches to it.
+	Cloud []string
 	// Discoverer finds hubs on the LAN (default Zeroconf).
 	Discoverer Discoverer
 	// Logf receives the mesh's log lines (default: none).
@@ -622,7 +625,7 @@ func (m *Mesh) httpClient() *http.Client {
 
 func (m *Mesh) hello() Frame {
 	return Frame{T: frameHello, Name: m.cfg.Name, Version: m.cfg.Version, APIVersion: daemon.APIVersion,
-		Instance: m.instance, Addr: m.cfg.Advertise, Port: m.port, TLS: m.useTLS, Peers: m.peerRefs()}
+		Instance: m.instance, Addr: m.cfg.Advertise, Port: m.port, TLS: m.useTLS, Peers: m.peerRefs(), Cloud: m.cfg.Cloud}
 }
 
 // peerRefs lists the linked peers, for hello and peers frames. Only an
@@ -694,7 +697,7 @@ func (m *Mesh) dial(addr, peer string, bulk bool) (*Link, error) {
 		l.close(websocket.StatusPolicyViolation, "API version")
 		return nil, daemon.Errorf(daemon.CodeHubVersion, "hub %s speaks API %s, this hub %s", f.Name, f.APIVersion, daemon.APIVersion)
 	}
-	l.peer, l.instance = f.Name, f.Instance
+	l.peer, l.instance, l.cloud = f.Name, f.Instance, f.Cloud
 	l.dialable.Store(true)
 	go l.readLoop()
 	go l.pingLoop(m.cfg.PingEvery, m.cfg.PingTimeout, m.cfg.MissedPongs)
@@ -990,7 +993,7 @@ func (m *Mesh) acceptLink(w http.ResponseWriter, r *http.Request) {
 		l.close(websocket.StatusProtocolError, "bad hello")
 		return
 	}
-	l.instance = f.Instance
+	l.instance, l.cloud = f.Instance, f.Cloud
 	if f.Addr != "" {
 		if a, err := advertisedAddr(f.Addr, f.Port, f.TLS); err == nil {
 			l.addr = a
@@ -1059,6 +1062,26 @@ func peerAddr(r *http.Request) string {
 // ---------------------------------------------------------------------------
 // Status
 
+// cloudPeers lists the linked peers with the cloud providers each announced
+// in its hello.
+func (m *Mesh) cloudPeers() []daemon.PeerCloud {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []daemon.PeerCloud
+	for _, p := range m.peers {
+		if p.link != nil && p.link.alive() && !p.link.bulk {
+			out = append(out, daemon.PeerCloud{Hub: p.name, Providers: p.link.cloud})
+		}
+	}
+	return out
+}
+
+// routeCloud is daemon.RouteCloud for this mesh: named, else this hub when
+// it has the provider, else the first linked peer by name that has it.
+func (m *Mesh) routeCloud(named, provider string) (string, *daemon.Error) {
+	return daemon.RouteCloud(named, m.cfg.Name, m.cfg.Cloud, m.cloudPeers(), provider)
+}
+
 // Status is GET /v1/hub's hub.
 func (m *Mesh) Status(ctx context.Context) daemon.HubStatus {
 	st := daemon.HubStatus{Name: m.cfg.Name, Version: m.cfg.Version, APIVersion: daemon.APIVersion,
@@ -1079,6 +1102,7 @@ func (m *Mesh) Status(ctx context.Context) daemon.HubStatus {
 			hp.RTTMs = float64(p.link.RTT().Microseconds()) / 1000
 			n := counts[p.name]
 			hp.Devices = &n
+			hp.Cloud = p.link.cloud
 		}
 		if !p.since.IsZero() {
 			hp.Since = p.since.UTC().Format(time.RFC3339)

@@ -10,6 +10,7 @@
 // gateway's 502/504.
 
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as http from 'node:http'
 import * as https from 'node:https'
 import * as tls from 'node:tls'
@@ -25,6 +26,18 @@ export const REQUEST_ID_HEADER = 'X-Maestro-Request-Id'
 
 /** Sent to a hub: the client names its output files and fetches them back from outputs/. */
 export const CLIENT_OUTPUTS_HEADER = 'X-Maestro-Client-Outputs'
+
+/** Header naming the caller's computer, so a daemon or hub marks devices on it `local`. */
+export const CLIENT_MACHINE_HEADER = 'X-Maestro-Client-Machine'
+
+/**
+ * This computer's name as maestro-d reports it: the host name, or
+ * MAESTRO_D_TEST_MACHINE when that is set (tests run several "machines"
+ * on one host).
+ */
+export function machineName(): string {
+  return process.env.MAESTRO_D_TEST_MACHINE || os.hostname()
+}
 
 /** Header carrying the lease of the device a request is for (a hub's leased devices). */
 export const LEASE_HEADER = 'X-Maestro-Lease'
@@ -253,6 +266,7 @@ export class Transport {
     const method = opts.method ?? 'GET'
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
+      [CLIENT_MACHINE_HEADER]: machineName(),
       Accept: opts.accept ?? 'application/json',
     }
     let payload: Buffer | undefined
@@ -295,6 +309,7 @@ export class Transport {
   putFile(path: string, file: string, offset: number, size: number, signal?: AbortSignal): Promise<RawResponse> {
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
+      [CLIENT_MACHINE_HEADER]: machineName(),
       Accept: 'application/json',
       'Content-Type': 'application/octet-stream',
       'Content-Length': size - offset,
@@ -365,6 +380,7 @@ export class Transport {
   async *sse<T>(path: string, signal?: AbortSignal): AsyncGenerator<T, void, undefined> {
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
+      [CLIENT_MACHINE_HEADER]: machineName(),
       Accept: 'text/event-stream',
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
@@ -430,6 +446,7 @@ export class Transport {
     const { signal } = opts
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
+      [CLIENT_MACHINE_HEADER]: machineName(),
       Accept: opts.accept ?? 'video/mp4',
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`

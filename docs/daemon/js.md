@@ -136,6 +136,39 @@ a listed name or UDID) is `POST /v1/devices`, and `deleteDevice()` is
 `DELETE /v1/devices/{id}?delete=true`. `e2e/deviceManagement.e2e.ts` runs
 the whole lifecycle on a real simulator and emulator.
 
+`md.devices(query)` filters the listing as `GET /v1/devices` does and every
+entry carries `location` (`local`, `mesh` or `cloud`) relative to this
+computer: `md.devices({location: ['local']})`, `md.devices({platform:
+'ios', osVersionMin: '17', available: true})`, `md.devices({location:
+'cloud', provider: 'devicefarm'})`. `md.catalog({location: 'cloud',
+platform: 'android', osVersionMin: '13', available: true})` lists the
+models a cloud provider can launch in `cloud`, and `hub` names the hub
+that answers. Every request sends `X-Maestro-Client-Machine` with
+`machineName()` (the host name). See [Cloud devices](cloud.md).
+
+`md.createDevice({cloud: {provider: 'devicefarm', platform: 'android', name:
+'Google Pixel 8', app: '/path/app.apk', appId: 'org.example', idleReleaseSec:
+1800}})` launches a cloud device on this computer's own daemon (direct mode)
+and resolves with it; `md.attach({device: dev.id})` drives it like any other
+device. `md.stopDevice(id)` resolves with `{deviceMinutes}` for a cloud
+device, and `md.deleteDevice(id)`'s device carries `deviceMinutes`.
+Through a hub, `md.lease({select: {location: 'cloud', platform: 'ios', name:
+'Apple iPhone 15'}, ttlSec: 1800, cloud: {idleReleaseSec: 900}, attach: {}})`
+launches a cloud device on the hub that holds the credentials and resolves
+with its leased handle; `dev.release()` resolves with `{deviceMinutes}`.
+`dev.installApp(file)` on a cloud device installs into the running session,
+which keeps its id; `dev.uninstallApp()` rejects with `USAGE` there.
+
+`md.devicefarm` reaches Device Farm without a device: `account()` (trial
+minutes and unmetered slots), `apps()` (the project's uploads),
+`sessions()` (its remote access sessions, each named with its device id)
+and `upload(file)` (an `.apk` or `.ipa` from the daemon's machine, reused
+when an identical one went up in the last 30 days; through a hub it rejects
+with `FORBIDDEN`). Each takes `{hub}` to name the hub that answers.
+`e2e/devicefarm.e2e.ts` runs the whole lifecycle on live Device Farm, in
+direct mode and through a hub, including an install into the running
+session.
+
 ## How the package is built
 
 `npm/maestro-d/` holds the library (TypeScript, no runtime

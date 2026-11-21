@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 )
 
 // daemonOpts is everything a daemon command reads from its flags.
@@ -73,10 +74,12 @@ type daemonOpts struct {
 	compact bool             // get hierarchy --compact
 	find    string           // get hierarchy --find
 	manage  deviceManageOpts // device catalog / create
-	pack    packOpts         // pack --flow, and a targeted run
-	hub     hubOpts          // hub start
-	lease   leaseOpts        // lease, and the lease a targeted command takes
-	stream  streamOpts       // stream
+	// dfCreds are the Device Farm credentials --orphans releases with.
+	dfCreds devicefarm.Options
+	pack    packOpts   // pack --flow, and a targeted run
+	hub     hubOpts    // hub start
+	lease   leaseOpts  // lease, and the lease a targeted command takes
+	stream  streamOpts // stream
 }
 
 // hubOpts are hub start's switches.
@@ -97,6 +100,12 @@ type hubOpts struct {
 	peerCA        string
 	// purge: hub service uninstall --purge.
 	purge bool
+	// devicefarm: the hub launches AWS Device Farm devices for leases,
+	// with dfOpts' credentials and project, at most cloudMax at once.
+	devicefarm  bool
+	dfOpts      devicefarm.Options
+	cloudMax    int
+	cloudMaxSet bool
 }
 
 // leaseOpts are lease's switches.
@@ -107,6 +116,9 @@ type leaseOpts struct {
 	noAttach bool
 	all      bool
 	sel      daemon.LeaseSelector
+	// idleRelease and appiumVersion tune a cloud lease's launch.
+	idleRelease   string
+	appiumVersion string
 }
 
 // packOpts are pack's flow-bundle switches.

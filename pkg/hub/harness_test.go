@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
@@ -181,6 +182,12 @@ func withDisco(d Discoverer) hubOpt {
 	return func(c *Config, _ *daemon.Config) { c.Discoverer, c.NoMDNS = d, false }
 }
 
+// withCloud gives the hub a devicefarm provider (cloud_test.go's stub) and
+// announces it in hello.
+func withCloud(max int) hubOpt {
+	return func(c *Config, d *daemon.Config) { c.Cloud, d.CloudMaxDevices = []string{"devicefarm"}, max }
+}
+
 func withShare(ids ...string) hubOpt {
 	return func(_ *Config, d *daemon.Config) { d.ShareDevices = ids }
 }
@@ -252,6 +259,11 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 			}
 			return out
 		},
+	}
+	if len(mcfg.Cloud) > 0 {
+		deps.Providers = map[string]func() (cloudprov.RemoteProvider, error){
+			"devicefarm": func() (cloudprov.RemoteProvider, error) { return stubProvider{}, nil },
+		}
 	}
 	h.srv = daemon.New(dcfg, deps)
 	go func() { h.done <- h.srv.Run(context.Background()) }()

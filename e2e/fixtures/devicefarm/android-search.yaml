@@ -1,0 +1,16 @@
+# Searches Wikipedia in WikipediaSample.apk (org.wikipedia.alpha) on a cloud
+# Android device. Android 14 and later first warn that the app was built for
+# an older Android; that dialog is dismissed when it shows.
+appId: org.wikipedia.alpha
+---
+- launchApp
+- runFlow:
+    when:
+      visible: "Check for update"
+    commands:
+      - tapOn: "OK"
+- tapOn:
+    id: "org.wikipedia.alpha:id/search_container"
+- inputText: "Appium"
+- assertVisible:
+    id: "org.wikipedia.alpha:id/page_list_item_title"

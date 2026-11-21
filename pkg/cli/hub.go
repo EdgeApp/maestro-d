@@ -16,12 +16,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
@@ -70,6 +73,16 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
 	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
+	boolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
+		func(o *daemonOpts, v bool) { o.hub.devicefarm = v }),
+	strFlag("devicefarm-credentials-file", "With --devicefarm: an AWS shared credentials file (a regular file, mode 0600 or stricter)", nil,
+		func(o *daemonOpts, v string) { o.hub.dfOpts.CredentialsFile = v }),
+	strFlag("devicefarm-profile", "With --devicefarm: the AWS profile to use", nil,
+		func(o *daemonOpts, v string) { o.hub.dfOpts.Profile = v }),
+	strFlag("devicefarm-project", "With --devicefarm: the Device Farm project, by name or ARN (default maestro-d)", nil,
+		func(o *daemonOpts, v string) { o.hub.dfOpts.Project = v }),
+	intFlag("cloud-max-devices", "With --devicefarm: how many cloud devices the hub holds at once, 0-20 (default 2, Device Farm's concurrency)", nil,
+		func(o *daemonOpts, v int) { o.hub.cloudMax, o.hub.cloudMaxSet = v, true }),
 	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import (repeatable); no other one is imported",
 		apply: func(o *daemonOpts, v string) error { o.PassEnv = append(o.PassEnv, v); return nil }},
 	boolFlag("foreground", "Run in the foreground instead of detaching (for launchd or another supervisor)", nil,
@@ -221,7 +234,45 @@ func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
 	if _, _, err = parseLeaseMax(o.hub.leaseMax); err != nil {
 		return "", "", err
 	}
+	if err = checkCloudFlags(o); err != nil {
+		return "", "", err
+	}
 	return token, peerToken, nil
+}
+
+// checkCloudFlags checks the Device Farm flags: they need --devicefarm,
+// the cap is 0-20, and a credentials file must be a regular file no one
+// else can read.
+func checkCloudFlags(o *daemonOpts) error {
+	df := o.hub.dfOpts
+	if !o.hub.devicefarm && (df.CredentialsFile != "" || df.Profile != "" || df.Project != "" || o.hub.cloudMaxSet) {
+		return daemon.Errorf(daemon.CodeUsage, "--devicefarm-credentials-file, --devicefarm-profile, --devicefarm-project and --cloud-max-devices need --devicefarm")
+	}
+	if !o.hub.cloudMaxSet {
+		o.hub.cloudMax = defaultCloudMaxDevices
+	}
+	if o.hub.cloudMax < 0 || o.hub.cloudMax > 20 {
+		return daemon.Errorf(daemon.CodeUsage, "--cloud-max-devices %d: give 0 to 20", o.hub.cloudMax)
+	}
+	if df.CredentialsFile == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(df.CredentialsFile)
+	if err != nil {
+		return daemon.WrapErr(daemon.CodeUsage, err)
+	}
+	o.hub.dfOpts.CredentialsFile = abs
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return daemon.Errorf(daemon.CodeUsage, "--devicefarm-credentials-file: %v", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return daemon.Errorf(daemon.CodeUsage, "--devicefarm-credentials-file %s is not a regular file", abs)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return daemon.Errorf(daemon.CodeUsage, "--devicefarm-credentials-file %s has mode %04o; make it 0600 (chmod 600) so no one else can read it", abs, perm)
+	}
+	return nil
 }
 
 // hubChildArgs is the command line of the detached hub: every flag but the
@@ -259,6 +310,21 @@ func hubChildArgs(o *daemonOpts) []string {
 	}
 	if o.hub.remoteShell {
 		args = append(args, "--allow-remote-shell")
+	}
+	if o.hub.devicefarm {
+		args = append(args, "--devicefarm")
+		if f := o.hub.dfOpts.CredentialsFile; f != "" {
+			args = append(args, "--devicefarm-credentials-file", f)
+		}
+		if p := o.hub.dfOpts.Profile; p != "" {
+			args = append(args, "--devicefarm-profile", p)
+		}
+		if p := o.hub.dfOpts.Project; p != "" {
+			args = append(args, "--devicefarm-project", p)
+		}
+		if o.hub.cloudMaxSet {
+			args = append(args, "--cloud-max-devices", strconv.Itoa(o.hub.cloudMax))
+		}
 	}
 	for _, n := range o.PassEnv {
 		args = append(args, "--pass-env", n)
@@ -379,9 +445,13 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	// Read this host's TVs before serving, so the hub knows them (and keeps
 	// them private unless --share-tv names them) from its first request.
 	cachedTVs()
+	deps, err := hubDeps(o)
+	if err != nil {
+		return err
+	}
 	mesh := newMesh(hub.Config{
 		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
-		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version,
+		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version, Cloud: providerNames(deps),
 		Logf: func(format string, args ...any) { logger.Info(format, args...) },
 	})
 	leaseMax, leaseMaxDevices, err := parseLeaseMax(o.hub.leaseMax)
@@ -409,7 +479,8 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		StartArgs:        redactArgs(os.Args[1:]),
 		Ready:            os.Stdout,
 		Mesh:             mesh,
-	}, daemonDeps())
+		CloudMaxDevices:  o.hub.cloudMax,
+	}, deps)
 	if err := srv.Run(context.Background()); err != nil {
 		logger.Error("hub exited: %v", err)
 		if de, ok := err.(*daemon.Error); ok {
@@ -418,6 +489,58 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return daemon.WrapErr(daemon.CodeDaemonUnavailable, err)
 	}
 	return nil
+}
+
+// hubDeps are a hub's dependencies: a plain daemon's, with a cloud
+// provider only when the hub was started with its credentials, so a hub
+// never spends its operator's ambient AWS credentials by accident.
+func hubDeps(o *daemonOpts) (daemon.Deps, error) {
+	deps := daemonDeps()
+	deps.Providers = nil
+	if !o.hub.devicefarm {
+		return deps, nil
+	}
+	p, err := hubDeviceFarm(o.hub.dfOpts)
+	if err != nil {
+		return deps, err
+	}
+	deps.Providers = map[string]func() (cloudprov.RemoteProvider, error){"devicefarm": func() (cloudprov.RemoteProvider, error) { return p, nil }}
+	return deps, nil
+}
+
+// hubDeviceFarm is a hub's Device Farm provider, checked at start: one
+// GetAccountSettings call. A failure stops the hub with the error, redacted.
+func hubDeviceFarm(opts devicefarm.Options) (*devicefarm.Provider, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p, err := devicefarm.NewProvider(ctx, opts)
+	if err != nil {
+		return nil, daemon.Errorf(daemon.CodeUsage, "--devicefarm: %s", devicefarm.Redact(err.Error()))
+	}
+	acct, err := p.Account(ctx)
+	if err != nil {
+		return nil, daemon.Errorf(daemon.CodeUsage, "--devicefarm: %s", p.Redact(err.Error()))
+	}
+	left := "?"
+	if tm, ok := acct["trialMinutes"].(map[string]any); ok {
+		left = fmt.Sprint(tm["remaining"])
+	}
+	logger.Info("cloud: devicefarm ready (trial minutes left %s)", left)
+	return p, nil
+}
+
+// defaultCloudMaxDevices is how many cloud devices a hub holds at once:
+// Device Farm's default concurrency per account.
+const defaultCloudMaxDevices = 2
+
+// providerNames lists deps' cloud providers, sorted, for the hub's hello.
+func providerNames(deps daemon.Deps) []string {
+	var out []string
+	for n := range deps.Providers {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // hubClient connects hub status to its hub: --target-hub, else the local

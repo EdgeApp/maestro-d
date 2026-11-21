@@ -18,11 +18,19 @@ import { Transport } from './transport.js'
 import type {
   AttachOptions,
   BootOptions,
+  CatalogQuery,
   CatalogResult,
+  CloudSpec,
+  ProviderAccount,
+  ProviderApps,
+  ProviderSessions,
+  ProviderUpload,
   CreateDeviceOptions,
   DaemonEvent,
   DaemonInfo,
   DeviceInfo,
+  DeviceMinutes,
+  DeviceQuery,
   Envelope,
   HubStatus,
   Lease,
@@ -77,8 +85,14 @@ export interface DeviceAttachOptions extends AttachOptions {
 export interface LeaseOptions {
   /** The device to lease, by id (normalized through the hub; an id the hub does not list rejects with DEVICE_NOT_FOUND). */
   device?: string
-  /** Or the first free device that matches. */
+  /**
+   * Or the first free device that matches. With `location: 'cloud'` the hub
+   * that holds the provider's credentials launches a cloud device for the
+   * lease, and ends it when the lease ends.
+   */
   select?: LeaseSelector
+  /** A cloud lease's launch settings: idle release, Appium version, caps, app id. */
+  cloud?: Pick<CloudSpec, 'idleReleaseSec' | 'appiumVersion' | 'caps' | 'appId' | 'bootTimeoutSec'>
   /**
    * The lease's window in seconds (default the hub's: 8 hours, or the
    * device's maximum when that is shorter). It is fixed: using the device
@@ -118,6 +132,13 @@ export class MaestroD {
   readonly leaseKey: string
   /** The handles holding the leases this process took, by device id; `close()` releases them. */
   private readonly leased = new Map<string, MaestroDevice>()
+  /**
+   * AWS Device Farm itself, without a device: the account, the uploaded
+   * apps, an upload from the daemon's machine (a local caller only) and the
+   * remote access sessions. Through a hub they reach the hub that holds the
+   * credentials; `hub` names one.
+   */
+  readonly devicefarm: DeviceFarmUtilities
 
   private constructor(
     name: string,
@@ -131,6 +152,7 @@ export class MaestroD {
     this.transport = transport
     this.started = started
     this.leaseKey = leaseKey
+    this.devicefarm = new DeviceFarmUtilities(transport, () => this.signal)
     if (info) this.info = info
     if (signal) this.signal = signal
     // A lease the hub reports expired leaves leases.json too.
@@ -242,6 +264,7 @@ export class MaestroD {
     const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
+    if (opts.cloud) body.cloud = opts.cloud
     const cfg = opts.attach === false ? undefined : { ...(opts.attach ?? {}) }
     // Files to upload need the lease first (a hub's blob routes do), so
     // such an attach follows the lease; any other goes in the same call.
@@ -337,10 +360,16 @@ export class MaestroD {
   // -------------------------------------------------------------------------
   // Devices
 
-  /** Connected devices, booted simulators/emulators and attached sessions. */
-  async devices(opts: { platform?: string; signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
-    const path = '/v1/devices' + (opts.platform ? `?platform=${encodeURIComponent(opts.platform)}` : '')
-    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(path, { signal: this.sig(opts.signal) })
+  /**
+   * Connected devices, booted simulators/emulators, attached sessions and
+   * cloud devices, each with its `location` relative to this computer:
+   * `local`, `mesh` or `cloud`. The options filter the list.
+   */
+  async devices(opts: DeviceQuery & { signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
+    const { signal, ...q } = opts
+    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(withQuery('/v1/devices', q), {
+      signal: this.sig(signal),
+    })
     return res.devices
   }
 
@@ -365,14 +394,13 @@ export class MaestroD {
   /**
    * What `createDevice()` can make: iOS runtimes and device types, Android
    * system images and hardware profiles. `available` adds the Android
-   * images sdkmanager can download.
+   * images sdkmanager can download. `location: 'cloud'` lists the models
+   * the cloud providers can launch instead (in `cloud`), filtered by the
+   * other options; `hub` names the hub that answers.
    */
-  async catalog(opts: { platform?: string; available?: boolean; signal?: AbortSignal } = {}): Promise<CatalogResult> {
-    const q = new URLSearchParams()
-    if (opts.platform) q.set('platform', opts.platform)
-    if (opts.available) q.set('available', 'true')
-    const qs = q.toString()
-    return this.transport.json<CatalogResult>('/v1/catalog' + (qs ? `?${qs}` : ''), { signal: this.sig(opts.signal) })
+  async catalog(opts: CatalogQuery & { signal?: AbortSignal } = {}): Promise<CatalogResult> {
+    const { signal, ...q } = opts
+    return this.transport.json<CatalogResult>(withQuery('/v1/catalog', q), { signal: this.sig(signal) })
   }
 
   /**
@@ -380,8 +408,27 @@ export class MaestroD {
    * recorded as created by maestro-d, so `deleteDevice()` accepts it.
    * Resolves with the booted device, or the shut-down one (an AVD as
    * `avd:<name>`).
+   *
+   * With `cloud` it launches a cloud device instead (direct mode: this
+   * computer's own daemon, with its own AWS credentials), which is released
+   * after `cloud.idleReleaseSec` without a request.
    */
   async createDevice(opts: CreateDeviceOptions & { signal?: AbortSignal }): Promise<DeviceInfo> {
+    if (opts.cloud) {
+      // A cloud device: direct mode, on this computer's own daemon.
+      if (!opts.cloud.platform) throw new TypeError('createDevice({cloud}) needs cloud.platform')
+      // App files are read by the daemon, whose working directory is not
+      // this process's: send them absolute (an ARN or blob ref as is).
+      const cloud = { ...opts.cloud }
+      if (cloud.app) cloud.app = hostPath(cloud.app)
+      if (cloud.auxiliaryApps) cloud.auxiliaryApps = cloud.auxiliaryApps.map(hostPath)
+      const res = await this.transport.json<Envelope & { device: DeviceInfo }>('/v1/devices', {
+        method: 'POST',
+        body: { platform: cloud.platform, create: { cloud } },
+        signal: this.sig(opts.signal),
+      })
+      return res.device
+    }
     if (!opts.platform || !opts.name) throw new TypeError('createDevice() needs platform and name')
     const { signal, platform, name, boot, bootTimeout, ...create } = opts
     const body: Record<string, unknown> = { platform, name, create: { name, ...create } }
@@ -427,14 +474,17 @@ export class MaestroD {
 
   /**
    * Detach (if attached) and shut a device down. Devices this daemon did
-   * not boot are refused with DEVICE_EXTERNAL unless `force`.
+   * not boot are refused with DEVICE_EXTERNAL unless `force`. A cloud
+   * device's session is released, and its device minutes returned.
    */
-  async stopDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<void> {
-    await this.transport.json<Envelope>(`/v1/devices/${encodeURIComponent(id)}`, {
+  async stopDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<{ deviceMinutes?: DeviceMinutes }> {
+    const res = await this.transport.json<Envelope & { device?: DeviceInfo }>(`/v1/devices/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       body: { force: opts.force === true },
       signal: this.sig(opts.signal),
     })
+    // A cloud device's answer is the released device, with its minutes.
+    return res.device?.deviceMinutes ? { deviceMinutes: res.device.deviceMinutes } : {}
   }
 
   /**
@@ -511,6 +561,68 @@ export class MaestroD {
         : `several devices are attached; pass {device: '<id>'}: ${list}`,
       { details: { attached: attached.map((d) => d.id) } },
     )
+  }
+}
+
+/**
+ * Resolves a file the daemon reads against this process's directory; an
+ * ARN or a `blob:` ref is passed as is.
+ */
+function hostPath(p: string): string {
+  return p.startsWith('arn:') || p.startsWith('blob:') ? p : path.resolve(p)
+}
+
+/**
+ * Appends a filter object to path as a query string: arrays as comma
+ * lists, true as "true", false and empty values left out.
+ */
+export function withQuery(path: string, q: Record<string, unknown>): string {
+  const p = new URLSearchParams()
+  for (const [k, v] of Object.entries(q)) {
+    if (v === undefined || v === null || v === false || v === '') continue
+    p.set(k, Array.isArray(v) ? v.join(',') : String(v))
+  }
+  const qs = p.toString()
+  return qs ? `${path}?${qs}` : path
+}
+
+/** `md.devicefarm`: AWS Device Farm without a device. */
+export class DeviceFarmUtilities {
+  constructor(
+    private readonly transport: Transport,
+    private readonly signal: () => AbortSignal | undefined,
+  ) {}
+
+  private path(what: string, hub?: string): string {
+    return withQuery(`/v1/providers/devicefarm/${what}`, { hub })
+  }
+
+  /** Trial minutes and unmetered devices (`GET /v1/providers/devicefarm/account`). */
+  async account(opts: { hub?: string } = {}): Promise<ProviderAccount> {
+    return this.transport.json<ProviderAccount>(this.path('account', opts.hub), { signal: this.signal() })
+  }
+
+  /** The project's uploaded apps. */
+  async apps(opts: { hub?: string } = {}): Promise<ProviderApps> {
+    return this.transport.json<ProviderApps>(this.path('apps', opts.hub), { signal: this.signal() })
+  }
+
+  /**
+   * Upload an .apk or .ipa from the daemon's machine, reusing an identical
+   * upload from the last 30 days. A remote caller is refused: install an app
+   * on a leased cloud device instead.
+   */
+  async upload(file: string, opts: { hub?: string } = {}): Promise<ProviderUpload> {
+    return this.transport.json<ProviderUpload>(this.path('apps', opts.hub), {
+      method: 'POST',
+      body: { app: path.resolve(file) },
+      signal: this.signal(),
+    })
+  }
+
+  /** The project's remote access sessions, each named with its device id. */
+  async sessions(opts: { hub?: string } = {}): Promise<ProviderSessions> {
+    return this.transport.json<ProviderSessions>(this.path('sessions', opts.hub), { signal: this.signal() })
   }
 }
 

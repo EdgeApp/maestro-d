@@ -47,8 +47,9 @@ type Client struct {
 	leases  map[string]string
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
-	// forgotten first.
-	OnLeaseExpired func(device, lease string)
+	// forgotten first. hint is the daemon's details.hint, the way to a new
+	// lease when the device went away with the old one ("" otherwise).
+	OnLeaseExpired func(device, lease, hint string)
 	// Name is the daemon name this client was dialled for (informational).
 	Name string
 	// Info is daemon.json when the client was created from it.
@@ -179,7 +180,8 @@ func (c *Client) noteLeaseExpired(req *http.Request, resp *http.Response) {
 		return
 	}
 	// A HEAD's answer has no body: its code is in HeaderErrorCode.
-	if errorFromResponse(resp.StatusCode, resp.Header, data).Code != CodeLeaseExpired {
+	e := errorFromResponse(resp.StatusCode, resp.Header, data)
+	if e.Code != CodeLeaseExpired {
 		return
 	}
 	device := pathDevice(req.URL.Path)
@@ -187,7 +189,8 @@ func (c *Client) noteLeaseExpired(req *http.Request, resp *http.Response) {
 		c.ClearLease(device)
 	}
 	if c.OnLeaseExpired != nil {
-		c.OnLeaseExpired(device, lease)
+		hint, _ := e.Details["hint"].(string)
+		c.OnLeaseExpired(device, lease, hint)
 	}
 }
 
@@ -278,6 +281,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		return nil, WrapErr(CodeUsage, err)
 	}
 	req.Header.Set("X-Maestro-Api-Version", APIVersion)
+	req.Header.Set(HeaderClientMachine, MachineName())
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -461,15 +465,24 @@ func (c *Client) Shutdown(ctx context.Context) error {
 
 // Devices lists devices; platform "" means all.
 func (c *Client) Devices(ctx context.Context, platform string) ([]DeviceInfo, error) {
-	path := "/v1/devices"
-	if platform != "" {
-		path += "?platform=" + url.QueryEscape(platform)
+	return c.DevicesQuery(ctx, DeviceQuery{Platform: platform})
+}
+
+// DevicesQuery lists the devices that pass q, each with its location.
+func (c *Client) DevicesQuery(ctx context.Context, q DeviceQuery) ([]DeviceInfo, error) {
+	res, err := c.DeviceListQuery(ctx, q)
+	if err != nil {
+		return nil, err
 	}
-	var out DevicesResult
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
-		return nil, e
+	return res.Devices, nil
+}
+
+// withQuery appends v to path as a query string.
+func withQuery(path string, v url.Values) string {
+	if len(v) > 0 {
+		return path + "?" + v.Encode()
 	}
-	return out.Devices, nil
+	return path
 }
 
 // Device returns one device.
@@ -492,32 +505,85 @@ func (c *Client) StartDevice(ctx context.Context, req BootRequest) (*DeviceInfo,
 
 // StopDevice detaches (if attached) and shuts a device down.
 func (c *Client) StopDevice(ctx context.Context, id string, force bool) error {
-	var out Envelope
+	_, err := c.StopDeviceResult(ctx, id, force)
+	return err
+}
+
+// StopDeviceResult is StopDevice with the answer: for a cloud device the
+// released device, carrying the minutes its session used; for any other
+// device an empty Device.
+func (c *Client) StopDeviceResult(ctx context.Context, id string, force bool) (*DeviceResult, error) {
+	var out DeviceResult
 	if e := c.call(ctx, http.MethodDelete, devPath(id, ""), StopDeviceRequest{Force: force}, &out); e != nil {
-		return e
+		return nil, e
 	}
-	return nil
+	return &out, nil
+}
+
+// providerPath is /v1/providers/{provider}/{what}, with ?hub= when hub is
+// set.
+func providerPath(provider, what, hub string) string {
+	path := "/v1/providers/" + url.PathEscape(provider) + "/" + what
+	if hub != "" {
+		path += "?hub=" + url.QueryEscape(hub)
+	}
+	return path
+}
+
+// ProviderAccount reads a cloud provider's account (trial minutes and the
+// like).
+func (c *Client) ProviderAccount(ctx context.Context, provider, hub string) (*ProviderAccountResult, error) {
+	var out ProviderAccountResult
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "account", hub), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ProviderApps lists a cloud provider's uploaded apps.
+func (c *Client) ProviderApps(ctx context.Context, provider, hub string) (*ProviderAppsResult, error) {
+	var out ProviderAppsResult
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "apps", hub), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ProviderUpload uploads an app from the daemon's machine (a local caller
+// only), reusing an identical earlier upload.
+func (c *Client) ProviderUpload(ctx context.Context, provider, hub, app string) (*ProviderUploadResult, error) {
+	var out ProviderUploadResult
+	if e := c.call(ctx, http.MethodPost, providerPath(provider, "apps", hub), ProviderUploadRequest{App: app}, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ProviderSessions lists a cloud provider's sessions
+// (GET /v1/providers/{provider}/sessions); on a hub, hub names the hub that
+// answers.
+func (c *Client) ProviderSessions(ctx context.Context, provider, hub string) (*ProviderSessionsResult, error) {
+	var out ProviderSessionsResult
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "sessions", hub), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
 }
 
 // Catalog lists what `device create` can make; platform "" means both.
 // On a hub, hub names the hub whose machine is asked ("" for this one).
 func (c *Client) Catalog(ctx context.Context, platform string, available bool, hub string) (*CatalogResult, error) {
-	q := url.Values{}
-	if hub != "" {
-		q.Set("hub", hub)
-	}
-	if platform != "" {
-		q.Set("platform", platform)
-	}
-	if available {
-		q.Set("available", "true")
-	}
-	path := "/v1/catalog"
-	if len(q) > 0 {
-		path += "?" + q.Encode()
-	}
+	return c.CatalogQuery(ctx, CatalogQuery{Platform: platform, Available: available, Hub: hub})
+}
+
+// CatalogQuery filters GET /v1/catalog. Location "cloud" adds the cloud
+// providers' models; Hub names the hub that answers.
+type CatalogQuery = DeviceQuery
+
+// CatalogQuery lists what can be created or launched, filtered by q.
+func (c *Client) CatalogQuery(ctx context.Context, q CatalogQuery) (*CatalogResult, error) {
 	var out CatalogResult
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodGet, withQuery("/v1/catalog", q.Values()), nil, &out); e != nil {
 		return nil, e
 	}
 	return &out, nil
@@ -902,6 +968,7 @@ func (c *Client) putBlob(ctx context.Context, device, hex, path string, off, siz
 	}
 	req.ContentLength = size - off
 	req.Header.Set("X-Maestro-Api-Version", APIVersion)
+	req.Header.Set(HeaderClientMachine, MachineName())
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if size > 0 {
