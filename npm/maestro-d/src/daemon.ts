@@ -24,6 +24,7 @@ import type {
   DaemonEvent,
   DaemonInfo,
   DeviceInfo,
+  DeviceMinutes,
   DeviceQuery,
   Envelope,
   HubStatus,
@@ -387,8 +388,27 @@ export class MaestroD {
    * recorded as created by maestro-d, so `deleteDevice()` accepts it.
    * Resolves with the booted device, or the shut-down one (an AVD as
    * `avd:<name>`).
+   *
+   * With `cloud` it launches a cloud device instead (direct mode: this
+   * computer's own daemon, with its own AWS credentials), which is released
+   * after `cloud.idleReleaseSec` without a request.
    */
   async createDevice(opts: CreateDeviceOptions & { signal?: AbortSignal }): Promise<DeviceInfo> {
+    if (opts.cloud) {
+      // A cloud device: direct mode, on this computer's own daemon.
+      if (!opts.cloud.platform) throw new TypeError('createDevice({cloud}) needs cloud.platform')
+      // App files are read by the daemon, whose working directory is not
+      // this process's: send them absolute (an ARN or blob ref as is).
+      const cloud = { ...opts.cloud }
+      if (cloud.app) cloud.app = hostPath(cloud.app)
+      if (cloud.auxiliaryApps) cloud.auxiliaryApps = cloud.auxiliaryApps.map(hostPath)
+      const res = await this.transport.json<Envelope & { device: DeviceInfo }>('/v1/devices', {
+        method: 'POST',
+        body: { platform: cloud.platform, create: { cloud } },
+        signal: this.sig(opts.signal),
+      })
+      return res.device
+    }
     if (!opts.platform || !opts.name) throw new TypeError('createDevice() needs platform and name')
     const { signal, platform, name, boot, bootTimeout, ...create } = opts
     const body: Record<string, unknown> = { platform, name, create: { name, ...create } }
@@ -434,14 +454,17 @@ export class MaestroD {
 
   /**
    * Detach (if attached) and shut a device down. Devices this daemon did
-   * not boot are refused with DEVICE_EXTERNAL unless `force`.
+   * not boot are refused with DEVICE_EXTERNAL unless `force`. A cloud
+   * device's session is released, and its device minutes returned.
    */
-  async stopDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<void> {
-    await this.transport.json<Envelope>(`/v1/devices/${encodeURIComponent(id)}`, {
+  async stopDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<{ deviceMinutes?: DeviceMinutes }> {
+    const res = await this.transport.json<Envelope & { device?: DeviceInfo }>(`/v1/devices/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       body: { force: opts.force === true },
       signal: this.sig(opts.signal),
     })
+    // A cloud device's answer is the released device, with its minutes.
+    return res.device?.deviceMinutes ? { deviceMinutes: res.device.deviceMinutes } : {}
   }
 
   /**
@@ -519,6 +542,14 @@ export class MaestroD {
       { details: { attached: attached.map((d) => d.id) } },
     )
   }
+}
+
+/**
+ * Resolves a file the daemon reads against this process's directory; an
+ * ARN or a `blob:` ref is passed as is.
+ */
+function hostPath(p: string): string {
+  return p.startsWith('arn:') || p.startsWith('blob:') ? p : path.resolve(p)
 }
 
 /**

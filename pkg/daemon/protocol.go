@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/report"
@@ -283,6 +284,9 @@ type StepResult struct {
 	// paths under the report directory (outputs/<path>), fetched with
 	// GET …/artifacts/{path}. Absent for local calls.
 	Outputs []string `json:"outputs,omitempty"`
+	// Warnings are notes the caller should see, such as a cloud session
+	// that ends soon.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ResultFromOutcome converts an executor outcome into the wire result.
@@ -467,6 +471,27 @@ type DeviceInfo struct {
 	// Provider names the cloud provider that holds the device
 	// ("devicefarm"); empty for every other device.
 	Provider string `json:"provider,omitempty"`
+
+	// The rest describe a cloud device (remote.go).
+	// ProviderRef is the provider's session reference (a Device Farm
+	// session ARN); DashboardURL its page in the provider's console.
+	ProviderRef  string `json:"providerRef,omitempty"`
+	DashboardURL string `json:"dashboardUrl,omitempty"`
+	// ExpiresAt is when the provider ends the session (RFC 3339).
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	// IdleReleaseSec is how long the device may go without a request
+	// before it is released; IdleReleaseAt when that happens if none comes.
+	IdleReleaseSec int    `json:"idleReleaseSec,omitempty"`
+	IdleReleaseAt  string `json:"idleReleaseAt,omitempty"`
+	// EndedReason says why a cloud device's session ended (state ended).
+	EndedReason string `json:"endedReason,omitempty"`
+	// DeviceMinutes is the device time a released session used.
+	DeviceMinutes *cloudprov.DeviceMinutes `json:"deviceMinutes,omitempty"`
+	FormFactor    string                   `json:"formFactor,omitempty"`
+	Manufacturer  string                   `json:"manufacturer,omitempty"`
+	// AppiumVersion is the Appium major version a cloud device's provider
+	// runs ("2" or "3").
+	AppiumVersion string `json:"appiumVersion,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -545,6 +570,9 @@ type CreateSpec struct {
 	DataSize       string `json:"dataSize,omitempty"`
 	InstallImage   bool   `json:"installImage,omitempty"`
 	AcceptLicenses bool   `json:"acceptLicenses,omitempty"`
+	// Cloud, instead of the fields above, launches a cloud device
+	// (direct mode: a plain daemon and a local caller only).
+	Cloud *cloudprov.CloudSpec `json:"cloud,omitempty"`
 }
 
 // StopDeviceRequest is the body of DELETE /v1/devices/{id}.
@@ -679,4 +707,7 @@ type Event struct {
 	DurationMs int64  `json:"durationMs,omitempty"`
 	Error      string `json:"error,omitempty"`
 	Message    string `json:"message,omitempty"`
+	// DeviceMinutes, on device.released, is the device time the cloud
+	// session used.
+	DeviceMinutes *cloudprov.DeviceMinutes `json:"deviceMinutes,omitempty"`
 }

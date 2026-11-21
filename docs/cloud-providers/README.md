@@ -7,6 +7,13 @@ maestro-runner automatically detects cloud Appium providers from the `--appium-u
 - [TestingBot](testingbot.md)
 - [Sauce Labs](saucelabs.md)
 
+## Device providers
+
+maestro-d also launches and holds real phones in a device cloud, and drives
+them like local devices: see [docs/daemon/cloud.md](../daemon/cloud.md).
+
+- [AWS Device Farm](devicefarm.md)
+
 ## How it works
 
 1. **Detect** — after `--appium-url` is parsed, each registered provider checks if the URL matches (e.g., contains "saucelabs")

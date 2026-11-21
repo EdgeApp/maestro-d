@@ -287,7 +287,14 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"FAKEPIXEL0002"}
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
-`device.stopped`, `device.capture` (a device with screen capture: `message`
+`device.stopped`, `device.created` and `device.deleted` (`message` the
+name), `app.installed` and `app.uninstalled` (`message` the app id),
+`device.allocating` (a cloud launch: `message` is the provider session's
+state, such as `PENDING_CONCURRENCY`), `device.released` (a cloud device's
+session ended: `message` is the reason — `idle`, `session-limit`,
+`deleted`, `stopped`, `daemon-exit`, `lease-end` or `orphaned` — and
+`deviceMinutes` the time it used), `device.ended` (the provider ended a
+cloud session: `message` the reason), `device.capture` (a device with screen capture: `message`
 is `capturing`, `unavailable` or `lost`, `error` the reason; an on-demand
 capture stopping when nobody watches is not published), `daemon.shutdown`,
 and on a hub `lease.granted`,
@@ -479,11 +486,71 @@ image without `installImage`, and a field of the other platform fail
 `USAGE` before anything is created. Without `boot: false` the answer is the
 booted device; with it, the shut-down one (an AVD as `avd:<name>`).
 
+**A cloud device.** `create.cloud` launches a real phone on a cloud
+provider instead (direct mode: see [Cloud devices](cloud.md)). Only a plain
+daemon launches one, for a local caller (unix socket or loopback), with its
+own credentials: a remote caller gets `FORBIDDEN`, and a hub answers every
+caller `FORBIDDEN` with the hint to lease one (`lease --location cloud`).
+
+```sh
+curl -s -H "$H" $D/v1/devices -d '{"platform":"android","create":{"cloud":{"provider":"devicefarm",
+  "name":"Google Pixel 8","osVersionMin":"14","app":"/path/WikipediaSample.apk","appId":"org.wikipedia.alpha","idleReleaseSec":1800}}}'
+```
+
+| `create.cloud` field | |
+| --- | --- |
+| `provider` | `devicefarm` (the default) |
+| `platform` | `android` or `ios`; the request's `platform` fills it in when it is empty, and the two may not differ |
+| `name` | the model: an exact name, a catalog id (`df:android:google-pixel-8:14`) or a case-insensitive regular expression; empty takes the first available model of the platform and OS range |
+| `osVersion`, `osVersionMin`, `osVersionMax` | the exact OS version, or the range (as in the filters) |
+| `app`, `auxiliaryApps` | an `.apk` or `.ipa` installed when the session starts, and at most 3 more: a path on the daemon's host, a `blob:` ref, or an upload ARN. A file is uploaded once, under its content hash, and reused for 30 days |
+| `appId` | the app's id, the default for attach |
+| `appiumVersion` | `2` or `3`; the default is 3 on iOS 27 and later, else 2 |
+| `caps` | capabilities merged into the WebDriver session's; never `appium:udid`, `platformVersion`, `app` or `deviceName` |
+| `idleReleaseSec` | how long the device may go without a request before it is released: default 600, 60–9000 |
+| `bootTimeoutSec` | how long to wait for the provider's session (default 900) |
+
+The launch picks up to three models (by availability, then OS version,
+newest first) and moves past one that stays busy for two minutes; it waits
+up to `bootTimeoutSec` while the account's concurrency is full, then fails
+`BUSY`. No matching model is `DEVICE_NOT_FOUND`, naming the closest ones;
+missing credentials or a denied AWS action is `USAGE`. Every session it
+creates is recorded before it waits, and every session it gives up on is
+stopped, also when the client disconnects. The answer is the device:
+
+```json
+{ "ok": true, "exitCode": 0,
+  "device": { "id": "df-3f2a9c1e", "platform": "android", "kind": "cloud", "name": "Google Pixel 8", "model": "Google Pixel 8", "osVersion": "14",
+    "state": "allocated", "ready": true, "provider": "devicefarm", "location": "cloud", "machine": "lab-mac",
+    "providerRef": "arn:aws:devicefarm:us-west-2:…:session:…", "dashboardUrl": "https://us-west-2.console.aws.amazon.com/devicefarm/…",
+    "expiresAt": "2026-11-21T03:15:24Z", "idleReleaseSec": 1800, "idleReleaseAt": "2026-11-21T01:15:24Z",
+    "formFactor": "phone", "manufacturer": "Google", "appiumVersion": "2", "bootedBy": "daemon", "createdBy": "maestro-d" } }
+```
+
+`appiumVersion` is the Appium major version the provider runs for it: 3
+for iOS 27 and later, else 2, unless `cloud.appiumVersion` asked for one.
+Attach it (`POST /v1/devices/{id}/attach` with no driver, URL or
+capabilities: the daemon holds its Appium driver) and drive it like any
+other device. Any request on its routes keeps it; after `idleReleaseSec`
+without one it is released (`device.released`, `idle`), and 30 s before
+the provider's 150-minute cap (`expiresAt`) it is released too
+(`session-limit`); inside the last 10 minutes every step result carries
+`warnings: ["cloud session ends at …"]`. A session the provider ends turns
+the device `state: ended` with `endedReason`, and later requests answer
+`DEVICE_ERROR` with the reason until it is deleted.
+
 ### `DELETE /v1/devices/{id}`
 
 Detaches if attached, then shuts the simulator/emulator down. Refuses with
 `DEVICE_EXTERNAL` unless the daemon booted it; body `{"force": true}` or
-`?force=true` overrides. Answers `{"ok": true}`.
+`?force=true` overrides. Answers `{"ok": true}`. A cloud device is released
+instead, with or without `?delete=true`: its session ends, and the answer
+is `{"ok": true, "device": {…}}` with `deviceMinutes` (`{metered, total}`;
+`estimated: true` when the provider has not settled its figure yet: then
+it counts from the session's creation to the release, and the billed
+figure is higher, because Device Farm also bills the cleanup after the
+release, ten minutes or more for an iPhone — `GET /v1/providers/devicefarm/sessions` shows the
+billed figure afterwards).
 
 With `?delete=true` (or body `{"delete": true}`) it deletes the simulator
 or AVD instead: `{id}` may be a UDID, a simulator name, `avd:<name>`, an
@@ -552,6 +619,19 @@ Closes the driver; the device keeps running. `{"ok": true}`, or
 
 One device, same shape as the list entries. `DEVICE_NOT_FOUND` if the host
 cannot see it and the daemon does not hold it.
+
+## Cloud providers
+
+### `GET /v1/providers/{provider}/sessions`
+
+The provider's sessions, newest first: for Device Farm, the remote access
+sessions of its project, each named with the device id maestro-d gave it.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "sessions": [ { "name": "df-3f2a9c1e", "ref": "arn:aws:devicefarm:…", "status": "COMPLETED", "result": "STOPPED",
+                  "model": "Google Pixel 8", "created": "2026-11-21T00:44:28Z", "deviceMinutes": { "metered": 3, "total": 3 } } ] }
+```
 
 ## The hub mesh
 

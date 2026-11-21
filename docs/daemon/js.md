@@ -146,6 +146,14 @@ models a cloud provider can launch in `cloud`, and `hub` names the hub
 that answers. Every request sends `X-Maestro-Client-Machine` with
 `machineName()` (the host name). See [Cloud devices](cloud.md).
 
+`md.createDevice({cloud: {provider: 'devicefarm', platform: 'android', name:
+'Google Pixel 8', app: '/path/app.apk', appId: 'org.example', idleReleaseSec:
+1800}})` launches a cloud device on this computer's own daemon (direct mode)
+and resolves with it; `md.attach({device: dev.id})` drives it like any other
+device. `md.stopDevice(id)` resolves with `{deviceMinutes}` for a cloud
+device, and `md.deleteDevice(id)`'s device carries `deviceMinutes`.
+`e2e/devicefarm.e2e.ts` runs the whole lifecycle on live Device Farm.
+
 ## How the package is built
 
 `npm/maestro-d/` holds the library (TypeScript, no runtime

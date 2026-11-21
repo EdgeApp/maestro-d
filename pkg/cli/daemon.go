@@ -459,7 +459,7 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		if d.OSVersion != "" {
 			name += " " + d.OSVersion
 		}
-		if d.BootedBy == daemon.BootedByDaemon {
+		if d.BootedBy == daemon.BootedByDaemon && d.Provider == "" {
 			name += " [booted by daemon]"
 		}
 		if leases {
@@ -485,7 +485,7 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 func daemonCommands() []*cli.Command {
 	return append([]*cli.Command{
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
-		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
+		daemonDeviceCommand, devicefarmCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
 		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
 		gcCommand,
@@ -848,7 +848,11 @@ var (
 	})
 	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
 		boolFlag("force", "Shut down even if the daemon did not boot it", nil, func(o *daemonOpts, v bool) { o.force = v }),
-		boolFlag("orphans", "Shut down devices left behind by dead daemons", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
+		boolFlag("orphans", "Shut down devices left behind by dead daemons, and release their cloud sessions", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
+		strFlag("devicefarm-credentials-file", "With --orphans: release Device Farm sessions with this AWS shared credentials file", nil,
+			func(o *daemonOpts, v string) { o.dfCreds.CredentialsFile = v }),
+		strFlag("devicefarm-profile", "With --orphans: release Device Farm sessions with this AWS profile", nil,
+			func(o *daemonOpts, v string) { o.dfCreds.Profile = v }),
 	})
 )
 
@@ -933,21 +937,7 @@ daemons that are no longer alive.`, deviceStopFlags),
 			SkipFlagParsing: true,
 			Action: withArgs(deviceStopFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 				if o.orphans {
-					stopped, err := daemon.StopOrphans()
-					if err != nil {
-						return daemon.WrapErr(daemon.CodeDeviceError, err)
-					}
-					if o.JSON {
-						if stopped == nil {
-							stopped = []string{}
-						}
-						printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
-					} else if len(stopped) == 0 {
-						fmt.Println("No orphaned devices.")
-					} else {
-						fmt.Printf("stopped: %s\n", strings.Join(stopped, ", "))
-					}
-					return nil
+					return runStopOrphans(ctx, o)
 				}
 				if len(args) != 1 {
 					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device stop <device-id> [--force] | --orphans")
@@ -956,13 +946,19 @@ daemons that are no longer alive.`, deviceStopFlags),
 				if err != nil {
 					return err
 				}
-				if err := client.StopDevice(ctx, args[0], o.force); err != nil {
+				res, err := client.StopDeviceResult(ctx, args[0], o.force)
+				if err != nil {
 					return err
 				}
 				if o.JSON {
-					printJSON(os.Stdout, daemon.Envelope{OK: true})
+					if res.Device.ID == "" {
+						printJSON(os.Stdout, daemon.Envelope{OK: true})
+					} else {
+						res.Envelope = daemon.Envelope{OK: true}
+						printJSON(os.Stdout, res)
+					}
 				} else {
-					fmt.Printf("%s stopped\n", args[0])
+					fmt.Printf("%s stopped%s\n", args[0], minutesNote(res.Device.DeviceMinutes))
 				}
 				return nil
 			}),

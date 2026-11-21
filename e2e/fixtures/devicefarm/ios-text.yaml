@@ -1,0 +1,13 @@
+# Types into the Text screen of BStackSampleApp.ipa
+# (com.browserstack.Sample-iOS) on a cloud iPhone and reads the echo.
+appId: com.browserstack.Sample-iOS
+---
+- launchApp
+- tapOn:
+    id: "Text Button"
+- tapOn:
+    id: "Text Input"
+- inputText: "hello@browserstack.com\n"
+- assertVisible:
+    id: "Text Output"
+    text: "hello@browserstack.com"

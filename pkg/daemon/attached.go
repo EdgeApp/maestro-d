@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -94,10 +95,27 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	}
 	cfg.ReportDir = reportDir
 
+	rd := s.remote(id)
+	if rd != nil {
+		if e := cloudAttachConfig(rd, &cfg); e != nil {
+			return nil, e
+		}
+	} else if strings.HasPrefix(id, "df:") {
+		return nil, Errorf(CodeUsage, "%s is a cloud model, not a device: launch it first (device create --provider devicefarm, or lease --location cloud)", id)
+	}
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
-	driver, dinfo, cleanup, err := s.deps.NewDriver(ctx, id, cfg)
-	if err != nil {
+	var (
+		driver  core.Driver
+		dinfo   DriverInfo
+		cleanup func()
+		err     error
+	)
+	if rd != nil {
+		// A cloud device's driver is the one the daemon holds; detaching
+		// keeps it, and the provider's session, for the next attach.
+		driver, dinfo, cleanup = rd.driver, rd.dinfo, func() {}
+	} else if driver, dinfo, cleanup, err = s.deps.NewDriver(ctx, id, cfg); err != nil {
 		cancel()
 		return nil, WrapErr(CodeDeviceError, fmt.Errorf("attach %s: %w", id, err))
 	}
@@ -183,6 +201,34 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	logger.Info("Attached device %s (report %s)", id, reportDir)
 	keep = true
 	return a, nil
+}
+
+// cloudAttachConfig checks an attach of a cloud device against the driver
+// the daemon holds for it, and defaults the app id to the one it was
+// launched with. A driver, Appium server, platform or capabilities file
+// that differs from the held driver is USAGE.
+func cloudAttachConfig(rd *remoteDevice, cfg *AttachConfig) *Error {
+	rd.mu.Lock()
+	gone := rd.ended
+	rd.mu.Unlock()
+	switch {
+	case gone != "":
+		return Errorf(CodeDeviceError, "cloud device %s is gone: %s", rd.id, gone).WithDetails("reason", gone)
+	case cfg.Driver != "" && !strings.EqualFold(cfg.Driver, "appium"):
+		return Errorf(CodeUsage, "cloud device %s runs the Appium driver the daemon holds for it, not %q", rd.id, cfg.Driver).WithDetails("field", "driver")
+	case cfg.AppiumURL != "":
+		return Errorf(CodeUsage, "cloud device %s uses its provider's Appium endpoint; appiumUrl does not apply", rd.id).WithDetails("field", "appiumUrl")
+	case cfg.Platform != "" && !strings.EqualFold(cfg.Platform, rd.dinfo.Platform):
+		return Errorf(CodeUsage, "cloud device %s is %s, not %s", rd.id, rd.dinfo.Platform, cfg.Platform).WithDetails("field", "platform")
+	case cfg.Extra["capsFile"] != nil:
+		return Errorf(CodeUsage, "cloud device %s was launched with its capabilities; a caps file does not apply", rd.id).WithDetails("field", "extra.capsFile")
+	case cfg.AppFile != "":
+		return Errorf(CodeUsage, "cloud device %s: install the app with install (POST /v1/devices/{id}/apps), not appFile", rd.id).WithDetails("field", "appFile")
+	}
+	if cfg.AppID == "" {
+		cfg.AppID = rd.appID
+	}
+	return nil
 }
 
 // discardDriver runs a driver's cleanup, surviving a panic in it.

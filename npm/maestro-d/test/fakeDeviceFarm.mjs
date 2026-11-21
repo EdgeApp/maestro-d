@@ -3,7 +3,7 @@
 // (X-Amz-Target: DeviceFarm_20150623.<Op>), presigned-style upload URLs, and
 // one Appium endpoint per running session. A daemon reaches it through
 // MAESTRO_D_DEVICEFARM_ENDPOINT; fakeEnv() is the environment that pins the
-// AWS credential chain to fake keys.
+// AWS credential chain to fake keys and shortens the daemon's waits.
 
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
@@ -46,6 +46,8 @@ export function fakeEnv(url, dir, opts = {}) {
   env.AWS_CONFIG_FILE = config
   env.AWS_EC2_METADATA_DISABLED = 'true'
   env.MAESTRO_D_DEVICEFARM_ENDPOINT = url
+  // Short waits: session polls every 100 ms, idle release from 1 s.
+  env.MAESTRO_D_TEST_FAST_CLOUD = '1'
   if (opts.withKey !== false) {
     env.AWS_ACCESS_KEY_ID = 'AKIAFAKEFAKEFAKE0001'
     env.AWS_SECRET_ACCESS_KEY = 'fake-secret-key-for-tests'

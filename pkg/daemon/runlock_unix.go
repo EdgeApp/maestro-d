@@ -4,8 +4,10 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
+	"time"
 )
 
 // errRunLocked: another process holds the daemon's run-dir lock.
@@ -40,4 +42,22 @@ func lockRunDir(path string) (*os.File, error) {
 func unlockRunDir(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()
+}
+
+// lockLedger takes the cloud ledger's lock (cloudledger.go), waiting for
+// its holder: it retries every 50 ms until wait has passed, then fails.
+// The holder keeps it only for one read-modify-write, never across a call
+// to a cloud provider.
+func lockLedger(path string, wait time.Duration) (*os.File, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		f, err := lockRunDir(path)
+		if !errors.Is(err, errRunLocked) {
+			return f, err
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("the cloud ledger %s is locked by another process", path)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

@@ -44,6 +44,7 @@ func daemonDeps() daemon.Deps {
 		AppID:              appIDOf,
 		TVInfo:             physicalTVInfo,
 		Providers:          map[string]func() (cloudprov.RemoteProvider, error){"devicefarm": deviceFarmProvider(devicefarm.Options{})},
+		NewRemoteDriver:    newRemoteAppiumDriver,
 	}
 }
 
