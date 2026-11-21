@@ -758,7 +758,7 @@ func TestMesh_BlobHEADRefusalsKeepTheirCode(t *testing.T) {
 	}
 	c.SetLease("a1@hub-a", lr.Lease.ID)
 	var told []string
-	c.OnLeaseExpired = func(device, lease string) { told = append(told, device+"="+lease) }
+	c.OnLeaseExpired = func(device, lease, _ string) { told = append(told, device+"="+lease) }
 	if _, err := c.ReleaseLease(ctx, lr.Lease.ID); err != nil {
 		t.Fatal(err)
 	}

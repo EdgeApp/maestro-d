@@ -186,3 +186,37 @@ func asErr(err error, target **daemon.Error) bool {
 	}
 	return ok
 }
+
+func TestCloud_LeaseRoutedToTheHubWithCredentials(t *testing.T) {
+	a, b := twoHubs(t, withCloud(2))
+	ctx := context.Background()
+	c := a.client()
+	sel := &daemon.LeaseSelector{Location: "cloud", Platform: "android"}
+	// Asked at a, tried once at b (the harness gives b no driver factory,
+	// so its launch fails): b's answer is the client's, and a never tries
+	// its own devices.
+	before := a.count("POST /v1/leases")
+	_, err := c.AcquireLease(ctx, daemon.LeaseRequest{Select: sel})
+	var de *daemon.Error
+	if !asErr(err, &de) || de.Code != daemon.CodeInternal || !strings.Contains(de.Message, "cloud devices are not configured") {
+		t.Fatalf("routed lease: %v", err)
+	}
+	if b.count("POST /v1/leases") != 1 || a.count("POST /v1/leases") != before {
+		t.Fatalf("tries: a %d b %d", a.count("POST /v1/leases")-before, b.count("POST /v1/leases"))
+	}
+	// Naming a sends it to a, which has no credentials.
+	named := *sel
+	named.Hub = "hub-a"
+	if _, err := c.AcquireLease(ctx, daemon.LeaseRequest{Select: &named}); !asErr(err, &de) || de.Code != daemon.CodeUsage {
+		t.Fatalf("named hub: %v", err)
+	}
+}
+
+func TestCloud_LeaseWithNoHubWithCredentials(t *testing.T) {
+	a, _ := twoHubs(t)
+	_, err := a.client().AcquireLease(context.Background(), daemon.LeaseRequest{Select: &daemon.LeaseSelector{Location: "cloud", Platform: "ios"}})
+	var de *daemon.Error
+	if !asErr(err, &de) || de.Code != daemon.CodeUsage || !strings.Contains(de.Message, "no hub in this mesh") {
+		t.Fatalf("no hub: %v", err)
+	}
+}

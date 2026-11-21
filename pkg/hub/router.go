@@ -473,6 +473,21 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 	m := rt.m
 	sel := *req.Select
 	sel.Hub = hubName(sel.Hub)
+	if strings.EqualFold(sel.Location, daemon.LocationCloud) {
+		// A cloud lease launches a device, once: it goes to the one hub
+		// the launch routing rule names, and that hub's answer, whatever
+		// it is, is the client's.
+		target, e := m.routeCloud(sel.Hub, strings.ToLower(sel.Provider))
+		if e != nil {
+			writeError(w, 0, e)
+			return
+		}
+		sel.Hub = target
+		try := req
+		try.Select = &sel
+		rt.capture(withBody(r, mustJSON(try)), target).copyTo(w)
+		return
+	}
 	hubs := []string{m.cfg.Name}
 	for _, l := range m.linked() {
 		hubs = append(hubs, l.peer)

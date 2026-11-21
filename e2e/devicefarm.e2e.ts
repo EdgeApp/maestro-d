@@ -20,7 +20,12 @@
 //   [MAESTRO_D_CLIENT_ROOT=<client package, default npm/maestro-d>] \
 //     node e2e/devicefarm.e2e.ts
 //
-// In direct mode the AWS credentials are this script's own daemon's. The
+// In direct mode the AWS credentials are this script's own daemon's. In hub
+// mode (MAESTRO_D_DF_MODE=hub MAESTRO_D_HUB=<host:port> MAESTRO_D_TOKEN=<client
+// token>) the script gets no AWS variables: a hub started with --devicefarm
+// holds them, the device is leased (lease({select: {location: 'cloud'}}))
+// rather than created, and the app is installed after the lease, uploaded
+// under it. The
 // steps depend on the platform: Android drives WikipediaSample.apk
 // (org.wikipedia.alpha) and e2e/fixtures/devicefarm/android-search.yaml;
 // iOS drives BStackSampleApp.ipa (com.browserstack.Sample-iOS) and
@@ -55,13 +60,30 @@ const mode = required('MAESTRO_D_DF_MODE')
 const platform = required('MAESTRO_D_DF_PLATFORM')
 const modelName = required('MAESTRO_D_DF_NAME')
 const osVersion = optional('MAESTRO_D_DF_OS')
-const app = path.resolve(required('MAESTRO_D_DF_APP'))
-const appId = required('MAESTRO_D_DF_APP_ID')
+// In hub mode the app is optional: without it the script drives the
+// platform's Settings app, which every device has.
+const appPath = mode === 'hub' ? optional('MAESTRO_D_DF_APP') : required('MAESTRO_D_DF_APP')
+const app = appPath ? path.resolve(appPath) : undefined
+const appId = app ? required('MAESTRO_D_DF_APP_ID') : platform === 'ios' ? 'com.apple.Preferences' : 'com.android.settings'
 const artifactDir = optional('MAESTRO_D_ARTIFACT_DIR')
 const clientRoot = path.resolve(repoRoot, optional('MAESTRO_D_CLIENT_ROOT') ?? 'npm/maestro-d')
-if (mode !== 'direct') throw new Error(`MAESTRO_D_DF_MODE ${mode}: only direct is supported`)
+if (mode !== 'direct' && mode !== 'hub') throw new Error(`MAESTRO_D_DF_MODE ${mode}: direct or hub`)
 
 // The steps each platform's sample app takes.
+const settings: Record<string, { flow: string; drive: (d: MaestroDevice) => Promise<void> }> = {
+  android: {
+    flow: 'e2e/fixtures/devicefarm/android-settings.yaml',
+    drive: async (d) => {
+      await d.assertVisible('Network.*')
+    },
+  },
+  ios: {
+    flow: 'e2e/fixtures/devicefarm/ios-settings.yaml',
+    drive: async (d) => {
+      await d.assertVisible('General')
+    },
+  },
+}
 const steps: Record<string, { flow: string; drive: (d: MaestroDevice) => Promise<void> }> = {
   android: {
     flow: 'e2e/fixtures/devicefarm/android-search.yaml',
@@ -88,10 +110,12 @@ function log(msg: string): void {
 }
 
 async function main(): Promise<void> {
-  const plan = steps[platform]
+  const plan = app ? steps[platform] : settings[platform]
   if (!plan) throw new Error(`MAESTRO_D_DF_PLATFORM ${platform} is not android or ios`)
   const { MaestroD } = (await import(pathToFileURL(path.join(clientRoot, 'dist/esm/index.js')).href)) as Client
-  const md = await MaestroD.connect({ name: optional('MAESTRO_D') })
+  const md = mode === 'hub'
+    ? await MaestroD.connect({ hub: required('MAESTRO_D_HUB'), token: required('MAESTRO_D_TOKEN') } as { name?: string })
+    : await MaestroD.connect({ name: optional('MAESTRO_D') })
 
   const cat = await md.catalog({ location: 'cloud', platform, name: modelName, available: true })
   const models = cat.cloud?.[0]?.models ?? []
@@ -99,14 +123,28 @@ async function main(): Promise<void> {
   log(`catalog: ${models.length} ${platform} model(s) match ${JSON.stringify(modelName)}: ${models.slice(0, 3).map((m) => `${m.name} ${m.osVersion}`).join(', ')}`)
 
   let dev: DeviceInfo | undefined
+  let leased: MaestroDevice | undefined
   try {
     const started = Date.now()
-    dev = await md.createDevice({ cloud: { platform, name: `^${modelName}$`, osVersion, app, appId, idleReleaseSec: 900 } })
-    log(`launched ${dev.id}: ${dev.name} ${dev.osVersion} in ${Math.round((Date.now() - started) / 1000)} s; location ${dev.location}, provider ${dev.provider}, expires ${dev.expiresAt}`)
+    let d: MaestroDevice
+    if (mode === 'hub') {
+      leased = d = await md.lease({ select: { location: 'cloud', platform, name: modelName, osVersion }, ttlSec: 1800,
+        cloud: { idleReleaseSec: 900, appId }, attach: {} })
+      dev = (await md.devices({ location: 'cloud' })).find((x) => x.id === d.id)
+      assert.ok(dev, 'the leased cloud device is listed')
+      log(`leased ${dev.id} on hub ${dev.hub}: ${dev.name} ${dev.osVersion} in ${Math.round((Date.now() - started) / 1000)} s; location ${dev.location}, provider ${dev.provider}`)
+      if (app) {
+        const inst = await d.installApp(app)
+        log(`installApp ${path.basename(app)} ok (${JSON.stringify(inst)})`)
+      }
+    } else {
+      dev = await md.createDevice({ cloud: { platform, name: modelName, osVersion, app, appId, idleReleaseSec: 900 } })
+      log(`launched ${dev.id}: ${dev.name} ${dev.osVersion} in ${Math.round((Date.now() - started) / 1000)} s; location ${dev.location}, provider ${dev.provider}, expires ${dev.expiresAt}`)
+      d = await md.attach({ device: dev.id })
+      log(`attached ${dev.id}`)
+    }
     assert.equal(dev.location, 'cloud')
 
-    const d = await md.attach({ device: dev.id })
-    log(`attached ${dev.id}`)
     await d.launchApp({ appId })
     log('launchApp ok')
     await plan.drive(d)
@@ -119,7 +157,10 @@ async function main(): Promise<void> {
     assert.ok(res.ok, `flow ${plan.flow}`)
     log(`flow ${plan.flow} ok in ${res.durationMs} ms`)
   } finally {
-    if (dev) {
+    if (leased) {
+      const rel = await leased.release()
+      log(`released the lease on ${leased.id}: ${JSON.stringify(rel.deviceMinutes)} device minutes`)
+    } else if (dev) {
       const del = await md.deleteDevice(dev.id)
       log(`released ${dev.id}: ${JSON.stringify(del.deviceMinutes)} device minutes`)
     }

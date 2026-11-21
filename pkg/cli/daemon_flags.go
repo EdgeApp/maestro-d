@@ -100,8 +100,12 @@ type hubOpts struct {
 	peerCA        string
 	// purge: hub service uninstall --purge.
 	purge bool
-	// devicefarm: the hub launches AWS Device Farm devices for leases.
-	devicefarm bool
+	// devicefarm: the hub launches AWS Device Farm devices for leases,
+	// with dfOpts' credentials and project, at most cloudMax at once.
+	devicefarm  bool
+	dfOpts      devicefarm.Options
+	cloudMax    int
+	cloudMaxSet bool
 }
 
 // leaseOpts are lease's switches.
@@ -112,6 +116,9 @@ type leaseOpts struct {
 	noAttach bool
 	all      bool
 	sel      daemon.LeaseSelector
+	// idleRelease and appiumVersion tune a cloud lease's launch.
+	idleRelease   string
+	appiumVersion string
 }
 
 // packOpts are pack's flow-bundle switches.

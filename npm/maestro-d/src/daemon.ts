@@ -20,6 +20,7 @@ import type {
   BootOptions,
   CatalogQuery,
   CatalogResult,
+  CloudSpec,
   CreateDeviceOptions,
   DaemonEvent,
   DaemonInfo,
@@ -80,8 +81,14 @@ export interface DeviceAttachOptions extends AttachOptions {
 export interface LeaseOptions {
   /** The device to lease, by id (normalized through the hub; an id the hub does not list rejects with DEVICE_NOT_FOUND). */
   device?: string
-  /** Or the first free device that matches. */
+  /**
+   * Or the first free device that matches. With `location: 'cloud'` the hub
+   * that holds the provider's credentials launches a cloud device for the
+   * lease, and ends it when the lease ends.
+   */
   select?: LeaseSelector
+  /** A cloud lease's launch settings: idle release, Appium version, caps, app id. */
+  cloud?: Pick<CloudSpec, 'idleReleaseSec' | 'appiumVersion' | 'caps' | 'appId' | 'bootTimeoutSec'>
   /**
    * The lease's window in seconds (default the hub's: 8 hours, or the
    * device's maximum when that is shorter). It is fixed: using the device
@@ -245,6 +252,7 @@ export class MaestroD {
     const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
+    if (opts.cloud) body.cloud = opts.cloud
     const cfg = opts.attach === false ? undefined : { ...(opts.attach ?? {}) }
     // Files to upload need the lease first (a hub's blob routes do), so
     // such an attach follows the lease; any other goes in the same call.

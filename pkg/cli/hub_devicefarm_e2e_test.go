@@ -136,3 +136,164 @@ func TestE2E_HubDeviceFarmLocations(t *testing.T) {
 func sleepBriefly() { time.Sleep(100 * time.Millisecond) }
 
 func writeFile0600(path, data string) error { return os.WriteFile(path, []byte(data), 0o600) }
+
+// dfLease is `lease --location cloud` through hub a with args, decoded.
+func dfLease(t *testing.T, h *dfHubs, args ...string) daemon.LeaseResult {
+	t.Helper()
+	r := h.e.runEnv(h.client, append([]string{"lease", "--location", "cloud", "--json"}, args...)...)
+	var res daemon.LeaseResult
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &res) != nil || res.Lease.ID == "" {
+		t.Fatalf("lease: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	return res
+}
+
+func TestE2E_HubDeviceFarmLease(t *testing.T) {
+	creds := filepath.Join(t.TempDir(), "creds")
+	writeCreds(t, creds)
+	h := startDFHubs(t, "--devicefarm-credentials-file", creds, "--cloud-max-devices", "1")
+	e := h.e
+	res := dfLease(t, h, "--platform", "ios", "--name", "Apple iPhone 15", "--ttl", "30m")
+	dev := res.Lease.Device
+	if !strings.HasPrefix(dev, "df-") || !strings.HasSuffix(dev, "@hub-b") || res.Device == nil || !res.Device.Attached {
+		t.Fatalf("lease: %+v %+v", res.Lease, res.Device)
+	}
+	e.mustOK(h.client, "tapOn", "Button", "--device", dev)
+	r := e.runEnv(h.client, "device", "list", "--location", "cloud", "--json")
+	var listed daemon.DevicesResult
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &listed) != nil || len(listed.Devices) != 1 {
+		t.Fatalf("listing: %s%s", r.stdout, r.stderr)
+	}
+	if d := listed.Devices[0]; d.ID != dev || d.Location != daemon.LocationCloud || d.Hub != "hub-b" || d.Provider != "devicefarm" || d.Available {
+		t.Fatalf("listed: %+v", d)
+	}
+	r = e.runEnv(h.client, "hub", "status", "--json")
+	if !strings.Contains(r.stdout, `"cloud"`) {
+		t.Fatalf("hub status: %s", r.stdout)
+	}
+	// I8: the hub's one slot is taken.
+	r = e.runEnv(h.client, "lease", "--location", "cloud", "--platform", "android")
+	if r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeBusy || !strings.Contains(r.stderr, "--cloud-max-devices 1") {
+		t.Fatalf("over the cap: exit %d\n%s", r.code, r.stderr)
+	}
+	r = e.runEnv(h.client, "release", "--device", dev)
+	if r.code != 0 || !strings.Contains(r.stdout, "device minutes") {
+		t.Fatalf("release: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+	sessions := h.fake.Sessions()
+	if len(sessions) != 1 || sessions[0].Status != "COMPLETED" {
+		t.Fatalf("sessions: %+v", sessions)
+	}
+	assertNoSecrets(t, e.cwd, h.fake)
+}
+
+func TestE2E_HubDeviceFarmLeaseEnd(t *testing.T) {
+	// b shares a list, as hubs usually do: a released cloud device is then
+	// not even in its pool.
+	h := startDFHubs(t, "--share-device", "mock-b")
+	e := h.e
+	// The lease's window runs out: the device goes with it.
+	res := dfLease(t, h, "--platform", "android", "--name", "Google Pixel 8", "--ttl", "3s", "--no-attach")
+	ref := ""
+	for _, s := range h.fake.Sessions() {
+		ref = s.ARN
+	}
+	start := time.Now()
+	for time.Since(start) < 15*time.Second {
+		if s, _ := h.fake.Session(ref); s.Status == "COMPLETED" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if s, _ := h.fake.Session(ref); s.Status != "COMPLETED" {
+		t.Fatalf("lease expiry left %s running", res.Lease.Device)
+	}
+	t.Logf("lease %s expired: its device's session %s after %s", res.Lease.ID, "COMPLETED", time.Since(start).Round(100*time.Millisecond))
+	// The device's idle release ends its lease: lease.expired, and a
+	// command under it then answers LEASE_EXPIRED.
+	res = dfLease(t, h, "--platform", "android", "--name", "Google Pixel 8", "--idle-release", "2s", "--no-attach")
+	// Wait until the hub has dropped the device entirely.
+	var r result
+	for start := time.Now(); time.Since(start) < 15*time.Second; time.Sleep(200 * time.Millisecond) {
+		r = e.runEnv(h.client, "device", "list", "--location", "cloud", "--json")
+		if !strings.Contains(r.stdout, "df-") {
+			break
+		}
+	}
+	if strings.Contains(r.stdout, "df-") {
+		t.Fatalf("a released device is listed: %s", r.stdout)
+	}
+	r = e.runEnv(h.client, "tapOn", "Button", "--device", res.Lease.Device)
+	if r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeLeaseExpired || !strings.Contains(r.stderr, "`maestro-d lease --location cloud --platform ios|android`") {
+		t.Fatalf("a command after the idle release: exit %d\n%s", r.code, r.stderr)
+	}
+	// The lease forgotten, the next command finds no device.
+	if r := e.runEnv(h.client, "tapOn", "Button", "--device", res.Lease.Device); envelopeCode(t, r.stderr) != daemon.CodeDeviceNotFound {
+		t.Fatalf("a command after the lease was forgotten: exit %d\n%s", r.code, r.stderr)
+	}
+	// The client forgets the lease it was told has ended.
+	if data, _ := os.ReadFile(filepath.Join(envValue(h.client, "MAESTRO_D_HOME"), "leases.json")); strings.Contains(string(data), res.Lease.ID) {
+		t.Fatalf("leases.json still holds the ended lease: %s", data)
+	}
+	t.Logf("idle release of %s ended lease %s: once the device was gone the next command answered LEASE_EXPIRED and the client forgot the lease", res.Lease.Device, res.Lease.ID)
+}
+
+// envValue returns key's value in an environment list.
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+func TestE2E_HubDeviceFarmRefusals(t *testing.T) {
+	h := startDFHubs(t)
+	e := h.e
+	// Cloud-only lease flags without --location cloud are refused, not
+	// ignored.
+	for _, args := range [][]string{{"--idle-release", "5m"}, {"--appium-version", "3"}} {
+		if r := e.runEnv(h.client, append([]string{"lease", "--platform", "mock"}, args...)...); r.code != 2 {
+			t.Fatalf("lease %v without --location cloud: exit %d\n%s", args, r.code, r.stderr)
+		}
+	}
+	// device create with a cloud spec on a hub: FORBIDDEN with the lease
+	// hint, for a remote client and on the hub's own machine.
+	for _, env := range [][]string{h.client, h.envB} {
+		args := []string{"device", "create", "--provider", "devicefarm", "--platform", "android"}
+		if strings.Contains(strings.Join(env, " "), "MAESTRO_D_HUB=") {
+			args = append(args, "--target-hub="+h.b.HTTPAddr)
+		} else {
+			args = append(args, "--daemon", "dfhub-b")
+		}
+		r := e.runEnv(env, args...)
+		if r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeForbidden || !strings.Contains(r.stderr, "lease --location cloud") {
+			t.Fatalf("create on a hub: exit %d\n%s", r.code, r.stderr)
+		}
+	}
+	// A hub refuses to start with a credentials file others can read.
+	loose := filepath.Join(t.TempDir(), "creds")
+	writeCreds(t, loose)
+	if err := os.Chmod(loose, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+		"--peer-token", "y", "--devicefarm", "--devicefarm-credentials-file", loose)
+	if r.code == 0 || !strings.Contains(r.stderr, "mode 0644") {
+		t.Fatalf("a loose credentials file: exit %d\n%s", r.code, r.stderr)
+	}
+	// And the Device Farm flags need --devicefarm.
+	r = e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+		"--peer-token", "y", "--cloud-max-devices", "3")
+	if r.code == 0 || !strings.Contains(r.stderr, "need --devicefarm") {
+		t.Fatalf("flags without --devicefarm: exit %d\n%s", r.code, r.stderr)
+	}
+	// A start check that fails stops the hub, redacted.
+	h.fake.FailOp("GetAccountSettings", "AccessDeniedException", "User is not authorized to perform: devicefarm:GetAccountSettings")
+	r = e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+		"--peer-token", "y", "--devicefarm")
+	if r.code == 0 || !strings.Contains(r.stdout+r.stderr, "GetAccountSettings") {
+		t.Fatalf("a failing start check: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+	}
+}

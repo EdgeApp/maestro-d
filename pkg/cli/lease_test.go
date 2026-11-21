@@ -265,7 +265,7 @@ func TestHeldLease_UsesTheFileAndNeverTakesOne(t *testing.T) {
 		t.Fatal("leases on file make a fresh client send them")
 	}
 	// The expiry hook drops the entry.
-	c2.OnLeaseExpired("mock-7", c2.LeaseOf("mock-7"))
+	c2.OnLeaseExpired("mock-7", c2.LeaseOf("mock-7"), "")
 	if findLease(leaseKey(c2, o), "mock-7") != nil {
 		t.Fatal("hook did not drop the entry")
 	}
