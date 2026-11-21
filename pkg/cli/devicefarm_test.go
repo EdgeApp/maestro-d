@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,4 +287,91 @@ func TestHubCloudFlags(t *testing.T) {
 	if deps, _ := hubDeps(&daemonOpts{}); deps.Providers != nil {
 		t.Fatal("a hub without --devicefarm has a provider")
 	}
+}
+
+func TestDevicefarmCommands(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeDaemon{}
+	c := newFakeDaemon(t, f)
+	var b bytes.Buffer
+
+	// account: --hub routes, the table and --json.
+	o, _ := parseFor(t, devicefarmSessionsFlags, "--hub", "hub-b")
+	f.reply = daemon.ProviderAccountResult{Provider: "devicefarm", Hub: "hub-b", Account: map[string]any{
+		"trialMinutes": map[string]any{"total": 1000, "remaining": 941}, "unmeteredDevices": map[string]any{}}}
+	if err := runDevicefarmAccount(ctx, c, o, nil, &b); err != nil {
+		t.Fatal(err)
+	}
+	if f.method != "GET" || f.path != "/v1/providers/devicefarm/account" || f.query != "hub=hub-b" {
+		t.Fatalf("account request: %s %s?%s", f.method, f.path, f.query)
+	}
+	for _, want := range []string{"hub: hub-b", "trial minutes: 941 of 1000 left", "unmeteredDevices: map[]"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("account lacks %q:\n%s", want, b.String())
+		}
+	}
+	b.Reset()
+	o, _ = parseFor(t, devicefarmSessionsFlags, "--json")
+	if err := runDevicefarmAccount(ctx, c, o, nil, &b); err != nil || !strings.Contains(b.String(), `"remaining": 941`) {
+		t.Fatalf("account --json: %v\n%s", err, b.String())
+	}
+
+	// apps: empty, the table, --json.
+	b.Reset()
+	o, _ = parseFor(t, devicefarmSessionsFlags)
+	f.reply = daemon.ProviderAppsResult{Provider: "devicefarm"}
+	if err := runDevicefarmApps(ctx, c, o, nil, &b); err != nil || !strings.Contains(b.String(), "No uploads.") {
+		t.Fatalf("no apps: %v\n%s", err, b.String())
+	}
+	b.Reset()
+	app := cloudprov.AppRef{Ref: "arn:upload:1", Name: "maestro-d-0123abcd-a.apk", Type: "ANDROID_APP", Status: "SUCCEEDED", Created: "2026-11-20T00:00:00Z"}
+	f.reply = daemon.ProviderAppsResult{Provider: "devicefarm", Apps: []cloudprov.AppRef{app}}
+	if err := runDevicefarmApps(ctx, c, o, nil, &b); err != nil || !strings.Contains(b.String(), "maestro-d-0123abcd-a.apk") || !strings.Contains(b.String(), "ANDROID_APP") {
+		t.Fatalf("apps: %v\n%s", err, b.String())
+	}
+	b.Reset()
+	o, _ = parseFor(t, devicefarmSessionsFlags, "--json")
+	if err := runDevicefarmApps(ctx, c, o, nil, &b); err != nil || !strings.Contains(b.String(), `"arn:upload:1"`) {
+		t.Fatalf("apps --json: %v\n%s", err, b.String())
+	}
+
+	// upload: the absolute path, the two wordings, --json, and no file.
+	b.Reset()
+	o, _ = parseFor(t, devicefarmSessionsFlags)
+	f.reply = daemon.ProviderUploadResult{Provider: "devicefarm", AppRef: app}
+	if err := runDevicefarmUpload(ctx, c, o, []string{"a.apk"}, &b); err != nil || !strings.Contains(b.String(), "maestro-d-0123abcd-a.apk uploaded: arn:upload:1") {
+		t.Fatalf("upload: %v\n%s", err, b.String())
+	}
+	if f.method != "POST" || f.path != "/v1/providers/devicefarm/apps" || !filepath.IsAbs(f.body["app"].(string)) {
+		t.Fatalf("upload request: %s %s %v", f.method, f.path, f.body)
+	}
+	b.Reset()
+	app.Reused = true
+	f.reply = daemon.ProviderUploadResult{Provider: "devicefarm", AppRef: app}
+	if err := runDevicefarmUpload(ctx, c, o, []string{"a.apk"}, &b); err != nil || !strings.Contains(b.String(), "already uploaded (reused)") {
+		t.Fatalf("reused: %v\n%s", err, b.String())
+	}
+	b.Reset()
+	o, _ = parseFor(t, devicefarmSessionsFlags, "--json")
+	if err := runDevicefarmUpload(ctx, c, o, []string{"a.apk"}, &b); err != nil || !strings.Contains(b.String(), `"reused": true`) {
+		t.Fatalf("upload --json: %v\n%s", err, b.String())
+	}
+	if err := runDevicefarmUpload(ctx, c, o, nil, &b); !hasCode(err, daemon.CodeUsage) {
+		t.Fatalf("upload without a file: %v", err)
+	}
+	// An error from the daemon comes back unchanged.
+	f.status, f.reply = http.StatusForbidden, map[string]any{"error": map[string]any{"code": "FORBIDDEN", "message": "install it on a leased cloud device"}}
+	if err := runDevicefarmUpload(ctx, c, o, []string{"a.apk"}, &b); !hasCode(err, daemon.CodeForbidden) {
+		t.Fatalf("forbidden: %v", err)
+	}
+	for _, run := range []func(context.Context, *daemon.Client, *daemonOpts, []string, io.Writer) error{runDevicefarmAccount, runDevicefarmApps} {
+		if err := run(ctx, c, o, nil, &b); !hasCode(err, daemon.CodeForbidden) {
+			t.Fatalf("error passthrough: %v", err)
+		}
+	}
+}
+
+func hasCode(err error, code daemon.Code) bool {
+	var de *daemon.Error
+	return errors.As(err, &de) && de.Code == code
 }

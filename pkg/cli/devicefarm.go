@@ -13,6 +13,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/urfave/cli/v2"
@@ -133,12 +134,94 @@ func printOrphans(w io.Writer, res *daemon.OrphanResult) {
 
 var devicefarmSessionsFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, one(manageHubFlag))
 
+// devicefarmCmd is one devicefarm subcommand that needs no device.
+func devicefarmCmd(name, usage, args string, fn func(ctx context.Context, c *daemon.Client, o *daemonOpts, args []string, w io.Writer) error) *cli.Command {
+	return &cli.Command{
+		Name:            name,
+		Usage:           usage,
+		ArgsUsage:       args,
+		Description:     flagsDoc("", devicefarmSessionsFlags),
+		SkipFlagParsing: true,
+		Action:          withArgs(devicefarmSessionsFlags, connected(fn)),
+	}
+}
+
+func runDevicefarmAccount(ctx context.Context, c *daemon.Client, o *daemonOpts, _ []string, w io.Writer) error {
+	res, err := c.ProviderAccount(ctx, "devicefarm", o.manage.hub)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		printJSON(w, res)
+		return nil
+	}
+	if res.Hub != "" {
+		fmt.Fprintf(w, "hub: %s\n", res.Hub)
+	}
+	if tm, ok := res.Account["trialMinutes"].(map[string]any); ok {
+		fmt.Fprintf(w, "trial minutes: %v of %v left\n", tm["remaining"], tm["total"])
+	}
+	for _, k := range []string{"unmeteredDevices", "unmeteredRemoteAccessDevices", "maxJobTimeoutMinutes"} {
+		if v, ok := res.Account[k]; ok {
+			fmt.Fprintf(w, "%s: %v\n", k, v)
+		}
+	}
+	return nil
+}
+
+func runDevicefarmApps(ctx context.Context, c *daemon.Client, o *daemonOpts, _ []string, w io.Writer) error {
+	res, err := c.ProviderApps(ctx, "devicefarm", o.manage.hub)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		printJSON(w, res)
+		return nil
+	}
+	if len(res.Apps) == 0 {
+		fmt.Fprintln(w, "No uploads.")
+		return nil
+	}
+	fmt.Fprintf(w, "%-46s %-12s %-10s %-22s %s\n", "NAME", "TYPE", "STATUS", "CREATED", "REF")
+	for _, a := range res.Apps {
+		fmt.Fprintf(w, "%-46s %-12s %-10s %-22s %s\n", a.Name, a.Type, a.Status, a.Created, a.Ref)
+	}
+	return nil
+}
+
+func runDevicefarmUpload(ctx context.Context, c *daemon.Client, o *daemonOpts, args []string, w io.Writer) error {
+	if len(args) != 1 {
+		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d devicefarm upload <file.apk|file.ipa>")
+	}
+	path, err := filepath.Abs(args[0])
+	if err != nil {
+		return daemon.WrapErr(daemon.CodeUsage, err)
+	}
+	res, err := c.ProviderUpload(ctx, "devicefarm", o.manage.hub, path)
+	if err != nil {
+		return err
+	}
+	if o.JSON {
+		printJSON(w, res)
+		return nil
+	}
+	how := "uploaded"
+	if res.Reused {
+		how = "already uploaded (reused)"
+	}
+	fmt.Fprintf(w, "%s %s: %s\n", res.Name, how, res.Ref)
+	return nil
+}
+
 // devicefarmCommand is the devicefarm group: the provider's account,
 // uploads and sessions, without a device.
 var devicefarmCommand = &cli.Command{
 	Name:  "devicefarm",
 	Usage: "AWS Device Farm: remote access sessions, account and uploads",
 	Subcommands: []*cli.Command{
+		devicefarmCmd("account", "The account: trial minutes left, unmetered devices", " ", runDevicefarmAccount),
+		devicefarmCmd("apps", "The project's uploaded apps", " ", runDevicefarmApps),
+		devicefarmCmd("upload", "Upload an .apk or .ipa from this machine (reused when an identical one was uploaded in the last 30 days)", "<file>", runDevicefarmUpload),
 		{
 			Name:            "sessions",
 			Usage:           "List the project's remote access sessions (name = device id, status, result, device minutes)",

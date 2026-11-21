@@ -152,6 +152,23 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/v1/devices" && r.Method == http.MethodPost:
 		m.forgetPeerIDs()
 		rt.boot(w, r, fwd)
+	case len(seg) >= 3 && seg[0] == "v1" && seg[1] == "providers" && fwd == "":
+		// A provider's utilities need its credentials: the hub named with
+		// ?hub=, else the launch routing rule's.
+		h := hubName(r.URL.Query().Get("hub"))
+		if h == "" {
+			target, e := m.routeCloud("", strings.ToLower(seg[2]))
+			if e != nil {
+				writeError(w, 0, e)
+				return
+			}
+			h = target
+		}
+		if h != m.cfg.Name {
+			rt.forward(w, r, h)
+			return
+		}
+		rt.serveLocal(w, r)
 	case path == "/v1/catalog" && r.Method == http.MethodGet && fwd == "":
 		h := hubName(r.URL.Query().Get("hub"))
 		if h == "" && wantsCloud(r) {

@@ -520,16 +520,51 @@ func (c *Client) StopDeviceResult(ctx context.Context, id string, force bool) (*
 	return &out, nil
 }
 
+// providerPath is /v1/providers/{provider}/{what}, with ?hub= when hub is
+// set.
+func providerPath(provider, what, hub string) string {
+	path := "/v1/providers/" + url.PathEscape(provider) + "/" + what
+	if hub != "" {
+		path += "?hub=" + url.QueryEscape(hub)
+	}
+	return path
+}
+
+// ProviderAccount reads a cloud provider's account (trial minutes and the
+// like).
+func (c *Client) ProviderAccount(ctx context.Context, provider, hub string) (*ProviderAccountResult, error) {
+	var out ProviderAccountResult
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "account", hub), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ProviderApps lists a cloud provider's uploaded apps.
+func (c *Client) ProviderApps(ctx context.Context, provider, hub string) (*ProviderAppsResult, error) {
+	var out ProviderAppsResult
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "apps", hub), nil, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// ProviderUpload uploads an app from the daemon's machine (a local caller
+// only), reusing an identical earlier upload.
+func (c *Client) ProviderUpload(ctx context.Context, provider, hub, app string) (*ProviderUploadResult, error) {
+	var out ProviderUploadResult
+	if e := c.call(ctx, http.MethodPost, providerPath(provider, "apps", hub), ProviderUploadRequest{App: app}, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
 // ProviderSessions lists a cloud provider's sessions
 // (GET /v1/providers/{provider}/sessions); on a hub, hub names the hub that
 // answers.
 func (c *Client) ProviderSessions(ctx context.Context, provider, hub string) (*ProviderSessionsResult, error) {
 	var out ProviderSessionsResult
-	path := "/v1/providers/" + url.PathEscape(provider) + "/sessions"
-	if hub != "" {
-		path += "?hub=" + url.QueryEscape(hub)
-	}
-	if e := c.call(ctx, http.MethodGet, path, nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodGet, providerPath(provider, "sessions", hub), nil, &out); e != nil {
 		return nil, e
 	}
 	return &out, nil

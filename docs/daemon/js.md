@@ -156,8 +156,18 @@ Through a hub, `md.lease({select: {location: 'cloud', platform: 'ios', name:
 'Apple iPhone 15'}, ttlSec: 1800, cloud: {idleReleaseSec: 900}, attach: {}})`
 launches a cloud device on the hub that holds the credentials and resolves
 with its leased handle; `dev.release()` resolves with `{deviceMinutes}`.
+`dev.installApp(file)` on a cloud device installs into the running session,
+which keeps its id; `dev.uninstallApp()` rejects with `USAGE` there.
+
+`md.devicefarm` reaches Device Farm without a device: `account()` (trial
+minutes and unmetered slots), `apps()` (the project's uploads),
+`sessions()` (its remote access sessions, each named with its device id)
+and `upload(file)` (an `.apk` or `.ipa` from the daemon's machine, reused
+when an identical one went up in the last 30 days; through a hub it rejects
+with `FORBIDDEN`). Each takes `{hub}` to name the hub that answers.
 `e2e/devicefarm.e2e.ts` runs the whole lifecycle on live Device Farm, in
-direct mode and through a hub.
+direct mode and through a hub, including an install into the running
+session.
 
 ## How the package is built
 

@@ -77,6 +77,31 @@ install` records its path, never the keys. At start the hub reads the
 account once (`cloud: devicefarm ready (trial minutes left N)` in its log)
 and refuses to start when that fails.
 
+## Installing apps during a session
+
+`maestro-d install app.apk --device df-3f2a9c1e` (or `installApp` in JS,
+`POST /v1/devices/{id}/apps` in REST) uploads the app and installs it into
+the running session; the device keeps its id and session. Device Farm
+answers before the phone has the app, so the install answers only once
+the device lists it (up to 2 minutes; when its id can be read: an `.ipa`
+always, an `.apk` with `aapt2`), and an attached device's WebDriver
+session is then reopened so the next step sees the new app.
+Through a hub the file goes up under the lease first. There is no
+uninstall during a session.
+
+## Account and uploads
+
+```sh
+maestro-d devicefarm account        # trial minutes left, unmetered slots
+maestro-d devicefarm apps           # the project's uploads
+maestro-d devicefarm upload app.ipa # upload once; prints the ARN for device create --app ARN
+maestro-d devicefarm sessions       # every session, named with its device id, and its billed minutes
+```
+
+On a hub each answers from the hub that holds the credentials (`--hub`
+names one). `upload` reads a file on the daemon's own machine, so a remote
+client is refused; it installs on a leased device instead.
+
 ## Limits
 
 - **Session length:** 150 minutes; maestro-d releases the device 30 s before.

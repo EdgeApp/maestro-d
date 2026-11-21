@@ -25,9 +25,18 @@ import (
 type fakeRemoteDriver struct {
 	core.Driver
 	pings, restarts, closes atomic.Int32
-	pingErr                 atomic.Pointer[error]
+	pingErr, restartErr     atomic.Pointer[error]
 	// pingStarted, when set, is closed by the first ping.
 	inPing atomic.Bool
+	// installChecks counts AppInstalled calls; the first notYet of them
+	// answer false (a negative notYet: always), and checkErr fails them.
+	installChecks, notYet atomic.Int32
+	checkErr              atomic.Pointer[error]
+	// restartFails makes that many restarts fail first; restartDelay
+	// makes each restart take that long.
+	restartFails atomic.Int32
+	restartDelay atomic.Int64
+	restartedAt  atomic.Int64 // when the last restart finished (UnixNano)
 }
 
 func (d *fakeRemoteDriver) Keepalive() error {
@@ -39,8 +48,27 @@ func (d *fakeRemoteDriver) Keepalive() error {
 	}
 	return nil
 }
-func (d *fakeRemoteDriver) RestartSession() error { d.restarts.Add(1); return nil }
-func (d *fakeRemoteDriver) Close() error          { d.closes.Add(1); return nil }
+func (d *fakeRemoteDriver) RestartSession() error {
+	d.restarts.Add(1)
+	time.Sleep(time.Duration(d.restartDelay.Load()))
+	defer func() { d.restartedAt.Store(time.Now().UnixNano()) }()
+	if p := d.restartErr.Load(); p != nil {
+		return *p
+	}
+	if d.restartFails.Add(-1) >= 0 {
+		return errors.New("UiAutomation not connected")
+	}
+	return nil
+}
+func (d *fakeRemoteDriver) AppInstalled(string) (bool, error) {
+	n := d.installChecks.Add(1)
+	if p := d.checkErr.Load(); p != nil {
+		return false, *p
+	}
+	ny := d.notYet.Load()
+	return ny >= 0 && n > ny, nil
+}
+func (d *fakeRemoteDriver) Close() error { d.closes.Add(1); return nil }
 
 // Execute answers recording steps as the Appium driver does: it has no
 // screen capture.
@@ -363,7 +391,7 @@ func TestRemote_AttachConflicts(t *testing.T) {
 	dev := e.launch(cloudprov.CloudSpec{})
 	for _, cfg := range []AttachConfig{
 		{Driver: "uiautomator2"}, {AppiumURL: "http://x"}, {Platform: "ios"},
-		{Extra: map[string]any{"capsFile": "c.json"}}, {AppFile: "/tmp/a.apk"},
+		{Extra: map[string]any{"capsFile": "c.json"}},
 	} {
 		if _, err := e.c.Attach(ctx, dev.ID, cfg); codeOf(t, err) != CodeUsage {
 			t.Errorf("%+v: %v", cfg, err)

@@ -80,7 +80,10 @@ func (f *fakeProvider) Upload(context.Context, string) (*cloudprov.AppRef, error
 	f.call("Upload")
 	return &cloudprov.AppRef{Ref: "arn:upload"}, nil
 }
-func (f *fakeProvider) Apps(context.Context) ([]cloudprov.AppRef, error) { f.call("Apps"); return nil, nil }
+func (f *fakeProvider) Apps(context.Context) ([]cloudprov.AppRef, error) {
+	f.call("Apps")
+	return nil, nil
+}
 func (f *fakeProvider) Account(context.Context) (map[string]any, error) {
 	f.call("Account")
 	return map[string]any{}, nil

@@ -192,7 +192,7 @@ export class FakeDeviceFarm {
         const s = { arn: `arn:aws:devicefarm:us-west-2:${ACCOUNT}:session:${crypto.randomUUID()}/${crypto.randomUUID()}/00000`,
           projectArn: b.projectArn, deviceArn: b.deviceArn, appArn: b.appArn, name: b.name, status: 'PENDING', result: 'PENDING',
           created: epoch(Date.now()), token: crypto.randomBytes(8).toString('hex'), parameters: b.configuration?.parameters ?? {},
-          installed: [], webdrivers: 0 }
+          installed: [], webdrivers: 0, opened: 0 }
         this.sessions.push(s)
         return this.json(res, 200, { remoteAccessSession: this.sessionJSON(s, true) })
       }
@@ -250,6 +250,7 @@ export class FakeDeviceFarm {
     const ios = this.devices.find((d) => d.arn === s.deviceArn)?.platform === 'IOS'
     if (req.method === 'POST' && rest === '/session') {
       s.webdrivers++
+      s.opened++
       s.caps = JSON.parse(raw.toString('utf8') || '{}')?.capabilities?.alwaysMatch
       return reply(200, { sessionId: crypto.randomUUID(), capabilities: { platformName: ios ? 'iOS' : 'Android' } })
     }
@@ -274,6 +275,11 @@ export class FakeDeviceFarm {
     if (/^\/element\/[^/]+\/rect$/.test(p)) return reply(200, { x: 20, y: 100, width: 200, height: 44 })
     if (/^\/element\/[^/]+\/(text|attribute\/.*)$/.test(p)) return reply(200, 'Button')
     if (/^\/element\/[^/]+\/displayed$/.test(p)) return reply(200, true)
+    // The daemon waits on this after an install; the fake installs at once.
+    if (p === '/execute/sync' && raw.toString('utf8').includes('mobile: isAppInstalled')) {
+      s.installChecks = (s.installChecks ?? 0) + 1
+      return reply(200, true)
+    }
     return reply(200, null)
   }
 }

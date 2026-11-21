@@ -162,6 +162,41 @@ describe('direct mode', () => {
     assert.deepEqual(await md.stopDevice('mock-1', { force: true }), {})
   })
 
+  test('installApp on a cloud device installs into the session and keeps it', async () => {
+    const dev = await md.createDevice({ cloud: { platform: 'android', name: 'Google Pixel 8' } })
+    const handle = await md.attach({ device: dev.id })
+    const apk = path.join(tmp, 'b.apk')
+    fs.writeFileSync(apk, 'PK fake b')
+    await handle.installApp(apk)
+    const session = fake.sessions.find((s) => s.name === dev.id)
+    assert.equal(session.installed.length, 1)
+    assert.equal(session.opened, 2, 'the WebDriver session reopened after the install')
+    assert.equal(session.webdrivers, 1)
+    await handle.tapOn('Button')
+    await assert.rejects(handle.uninstallApp('org.b'), (err) => isMaestroError(err) && err.code === 'USAGE')
+    await md.deleteDevice(dev.id)
+  })
+
+  test('md.devicefarm: account, upload twice, apps, sessions', async () => {
+    const acct = await md.devicefarm.account()
+    assert.equal(acct.provider, 'devicefarm')
+    assert.ok(acct.account.trialMinutes, 'the trial minutes are reported')
+    const apk = path.join(tmp, 'util.apk')
+    fs.writeFileSync(apk, 'PK util apk')
+    const before = fake.uploads.length
+    const first = await md.devicefarm.upload(apk)
+    assert.ok(!first.reused)
+    const second = await md.devicefarm.upload(apk)
+    assert.equal(second.reused, true)
+    assert.equal(second.appRef, first.appRef)
+    assert.equal(fake.uploads.length, before + 1, 'the second upload reused the first')
+    const apps = await md.devicefarm.apps()
+    assert.ok(apps.apps.some((a) => a.appRef === first.appRef))
+    const sessions = await md.devicefarm.sessions()
+    assert.ok(sessions.sessions.length >= 1)
+    assert.ok(sessions.sessions.every((s) => /^df-[0-9a-f]{8}$/.test(s.name)))
+  })
+
   test('createDevice({cloud}) sends app files absolute', async () => {
     // The daemon runs from another directory than this process now does.
     const dir = fs.mkdtempSync(path.join(tmp, 'rel-'))
@@ -231,6 +266,22 @@ describe('hub mode', () => {
     // A device that is not a cloud device releases with nothing to report.
     const mock = await hubClient.lease({ select: { platform: 'mock' }, attach: false }).catch(() => undefined)
     if (mock) assert.deepEqual(await mock.release(), {})
+  })
+
+  test('installApp on a leased cloud device, and md.devicefarm through the hub', async () => {
+    const dev = await hubClient.lease({ select: { location: 'cloud', platform: 'android', name: 'Google Pixel 8' }, ttlSec: 900, attach: {} })
+    const apk = path.join(tmp, 'hub-b.apk')
+    fs.writeFileSync(apk, 'PK fake hub b')
+    await dev.installApp(apk)
+    const session = fake.sessions.find((s) => `${s.name}@hub-b` === dev.id)
+    assert.equal(session.installed.length, 1)
+    await dev.tapOn('Button')
+    await dev.release()
+    for (const what of ['account', 'apps', 'sessions']) {
+      const res = await hubClient.devicefarm[what]()
+      assert.equal(res.hub, 'hub-b', `${what} names the hub that answers`)
+    }
+    await assert.rejects(hubClient.devicefarm.upload(apk), (err) => isMaestroError(err) && err.code === 'FORBIDDEN')
   })
 
   test('the cloud catalog through a hub names the hub that answers', async () => {

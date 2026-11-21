@@ -297,3 +297,39 @@ func TestE2E_HubDeviceFarmRefusals(t *testing.T) {
 		t.Fatalf("a failing start check: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
 }
+
+func TestE2E_HubDeviceFarmInstall(t *testing.T) {
+	h := startDFHubs(t)
+	e := h.e
+	res := dfLease(t, h, "--platform", "android", "--name", "Google Pixel 8")
+	dev := res.Lease.Device
+	// The app goes up under the lease through the mesh, and b installs it.
+	e.mustOK(h.client, "install", writeFakeApp(t, e.cwd, "b.apk"), "--device", dev)
+	var installed []string
+	for _, s := range h.fake.Sessions() {
+		installed = append(installed, s.Installed...)
+	}
+	if len(installed) != 1 {
+		t.Fatalf("installed %v", installed)
+	}
+	e.mustOK(h.client, "tapOn", "Button", "--device", dev)
+	if r := e.runEnv(h.client, "uninstall", "org.b", "--device", dev); r.code != 2 {
+		t.Fatalf("uninstall: exit %d\n%s", r.code, r.stderr)
+	}
+	e.mustOK(h.client, "release", "--device", dev)
+}
+
+func TestE2E_HubDeviceFarmUtilities(t *testing.T) {
+	h := startDFHubs(t)
+	e := h.e
+	for _, sub := range []string{"account", "apps", "sessions"} {
+		r := e.mustOK(h.client, "devicefarm", sub, "--json")
+		if !strings.Contains(r.stdout, `"hub": "hub-b"`) {
+			t.Fatalf("%s through a: %s", sub, r.stdout)
+		}
+	}
+	r := e.runEnv(h.client, "devicefarm", "upload", writeFakeApp(t, e.cwd, "a.apk"))
+	if r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeForbidden || !strings.Contains(r.stderr, "leased cloud device") {
+		t.Fatalf("a remote upload: exit %d\n%s", r.code, r.stderr)
+	}
+}

@@ -7,7 +7,7 @@
 //   await m.assertVisible('Welcome', { timeout: 10_000 })
 
 export { machineName, CLIENT_MACHINE_HEADER } from './transport.js'
-export { MaestroD, hubURL, withQuery, ENV_HUB, ENV_TOKEN, ENV_CA, DEFAULT_HUB_PORT } from './daemon.js'
+export { MaestroD, DeviceFarmUtilities, hubURL, withQuery, ENV_HUB, ENV_TOKEN, ENV_CA, DEFAULT_HUB_PORT } from './daemon.js'
 export type { ConnectOptions, DeviceAttachOptions, LeaseOptions, ShutdownOptions } from './daemon.js'
 export { MaestroDevice, buildValue } from './device.js'
 export type { CallOptions, CommandMethod, CommandMethods, FlowOptions, RunOptions, Scalar } from './device.js'

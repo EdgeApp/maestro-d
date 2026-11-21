@@ -103,6 +103,18 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		if e := cloudAttachConfig(rd, &cfg); e != nil {
 			return nil, e
 		}
+	}
+	if rd != nil && cfg.AppFile != "" {
+		// An app to install goes through the provider, as the install
+		// route does; the app id defaults to the file's.
+		appID, e := s.installCloud(ctx, rd, cfg.AppFile, nil)
+		if e != nil {
+			return nil, e
+		}
+		if cfg.AppID == "" {
+			cfg.AppID = appID
+		}
+		cfg.AppFile = ""
 	} else if strings.HasPrefix(id, "df:") {
 		return nil, Errorf(CodeUsage, "%s is a cloud model, not a device: launch it first (device create --provider devicefarm, or lease --location cloud)", id)
 	}
@@ -226,8 +238,6 @@ func cloudAttachConfig(rd *remoteDevice, cfg *AttachConfig) *Error {
 		return Errorf(CodeUsage, "cloud device %s is %s, not %s", rd.id, rd.dinfo.Platform, cfg.Platform).WithDetails("field", "platform")
 	case cfg.Extra["capsFile"] != nil:
 		return Errorf(CodeUsage, "cloud device %s was launched with its capabilities; a caps file does not apply", rd.id).WithDetails("field", "extra.capsFile")
-	case cfg.AppFile != "":
-		return Errorf(CodeUsage, "cloud device %s: install the app with install (POST /v1/devices/{id}/apps), not appFile", rd.id).WithDetails("field", "appFile")
 	}
 	if cfg.AppID == "" {
 		cfg.AppID = rd.appID

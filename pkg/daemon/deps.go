@@ -67,6 +67,9 @@ type RemoteDriver interface {
 	// RestartSession ends the WebDriver session and opens a new one with
 	// the same capabilities, on the same driver (after an install).
 	RestartSession() error
+	// AppInstalled reports whether the app is on the device. A provider
+	// that installs asynchronously is polled with it after an install.
+	AppInstalled(appID string) (bool, error)
 	// Close ends the WebDriver session.
 	Close() error
 }
