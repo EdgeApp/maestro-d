@@ -454,6 +454,22 @@ describe('device state', () => {
     assert.equal(png.subarray(1, 4).toString(), 'PNG')
   })
 
+  test('screenshot() takes an image type and a region', async () => {
+    const jpeg = await dev.screenshot({ image: 'jpeg', quality: 50 })
+    assert.ok(Buffer.isBuffer(jpeg))
+    assert.equal(jpeg[0], 0xff)
+    assert.equal(jpeg[1], 0xd8)
+    const png = await dev.screenshot({ image: 'png', region: { x: 0, y: 0, width: 1, height: 1 } })
+    assert.equal(png.subarray(1, 4).toString(), 'PNG')
+    await assert.rejects(dev.screenshot({ region: { x: 5, y: 5, width: 10, height: 10 } }), err => isMaestroError(err, 'USAGE'))
+  })
+
+  test('the computer device steps reach the driver', async () => {
+    for (const r of [await dev.moveMouse('1, 1'), await dev.clickOn({ point: '1, 1', button: 'right' }), await dev.scrollAt({ point: '1, 1', y: 2 })]) {
+      assert.equal(r.ok, true)
+    }
+  })
+
   test('takeScreenshot writes into the report dir', async () => {
     const r = await dev.takeScreenshot(path.join(tmp, 'shot'))
     assert.equal(r.ok, true)

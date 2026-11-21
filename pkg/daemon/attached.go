@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +51,8 @@ type attached struct {
 	// BUSY without queueing.
 	busy    sync.Mutex
 	inFlite int32
+	// lastUsed is when a call last held the device (idledetach.go).
+	lastUsed atomic.Int64
 	// stopCapture ends the device.capture events (watchCapture).
 	stopCapture func()
 	// closing is closed when a detach's teardown has finished: until then

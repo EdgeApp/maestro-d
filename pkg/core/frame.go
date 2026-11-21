@@ -21,6 +21,13 @@ type FrameGrabber interface {
 	Frame(ctx context.Context, rect image.Rectangle) (*image.RGBA, error)
 }
 
+// ConnectionEnder is a driver whose connection to its device can end on its
+// own (the computer device when Screen Sharing drops it). Done is closed
+// once it has, and the daemon then detaches the device.
+type ConnectionEnder interface {
+	Done() <-chan struct{}
+}
+
 // IdleTimer is a driver whose attachment ends after this long without a
 // call. Zero means never.
 type IdleTimer interface {

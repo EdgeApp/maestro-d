@@ -353,6 +353,8 @@ scenario('C1', async () => {
   const model = (await run('sysctl', ['-n', 'hw.model'])).stdout.trim()
   const os = (await run('sw_vers', ['-productVersion'])).stdout.trim()
   assert.equal(d.name, host); assert.equal(d.model, model); assert.equal(d.osVersion, os)
+  const all = await cli(['device', 'list', '--json', '--daemon', daemonName])
+  assert.ok(/"id": "mac"[\s\S]*?"kind": "computer"/.test(all.stdout), 'the unfiltered listing lacks mac')
   await cli(['device', 'list', '--platform', 'macos', '--daemon', daemonName])
   const empty = path.join(scratch, 'emptyhome')
   await mkdir(empty, { recursive: true })
@@ -393,6 +395,58 @@ scenario('C3', async () => {
   assert.equal(W, screen.width * screen.scale); assert.equal(H, screen.height * screen.scale)
   const shot = await call('device.screenshot()', async () => await m.screenshot())
   checkQuadrants(await decodeImage(shot, 'c3'))
+})
+
+scenario('C4', async () => {
+  const m = await mac()
+  await m.screenshot() // the first full frame is the slow one
+  let t0 = Date.now()
+  const jpeg = await call('device.screenshot()', async () => await m.screenshot())
+  const jpegMs = Date.now() - t0
+  t0 = Date.now()
+  const png = await call(`device.screenshot({image: 'png'})`, async () => await m.screenshot({ image: 'png' }))
+  const pngMs = Date.now() - t0
+  console.log(`  JPEG ${jpegMs} ms, ${jpeg.length} bytes; PNG ${pngMs} ms, ${png.length} bytes`)
+  assert.equal(kindOf(jpeg), 'jpeg', 'the computer default is JPEG')
+  assert.equal(kindOf(png), 'png')
+  for (const [buf, name] of [[jpeg, 'c4.jpg'], [png, 'c4.png']] as const) {
+    const img = await decodeImage(buf, name)
+    assert.equal(img.w, W); assert.equal(img.h, H)
+    checkQuadrants(img)
+  }
+  assert.ok(jpegMs < 600, `JPEG took ${jpegMs} ms`)
+  await writeFile(path.join(scratch, 'screenshot-full.jpg'), jpeg)
+})
+
+scenario('C5', async () => {
+  const m = await mac()
+  let t0 = Date.now()
+  const red = await call('device.screenshot({region: {x: 0, y: 0, width: 800, height: 600}})', async () =>
+    await m.screenshot({ region: { x: 0, y: 0, width: 800, height: 600 } }))
+  const redMs = Date.now() - t0
+  allOf(await decodeImage(red, 'c5-red.jpg'), 'red')
+  t0 = Date.now()
+  const white = await call(`device.screenshot({image: 'png', region: {x: W-800, y: H-600, width: 800, height: 600}})`, async () =>
+    await m.screenshot({ image: 'png', region: { x: W - 800, y: H - 600, width: 800, height: 600 } }))
+  const whiteMs = Date.now() - t0
+  allOf(decodePNG(white), 'white')
+  console.log(`  800x600 regions: ${redMs} ms (JPEG), ${whiteMs} ms (PNG)`)
+  assert.ok(redMs < 200 && whiteMs < 200, 'a region took 200 ms or more')
+  // Straddling the centre, a region shows all four quadrants around the
+  // label: visibly that part of the screen and nothing else.
+  const centre = await call(`device.screenshot({image: 'png', region: {x: W/2-400, y: H/2-300, width: 800, height: 600}})`, async () =>
+    await m.screenshot({ image: 'png', region: { x: W / 2 - 400, y: H / 2 - 300, width: 800, height: 600 } }))
+  const ci = decodePNG(centre)
+  assert.equal(ci.w, 800); assert.equal(ci.h, 600)
+  checkQuadrants(ci)
+  await writeFile(path.join(scratch, 'screenshot-region.png'), centre)
+  await callFails(`device.screenshot({region: {x: W-10, y: 0, width: 20, height: 20}})`, async () =>
+    await m.screenshot({ region: { x: W - 10, y: 0, width: 20, height: 20 } }), 'USAGE', `${W}x${H}`)
+  const r = await cli(['get', 'screenshot', '--device', 'mac', '--region', '0,0,800,600', '-o', path.join(scratch, 'r.jpg'), '--daemon', daemonName])
+  assert.equal(r.code, 0)
+  const cliShot = await readFile(path.join(scratch, 'r.jpg'))
+  assert.equal(kindOf(cliShot), 'jpeg')
+  allOf(await decodeImage(cliShot, 'c5-cli.jpg'), 'red')
 })
 
 scenario('C6', async () => {
@@ -475,6 +529,58 @@ scenario('C11', async () => {
   await call(`assertScreenshot({path: 'c11-shot.png'})`, async () => await m.assertScreenshot({ path: 'c11-shot.png' }))
 })
 
+scenario('C12', async () => {
+  await freeMac()
+  const m = await mac({ idleTimeoutSec: 20 })
+  const t0 = Date.now()
+  const events: Array<{ type: string; message?: string; at: number }> = []
+  const ac = new AbortController()
+  const watching = (async () => {
+    try {
+      for await (const e of maestro.events({ device: 'mac', signal: ac.signal })) {
+        events.push({ type: e.type, message: e.message, at: (Date.now() - t0) / 1000 })
+      }
+    } catch { /* aborted */ }
+  })()
+  await sleep(10_000)
+  await call('device.screenshot() at t=10 s', async () => await m.screenshot())
+  await sleep(35_000)
+  // The stream replays the daemon's history first; the idle detach is the
+  // one event that carries the message "idle".
+  const detached = events.find(e => e.type === 'device.detached' && e.message === 'idle')
+  console.log(`  device events: ${JSON.stringify(events.filter(e => e.type.startsWith('device.')))}`)
+  assert.ok(detached, 'no device.detached event with message idle')
+  assert.ok(detached!.at >= 30 && detached!.at <= 41, `detached at t=${detached!.at} s; want 30-41 s`)
+  await callFails('device.screenshot() at t=45 s', async () => await m.screenshot(), 'DEVICE_NOT_ATTACHED')
+  assert.equal(await vncConnections(daemonName), 0)
+  ac.abort()
+  await watching
+  handle = null
+})
+
+scenario('C13', async () => {
+  await freeMac()
+  const logPath = path.join(home, 'run', 'computerDevice-cli', 'daemon.log')
+  const logStart = (await readFile(logPath, 'utf8').catch(() => '')).length // the daemon keeps its log across runs
+  const cliClient = await client.MaestroD.connect({ name: 'computerDevice-cli', bin })
+  await call(`connect({name: 'computerDevice-cli'}).attach({device: 'mac', extra: {idleTimeoutSec: 20}})`, async () =>
+    await cliClient.attach({ device: 'mac', extra: { idleTimeoutSec: 20 } }))
+  const tap = async (): Promise<CLIResult> => await cli(['tapOnPoint', '--device', 'mac', '--platform', 'macos', '--x', '100', '--y', '100', '--daemon', 'computerDevice-cli'])
+  const clicked = (ev: ObsEvent[]): boolean => ev.some(e => e.type === 'leftMouseDown' && nearPoint(e, 100, 100)) && ev.some(e => e.type === 'leftMouseUp')
+  let r!: CLIResult
+  assert.ok(clicked(await watch(async () => { r = await tap() })) && r.code === 0, 'the first one-shot click did not arrive')
+  say('waiting 35 s, past the 20 s timeout and the 10 s sweep')
+  await sleep(35_000)
+  // This one re-attaches on its own; its click must still arrive.
+  assert.ok(clicked(await watch(async () => { r = await tap() })) && r.code === 0, 'the click after the re-attach did not arrive')
+  const log = (await readFile(logPath, 'utf8')).slice(logStart)
+  const attaches = log.split('\n').filter(l => l.includes('Attached device mac'))
+  const idle = log.split('\n').filter(l => l.includes('Detaching mac: no call'))
+  console.log(`  daemon log: ${attaches.length} attaches, ${idle.length} idle detach`)
+  assert.equal(attaches.length, 2); assert.equal(idle.length, 1)
+  await cli(['stop', '--daemon', 'computerDevice-cli'])
+})
+
 scenario('C14', async () => {
   await freeMac()
   const tokens = path.join(scratch, 'hubs')
@@ -493,8 +599,11 @@ scenario('C14', async () => {
       if (st.stdout.includes('computerdevice-b')) break
       await sleep(500)
     }
-    let r = await cli(['lease', '--device', 'mac', '--no-attach', '--daemon', 'computerDevice-a'])
+    let r = await cli(['lease', '--device', 'mac', '--daemon', 'computerDevice-a'])
     assert.equal(r.code, 0, 'a local lease on hub A')
+    r = await cli(['get', 'screenshot', '--device', 'mac', '--region', '0,0,400,300', '-o', path.join(scratch, 'c14-under-lease.jpg'), '--daemon', 'computerDevice-a'])
+    assert.equal(r.code, 0, 'a screenshot under the lease')
+    allOf(await decodeImage(await readFile(path.join(scratch, 'c14-under-lease.jpg')), 'c14.jpg'), 'red')
     r = await cli(['release', '--device', 'mac', '--daemon', 'computerDevice-a'])
     r = await cli(['lease', '--os', '26', '--no-attach', '--daemon', 'computerDevice-a'])
     assert.ok(!/\bmac\b/.test(r.stdout.split('\n').find(l => l.includes('lease')) ?? ''), 'the --os 26 lease got mac')
@@ -575,6 +684,19 @@ scenario('C17', async () => {
   const checks = log.split('\n').filter(l => l.includes('screen check'))
   console.log(`  daemon log: ${checks[checks.length - 1]}`)
   assert.ok(checks[checks.length - 1]?.endsWith('screen check: desktop'))
+})
+
+scenario('C18', async () => {
+  // Input sent right after an attach arrives: Screen Sharing drops key
+  // presses and clicks for about 3 s after a login, and attach waits that
+  // out. A one-shot on a detached computer attaches and types at once.
+  await freeMac()
+  let ev = await watch(async () => await cli(['inputText', 'xyz', '--device', 'mac', '--platform', 'macos', '--daemon', 'computerDevice-cli']))
+  assert.equal(ev.filter(e => e.type === 'keyDown').map(e => e.characters).join(''), 'xyz', 'the one-shot inputText lost key presses')
+  await cli(['stop', '--daemon', 'computerDevice-cli'])
+  const m = await mac()
+  ev = await watch(async () => await call(`tapOn({point: '30%, 30%'}) right after attach`, async () => await m.tapOn({ point: '30%, 30%' })))
+  assert.ok(ev.some(e => e.type === 'leftMouseDown' && nearPoint(e, 0.3 * W, 0.3 * H)), 'the first click after attach did not arrive')
 })
 
 // --- main --------------------------------------------------------------------

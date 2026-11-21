@@ -30,6 +30,16 @@ import type {
 /** A bare command value: `tapOn('Login')`, `swipe('UP')`, `setDarkMode(true)`. */
 export type Scalar = string | number | boolean
 
+/** Options for `screenshot()`. */
+export interface ScreenshotOptions extends CallOptions {
+  /** jpeg or png (default: JPEG on the computer device, PNG elsewhere). */
+  image?: 'jpeg' | 'png'
+  /** JPEG quality, 1–100 (default 80). */
+  quality?: number
+  /** Capture only this rectangle, in screen pixels. */
+  region?: { x: number; y: number; width: number; height: number }
+}
+
 /** Per-call options that are not part of the step itself. */
 export interface CallOptions {
   /** Return BUSY instead of queueing behind a step already running on the device. */
@@ -383,9 +393,24 @@ export class MaestroDevice {
   // -------------------------------------------------------------------------
   // Inspection
 
-  /** Current screen as PNG bytes (not recorded as a step). */
-  async screenshot(opts: CallOptions = {}): Promise<Buffer> {
-    return this.transport.bytes(`${this.base}/screenshot`, { accept: 'image/png', signal: this.sig(opts) })
+  /**
+   * The current screen as image bytes (not recorded as a step): PNG, or JPEG
+   * on the computer device, unless `image` asks for one; `region` captures
+   * just that rectangle, in screen pixels.
+   */
+  async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
+    const q = new URLSearchParams()
+    if (opts.image != null) q.set('image', opts.image)
+    if (opts.quality != null) q.set('quality', String(opts.quality))
+    if (opts.region != null) {
+      q.set('x', String(opts.region.x))
+      q.set('y', String(opts.region.y))
+      q.set('width', String(opts.region.width))
+      q.set('height', String(opts.region.height))
+    }
+    const qs = q.toString()
+    const query = qs !== '' ? `?${qs}` : ''
+    return this.transport.bytes(`${this.base}/screenshot${query}`, { accept: 'image/png, image/jpeg', signal: this.sig(opts) })
   }
 
   /** View hierarchy as the normalized cross-platform tree (`maestro-runner hierarchy`'s shape). */

@@ -1185,6 +1185,9 @@ var getFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), att
 	boolFlag("raw", "Hierarchy as the driver's raw XML/JSON instead of the normalized tree", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	boolFlag("compact", "Hierarchy as a flat, greppable listing (as `hierarchy --compact`)", nil, func(o *daemonOpts, v bool) { o.compact = v }),
 	strFlag("find", "Hierarchy elements matching a substring (as `hierarchy --find`)", nil, func(o *daemonOpts, v string) { o.find = v }),
+	strFlag("image", "Screenshot image type: jpeg or png (default: from --out's extension, else the device's: JPEG on the computer, PNG elsewhere)", nil, func(o *daemonOpts, v string) { o.shot.image = v }),
+	intFlag("quality", "JPEG quality, 1-100 (default 80)", nil, func(o *daemonOpts, v int) { o.shot.quality = v }),
+	strFlag("region", "Capture only this rectangle of the screen, in screen pixels: x,y,width,height", nil, func(o *daemonOpts, v string) { o.shot.region = v }),
 })
 
 var daemonGetCommand = &cli.Command{
@@ -1210,7 +1213,11 @@ var daemonGetCommand = &cli.Command{
 		}
 		switch what {
 		case "screenshot":
-			png, err := client.Screenshot(ctx, id)
+			opts, err := o.shot.options(o.outPath) // maestro-d: screenshot_flags.go
+			if err != nil {
+				return err
+			}
+			png, contentType, err := client.ScreenshotWith(ctx, id, opts)
 			if err != nil {
 				return err
 			}
@@ -1220,7 +1227,7 @@ var daemonGetCommand = &cli.Command{
 				return err
 			}
 			if out == "" {
-				out = fmt.Sprintf("screenshot-%s.png", time.Now().Format("20060102-150405"))
+				out = fmt.Sprintf("screenshot-%s.%s", time.Now().Format("20060102-150405"), extensionFor(contentType))
 			}
 			if err := os.WriteFile(out, png, 0o644); err != nil {
 				return daemon.WrapErr(daemon.CodeUsage, err)
