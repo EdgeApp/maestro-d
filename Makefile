@@ -83,7 +83,7 @@ test-coverage-check:
 # maestro-d: statement coverage of the lines this branch adds or changes,
 # counting both the unit run and the binaries the e2e tests start (built
 # with -cover through MAESTRO_D_E2E_COVERDIR). Fails below 90%.
-COVER_PKGS=./pkg/daemon/... ./pkg/cli/... ./pkg/execbound/... ./pkg/simulator/... ./pkg/emulator/... ./pkg/executor/... ./pkg/driver/wda/... ./pkg/driver/devicelab_ios/... ./pkg/driver/xcodecache/... ./pkg/driver/browser/... ./pkg/uiautomator2/... ./pkg/maestro/... ./pkg/tracelog/... ./pkg/report/... ./pkg/capture/... ./pkg/driver/mock/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/device/... ./pkg/netshape/... ./pkg/flow/...
+COVER_PKGS=./pkg/daemon/... ./pkg/rfb/... ./pkg/cli/... ./pkg/execbound/... ./pkg/simulator/... ./pkg/emulator/... ./pkg/executor/... ./pkg/driver/wda/... ./pkg/driver/devicelab_ios/... ./pkg/driver/xcodecache/... ./pkg/driver/browser/... ./pkg/uiautomator2/... ./pkg/maestro/... ./pkg/tracelog/... ./pkg/report/... ./pkg/capture/... ./pkg/driver/mock/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/device/... ./pkg/netshape/... ./pkg/flow/...
 cover-changed:
 	@rm -rf .cover && mkdir -p .cover
 	MAESTRO_D_E2E_COVERDIR=$(CURDIR)/.cover $(GOTEST) -race -timeout 30m -coverprofile=coverage.out -covermode=atomic $(COVER_PKGS) $$(test -d pkg/hub && echo ./pkg/hub/...)
