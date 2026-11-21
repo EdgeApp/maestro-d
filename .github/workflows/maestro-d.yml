@@ -43,7 +43,7 @@ jobs:
       - name: Go tests (daemon, CLI, capture, hub, executor, mock driver)
         env:
           MAESTRO_D_REQUIRE_FFPROBE: '1'  # ffprobe-backed tests fail rather than skip
-        run: ffprobe -version | head -1 && go test -race -timeout 20m ./pkg/daemon/... ./pkg/cli/... ./pkg/capture/... ./pkg/hub/... ./pkg/executor/... ./pkg/driver/mock/... ./pkg/device/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/driver/wda/...
+        run: ffprobe -version | head -1 && go test -race -timeout 20m ./pkg/daemon/... ./pkg/cloudprov/... ./pkg/devicefarm/... ./pkg/cli/... ./pkg/capture/... ./pkg/hub/... ./pkg/executor/... ./pkg/driver/mock/... ./pkg/device/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/driver/wda/...
 
       - name: JavaScript library tests
         run: npm ci --no-audit --no-fund && npm test
