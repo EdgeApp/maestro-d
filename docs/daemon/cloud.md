@@ -158,7 +158,7 @@ df-2fd5de78@lab-mac released (lease 5ae28c45-…@lab-mac) (about 2.1 device minu
   lease, since the device went with it; the CLI prints that hint and
   forgets the lease, and without a lease the device is `DEVICE_NOT_FOUND`).
 - **Sharing.** A cloud device a hub launched is in its pool whatever
-  `--share-device` lists, and is listed `available: false` while its lease
+  `--share-device` and `config.json`'s `hubDevices` list, and is listed `available: false` while its lease
   lasts.
 - **Apps** are installed after the lease, through the install route.
 

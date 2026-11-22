@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,7 +129,7 @@ func TestServer_TrafficShaping(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err = env.c.Command(ctx, "mock-1", "setTrafficShape", nil, true)
-	if codeOf(t, err) != CodeUsage || !strings.Contains(res.Error.Message, "network config "+cfgPath) {
+	if codeOf(t, err) != CodeUsage || !strings.Contains(res.Error.Message, "config "+cfgPath) {
 		t.Fatalf("%v %+v", err, res)
 	}
 	if d, err := env.c.Device(ctx, "mock-1"); err != nil || d.TrafficShaping {
@@ -151,8 +152,8 @@ func TestServer_NetworkConfigFlag(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shapes.json")
 	writeNetworkConfig(t, path, ss.URL)
 	env.s.cfg.NetworkConfig = path
-	if got := env.s.networkConfigPath(); got != path {
-		t.Fatalf("path = %s", got)
+	if got, legacy := env.s.deviceConfig().Resolve(); got != path || !legacy {
+		t.Fatalf("path = %s, legacy %v", got, legacy)
 	}
 	env.attach("mock-1")
 	if _, err := env.c.Command(context.Background(), "mock-1", "resetTrafficShape", nil, true); err != nil {
@@ -161,7 +162,7 @@ func TestServer_NetworkConfigFlag(t *testing.T) {
 	if len(ss.calls()) != 1 {
 		t.Fatalf("calls: %v", ss.calls())
 	}
-	env.s.markTrafficShaping(nil) // nothing to mark is not an error
+	env.s.applyDeviceConfig(nil) // nothing to mark is not an error
 }
 
 const resetCall = "DELETE /shape/mock-1"
@@ -512,5 +513,241 @@ func TestServer_DetachPanicReleasesTheDevice(t *testing.T) {
 	defer cancel()
 	if _, err := env.c.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 		t.Fatalf("re-attach: %v", err)
+	}
+}
+
+// hubDevicesJSON is config.json for devices given by id: each entry's
+// setTrafficShape and resetTrafficShape go under trafficShaping.
+func hubDevicesJSON(t *testing.T, devices map[string]any) []byte {
+	t.Helper()
+	ids := make([]string, 0, len(devices))
+	for id := range devices {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	list := []map[string]any{}
+	for _, id := range ids {
+		e := map[string]any{"id": id}
+		shaping := map[string]any{}
+		for k, v := range devices[id].(map[string]any) {
+			if k == "setTrafficShape" || k == "resetTrafficShape" {
+				shaping[k] = v
+			} else {
+				e[k] = v
+			}
+		}
+		if len(shaping) > 0 {
+			e["trafficShaping"] = shaping
+		}
+		list = append(list, e)
+	}
+	data, err := json.Marshal(map[string]any{"hubDevices": list})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// A device's description in config.json is returned in listings, on its
+// own and in the attach answer; an entry with only a description is listed
+// but not shapeable. The file is read on every listing.
+func TestServer_DeviceDescription(t *testing.T) {
+	env := newTestEnv(t, 0)
+	ss := newShaperServer(t)
+	cfgPath := filepath.Join(Home(), "config.json")
+	write := func(devices map[string]any) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, hubDevicesJSON(t, devices), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(map[string]any{
+		"mock-1": map[string]any{
+			"description":       "Lab Pixel 8, landscape stand",
+			"setTrafficShape":   map[string]any{"method": "POST", "url": ss.URL + "/shape"},
+			"resetTrafficShape": map[string]any{"method": "DELETE", "url": ss.URL + "/shape"},
+		},
+		"mock-2": map[string]any{"description": "Spare phone, no shaper"},
+	})
+	ctx := context.Background()
+
+	if info := env.attach("mock-2"); info.Description != "Spare phone, no shaper" || info.TrafficShaping {
+		t.Fatalf("attach answer: %+v", info)
+	}
+	devs, err := env.c.Devices(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]DeviceInfo{}
+	for _, d := range devs {
+		byID[d.ID] = d
+	}
+	if d := byID["mock-1"]; d.Description != "Lab Pixel 8, landscape stand" || !d.TrafficShaping {
+		t.Fatalf("mock-1 listed as %+v", d)
+	}
+	if d := byID["mock-2"]; d.Description != "Spare phone, no shaper" || d.TrafficShaping {
+		t.Fatalf("mock-2 listed as %+v", d)
+	}
+	if d, err := env.c.Device(ctx, "mock-1"); err != nil || d.Description != "Lab Pixel 8, landscape stand" {
+		t.Fatalf("device: %v %+v", err, d)
+	}
+
+	// A described device without calls is not shapeable, and sends nothing.
+	res, err := env.c.Command(ctx, "mock-2", "setTrafficShape", nil, true)
+	if codeOf(t, err) != CodeUnsupported || res.Error.Message != "no traffic shaper is configured for mock-2 on this host" {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if len(ss.calls()) != 0 {
+		t.Fatalf("calls: %v", ss.calls())
+	}
+
+	// An edit shows at once; a removed description is omitted.
+	write(map[string]any{"mock-2": map[string]any{"description": "Spare phone, cracked screen"}})
+	if d, err := env.c.Device(ctx, "mock-2"); err != nil || d.Description != "Spare phone, cracked screen" {
+		t.Fatalf("after an edit: %v %+v", err, d)
+	}
+	if d, err := env.c.Device(ctx, "mock-1"); err != nil || d.Description != "" || d.TrafficShaping {
+		t.Fatalf("mock-1 after its entry went: %v %+v", err, d)
+	}
+
+	// A broken file lists no descriptions.
+	if err := os.WriteFile(cfgPath, []byte(`{"devices":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := env.c.Device(ctx, "mock-2"); err != nil || d.Description != "" {
+		t.Fatalf("a broken file still lists a description: %v %+v", err, d)
+	}
+}
+
+// writeDescriptions writes a config.json in this daemon's home that only
+// describes devices.
+func writeDescriptions(t *testing.T, descriptions map[string]string) {
+	t.Helper()
+	devices := map[string]any{}
+	for id, d := range descriptions {
+		devices[id] = map[string]any{"description": d}
+	}
+	if err := os.WriteFile(filepath.Join(Home(), "config.json"), hubDevicesJSON(t, devices), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A lease's answer, attached or not, carries the device's description.
+func TestLeases_AnswerCarriesTheDescription(t *testing.T) {
+	env := newHubEnv(t, Config{})
+	writeDescriptions(t, map[string]string{"mock-1": "Lab phone A", "mock-2": "Lab phone B"})
+	res := env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 30, Attach: &AttachConfig{Platform: "mock"}})
+	if res.Device == nil || res.Device.Description != "Lab phone A" || !res.Device.Attached {
+		t.Fatalf("attached lease answer: %+v", res.Device)
+	}
+	res = env.lease(env.remote, LeaseRequest{Device: "mock-2", TTLSec: 30})
+	if res.Device == nil || res.Device.Description != "Lab phone B" {
+		t.Fatalf("lease answer: %+v", res.Device)
+	}
+}
+
+// An AVD keyed avd:<name> keeps its description once it boots and is
+// listed under its serial; the boot and create answers carry descriptions,
+// and an AVD entry without calls shapes nothing.
+func TestBootAndCreate_AnswersCarryTheDescription(t *testing.T) {
+	h := newFakeHost()
+	h.live = []DeviceInfo{{ID: "avd:pix", Platform: "android", Kind: "emulator", Name: "pix", State: "Shutdown"}}
+	e := newMgmtEnv(t, h)
+	writeDescriptions(t, map[string]string{"avd:pix": "Pixel 9 AVD, API 35", "NEW-UDID": "CI simulator"})
+
+	dev, err := e.c.StartDevice(bg, BootRequest{Name: "avd:pix"})
+	if err != nil || dev.ID != "emulator-5554" || dev.Description != "Pixel 9 AVD, API 35" || dev.TrafficShaping {
+		t.Fatalf("boot answer: %+v %v", dev, err)
+	}
+	listed, err := e.c.Device(bg, "emulator-5554")
+	if err != nil || listed.Description != "Pixel 9 AVD, API 35" || listed.TrafficShaping {
+		t.Fatalf("running emulator: %+v %v", listed, err)
+	}
+
+	created, err := e.c.CreateDevice(bg, BootRequest{Platform: "ios", Name: "sim", Create: &CreateSpec{Type: "iPhone 16", Runtime: "iOS-18-6"}})
+	if err != nil || created.ID != "NEW-UDID" || created.Description != "CI simulator" {
+		t.Fatalf("create answer: %+v %v", created, err)
+	}
+}
+
+// A running emulator whose serial has its own entry (calls, no
+// description) still takes its AVD's description; a blank description on
+// an entry with calls is omitted.
+func TestServer_DescriptionPrecedenceAndBlanks(t *testing.T) {
+	ss := newShaperServer(t)
+	devs := []DeviceInfo{
+		{ID: "emulator-5554", Platform: "android", Kind: "emulator", Name: "pix"},
+		{ID: "emulator-5556", Platform: "android", Kind: "emulator", Name: "other"},
+		{ID: "mock-1", Platform: "mock", Kind: "device"},
+	}
+	calls := map[string]any{
+		"setTrafficShape":   map[string]any{"method": "POST", "url": ss.URL + "/shape"},
+		"resetTrafficShape": map[string]any{"method": "DELETE", "url": ss.URL + "/shape"},
+	}
+	withDescription := func(desc string) map[string]any {
+		m := map[string]any{"description": desc}
+		for k, v := range calls {
+			m[k] = v
+		}
+		return m
+	}
+	env := newTestEnv(t, 0)
+	data := hubDevicesJSON(t, map[string]any{
+		"emulator-5554": calls,
+		"avd:pix":       map[string]any{"description": "Pixel 9 AVD"},
+		"emulator-5556": withDescription("Its own"),
+		"avd:other":     map[string]any{"description": "Not used"},
+		"mock-1":        withDescription(" \t "),
+	})
+	if err := os.WriteFile(filepath.Join(Home(), "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env.s.applyDeviceConfig(devs)
+	if d := devs[0]; d.Description != "Pixel 9 AVD" || !d.TrafficShaping {
+		t.Errorf("emulator-5554: %+v", d)
+	}
+	if d := devs[1]; d.Description != "Its own" || !d.TrafficShaping {
+		t.Errorf("emulator-5556: %+v", d)
+	}
+	if d := devs[2]; d.Description != "" || !d.TrafficShaping {
+		t.Errorf("mock-1 with a blank description: %+v", d)
+	}
+	if b, _ := json.Marshal(devs[2]); strings.Contains(string(b), "description") {
+		t.Errorf("a blank description is serialized: %s", b)
+	}
+}
+
+// A running emulator with no entry of its own takes its AVD entry's calls,
+// in the listing and in the session's shaper; an entry keyed by a device's
+// name gives it nothing.
+func TestServer_AVDEntryShapesTheRunningEmulator(t *testing.T) {
+	ss := newShaperServer(t)
+	env := newTestEnv(t, 0)
+	data := hubDevicesJSON(t, map[string]any{
+		"avd:pix": map[string]any{
+			"description":       "Pixel 9 AVD",
+			"setTrafficShape":   map[string]any{"method": "POST", "url": ss.URL + "/shape"},
+			"resetTrafficShape": map[string]any{"method": "DELETE", "url": ss.URL + "/shape"},
+		},
+		"Lab Pixel": map[string]any{"description": "By name"},
+	})
+	if err := os.WriteFile(filepath.Join(Home(), "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	devs := []DeviceInfo{
+		{ID: "emulator-5554", Platform: "android", Kind: "emulator", Name: "pix"},
+		{ID: "PHONE-B", Platform: "android", Kind: "device", Name: "Lab Pixel"},
+	}
+	env.s.applyDeviceConfig(devs)
+	if d := devs[0]; d.Description != "Pixel 9 AVD" || !d.TrafficShaping {
+		t.Errorf("emulator-5554: %+v", d)
+	}
+	if d := devs[1]; d.Description != "" || d.TrafficShaping {
+		t.Errorf("an entry by name: %+v", d)
+	}
+	sh := env.s.trafficShaper("emulator-5554")
+	sh.Alias = avdEntryID(devs[0])
+	if _, err := sh.Device(); err != nil {
+		t.Errorf("shaper: %v", err)
 	}
 }

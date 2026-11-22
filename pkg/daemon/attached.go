@@ -183,6 +183,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 			s.events.Publish(Event{Type: "nestedStep", Device: id, Depth: depth, Step: desc, Passed: passed, DurationMs: durationMs, Error: errMsg})
 		},
 	}
+	shaper := s.trafficShaper(id)
 	sc := executor.SessionConfig{
 		Name:           unsafePath.ReplaceAllString(id, "_"),
 		AppID:          cfg.AppID,
@@ -192,7 +193,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		CommandTimeout: cfg.CommandTimeout,
 		ImportEnv:      s.importsEnv(),
 		PassEnv:        s.cfg.PassEnv,
-		TrafficShaper:  s.trafficShaper(id),
+		TrafficShaper:  shaper,
 	}
 	session, err := executor.NewSession(base, driver, rc, sc)
 	if err != nil {
@@ -216,6 +217,12 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		if info.OSVersion == "" {
 			info.OSVersion = pi.OSVersion
 		}
+	}
+	// An emulator's record keeps its AVD's name, as discovery lists it,
+	// not the driver's model string: status and a hub-booted emulator's
+	// record outlive the session, and config.json names it avd:<name>.
+	if name, ok := strings.CutPrefix(shaper.Alias, AVDPrefix); ok && name != "" {
+		info.Kind, info.Name = "emulator", name
 	}
 	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}

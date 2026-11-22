@@ -77,6 +77,10 @@ type hubEnv struct {
 	onStep func()
 }
 
+// hubEnvShared is what a hubEnv shares unless a test names its own list.
+var hubEnvShared = []string{"mock-1", "mock-2", "mock-9", "SIM-UP", "SIM-DOWN", "emulator-5554", "PHONE-A", "PHONE-B",
+	"Pixel", "Pixel_9", "Lab Pixel", "Pixel_Shared"}
+
 func newHubEnv(t *testing.T, cfg Config) *hubEnv {
 	t.Helper()
 	t.Setenv(EnvHome, t.TempDir())
@@ -140,6 +144,11 @@ func newHubEnv(t *testing.T, cfg Config) *hubEnv {
 		cfg.Name = "hubtest"
 	}
 	cfg.Hub, cfg.Token, cfg.HubName = true, "t", "hubtest"
+	if cfg.ShareDevices == nil && cfg.ShareConfig == nil {
+		// A hub shares only what it names: by default these tests share
+		// every device and AVD they list but Pixel_Private and the TV.
+		cfg.ShareDevices = hubEnvShared
+	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = ":7433"
 	}
@@ -1637,7 +1646,7 @@ func TestLeases_HubRunSweepsAndListensEverywhere(t *testing.T) {
 	t.Setenv(EnvHome, t.TempDir())
 	var n int32
 	pr, pw := io.Pipe()
-	s := New(Config{Name: "hubrun", Hub: true, HubName: "named", HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
+	s := New(Config{Name: "hubrun", Hub: true, HubName: "named", ShareDevices: []string{"mock-1", "mock-2"}, HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
 		ReportsDir: filepath.Join(t.TempDir(), "r")}, testDeps(&n, 0))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

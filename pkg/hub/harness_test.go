@@ -229,6 +229,13 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 	for _, o := range opts {
 		o(&mcfg, &dcfg)
 	}
+	if dcfg.ShareDevices == nil && dcfg.ShareConfig == nil {
+		// A hub shares only what it names: by default a test hub shares
+		// the devices it was started with.
+		for _, d := range devs {
+			dcfg.ShareDevices = append(dcfg.ShareDevices, d.ID)
+		}
+	}
 	h := &testHub{t: t, name: name, done: make(chan error, 1)}
 	mcfg.Logf = func(format string, args ...any) {
 		h.logMu.Lock()

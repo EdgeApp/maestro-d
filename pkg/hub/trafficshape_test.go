@@ -11,12 +11,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
 func withNetworkConfig(path string) hubOpt {
 	return func(_ *Config, d *daemon.Config) { d.NetworkConfig = path }
+}
+
+func withDeviceConfig(path string) hubOpt {
+	return func(_ *Config, d *daemon.Config) { d.DeviceConfig = path }
 }
 
 // A device's shaping call is made by the hub it is plugged into, with that
@@ -93,5 +98,44 @@ func TestMesh_TrafficShapingRunsOnTheOwner(t *testing.T) {
 	c.SetLease("b1", lb.Lease.ID)
 	if _, err := c.Command(ctx, "b1", "setTrafficShape", nil, true); !isCode(err, daemon.CodeUnsupported) {
 		t.Fatalf("b1: %v", err)
+	}
+}
+
+// A device's description comes from the hub it is plugged into, and every
+// hub in the mesh lists it.
+func TestMesh_DeviceDescriptionFromTheOwner(t *testing.T) {
+	setupHome(t)
+	dir := t.TempDir()
+	aConfig := filepath.Join(dir, "config.json")
+	data, _ := json.Marshal(map[string]any{"hubDevices": []any{map[string]any{"id": "a1", "description": "Lab phone on hub A"}}})
+	if err := os.WriteFile(aConfig, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := startHub(t, "hub-a", testDevices("a"), withDeviceConfig(aConfig))
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withDeviceConfig(filepath.Join(dir, "none.json")))
+	waitLinked(t, a, "hub-b")
+	waitLinked(t, b, "hub-a")
+	ctx := context.Background()
+
+	var got map[string]string
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		res, err := b.client().DeviceList(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = map[string]string{}
+		for _, d := range res.Devices {
+			got[d.ID] = d.Description
+		}
+		if _, ok := got["a1@hub-a"]; ok || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got["a1@hub-a"] != "Lab phone on hub A" || got["a2@hub-a"] != "" || got["b1"] != "" {
+		t.Fatalf("listing: %v", got)
+	}
+	if d, err := b.client().Device(ctx, "a1@hub-a"); err != nil || d.Description != "Lab phone on hub A" || d.TrafficShaping {
+		t.Fatalf("device: %v %+v", err, d)
 	}
 }

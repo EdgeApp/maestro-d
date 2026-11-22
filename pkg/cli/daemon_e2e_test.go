@@ -578,7 +578,8 @@ func TestE2E_Leases(t *testing.T) {
 	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "needs --peer-token") {
 		t.Fatalf("no peer token: exit %d\n%s", r.code, r.stderr)
 	}
-	mesh := []string{"--name", "lh-hub", "--no-mdns", "--peer-token", "lease-peer", "--lease-max", "1h", "--lease-max", "mock-2=8s"}
+	mesh := []string{"--name", "lh-hub", "--no-mdns", "--peer-token", "lease-peer", "--lease-max", "1h", "--lease-max", "mock-2=8s",
+		"--share-device", "mock-1", "--share-device", "mock-2"}
 	r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, mesh...)...)
 	if r.code != 0 {
 		t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)

@@ -10,58 +10,80 @@ A device with no entry cannot be shaped, and otherwise works as before.
 
 ## The config file
 
-`<home>/network.json`: `~/.maestro-d/network.json`, or
-`$MAESTRO_D_HOME/network.json` when that is set. `--network-config FILE` on
-`serve` and `hub start` (or `MAESTRO_D_NETWORK_CONFIG`) points elsewhere;
-`hub service install` passes it on to the LaunchAgent.
+Each device's calls live in its `trafficShaping` entry in the host's
+[config.json](config.md), beside its description and whether the hub
+shares it:
 
-- It is read on **every** call and every device listing, so an edit needs no
-  restart.
+```json
+{
+  "hubDevices": [
+    {
+      "id": "00008110-EXAMPLE0001",
+      "trafficShaping": {
+        "setTrafficShape": {
+          "method": "POST",
+          "url": "https://shaper.example/v1/shape",
+          "headers": { "Authorization": "Bearer EXAMPLE-TOKEN" },
+          "body": { "ip": "192.0.2.15", "mbit": "${mbit}", "lossPct": "${lossPct}",
+                    "latencyMs": "${latencyMs}", "jitterMs": "${jitterMs}", "direction": "${direction}" },
+          "directionValues": { "download": "down", "upload": "up", "both": "both" },
+          "insecureSkipVerify": true
+        },
+        "resetTrafficShape": {
+          "method": "DELETE",
+          "url": "https://shaper.example/v1/shape/192.0.2.15",
+          "headers": { "Authorization": "Bearer EXAMPLE-TOKEN" },
+          "insecureSkipVerify": true
+        }
+      }
+    },
+    {
+      "id": "EXAMPLEPIXEL01",
+      "trafficShaping": {
+        "setTrafficShape": {
+          "method": "PUT",
+          "url": "http://other-shaper.example/devices/7?mbit=${mbit}&loss=${lossPct}&delay=${latencyMs}&jitter=${jitterMs}&dir=${direction}"
+        },
+        "resetTrafficShape": { "method": "DELETE", "url": "http://other-shaper.example/devices/7" }
+      }
+    }
+  ]
+}
+```
+
+- It is read on **every** call and every device listing, so an edit to the
+  calls needs no restart.
 - It must be readable by its owner only (`chmod 600`), because a call may
-  carry credentials. Otherwise every shaping command answers `USAGE`. On
-  Windows, whose files have no such mode, the file's access control list
-  governs instead.
-- A missing file means no device is configured.
-- A malformed file, an unknown key or placeholder, or a device with only one
-  of its two calls answers `USAGE`, naming the file, the device and the
-  problem. Device listings log the problem and report no device as
-  shapeable.
+  carry credentials. Otherwise every shaping command answers `USAGE`.
+- A device with no `trafficShaping` cannot be shaped. A config that cannot
+  be used answers `USAGE`, naming the file, the device and the problem;
+  device listings log it and report no device as shapeable.
+
+Anything device-specific the shaper needs — an IP address, its own device
+number — is written into that device's calls; maestro-d never looks
+anything up. Where the file is read, and its other keys, are in
+[config.md](config.md).
+
+### The older network.json
+
+A host with no `config.json` reads `<home>/network.json`, or the file
+`--network-config` (deprecated; `MAESTRO_D_NETWORK_CONFIG`) names. It holds
+only the calls, keyed by device id, and shares no device:
 
 ```json
 {
   "devices": {
-    "00008110-EXAMPLE0001": {
-      "setTrafficShape": {
-        "method": "POST",
-        "url": "https://shaper.example/v1/shape",
-        "headers": { "Authorization": "Bearer EXAMPLE-TOKEN" },
-        "body": { "ip": "192.0.2.15", "mbit": "${mbit}", "lossPct": "${lossPct}",
-                  "latencyMs": "${latencyMs}", "jitterMs": "${jitterMs}", "direction": "${direction}" },
-        "directionValues": { "download": "down", "upload": "up", "both": "both" },
-        "insecureSkipVerify": true
-      },
-      "resetTrafficShape": {
-        "method": "DELETE",
-        "url": "https://shaper.example/v1/shape/192.0.2.15",
-        "headers": { "Authorization": "Bearer EXAMPLE-TOKEN" },
-        "insecureSkipVerify": true
-      }
-    },
     "EXAMPLEPIXEL01": {
-      "setTrafficShape": {
-        "method": "PUT",
-        "url": "http://other-shaper.example/devices/7?mbit=${mbit}&loss=${lossPct}&delay=${latencyMs}&jitter=${jitterMs}&dir=${direction}"
-      },
+      "setTrafficShape": { "method": "PUT", "url": "http://other-shaper.example/devices/7?mbit=${mbit}" },
       "resetTrafficShape": { "method": "DELETE", "url": "http://other-shaper.example/devices/7" }
     }
   }
 }
 ```
 
-Devices are keyed by id, as `maestro-d devices` lists them: a UDID, an adb
-serial or `avd:<name>`. Anything device-specific the shaper needs — an IP
-address, its own device number — is written into that device's calls;
-maestro-d never looks anything up.
+Each device needs both calls. To move to `config.json`, list each device in
+`hubDevices` with its two calls under `trafficShaping`; once `config.json`
+exists, `network.json` is no longer read.
 
 ### A call
 

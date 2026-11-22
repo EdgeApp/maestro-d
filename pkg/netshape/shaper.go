@@ -23,10 +23,13 @@ const excerptMax = 2048
 // Shaper sends one device's calls, reading the config on every call so an
 // edit needs no restart.
 type Shaper struct {
-	Path     string // the network.json to read
+	Source   Source // where the config is read, resolved on every call
 	DeviceID string
-	Timeout  time.Duration                 // DefaultTimeout when zero
-	Log      func(format string, a ...any) // one line per call; nil logs nothing
+	// Alias, when set, names another entry whose calls the device uses
+	// when its own entry has none (a running emulator's avd:<name>).
+	Alias   string
+	Timeout time.Duration                 // DefaultTimeout when zero
+	Log     func(format string, a ...any) // one line per call; nil logs nothing
 }
 
 // Result is a call's answer.
@@ -58,15 +61,21 @@ func (e *FetchError) Error() string {
 
 func (e *FetchError) Unwrap() error { return e.Err }
 
-// Device returns this device's calls: ErrNotConfigured when it has no
-// entry, a *ConfigError when the file cannot be used.
+// Device returns this device's calls, from its own entry or its Alias's:
+// ErrNotConfigured when neither has them, a *ConfigError when the file cannot be
+// used.
 func (s *Shaper) Device() (Device, error) {
-	cfg, err := Load(s.Path)
+	cfg, _, err := s.Source.Load()
 	if err != nil {
 		return Device{}, err
 	}
 	d, ok := cfg.Lookup(s.DeviceID)
-	if !ok {
+	if (!ok || !d.Shapeable()) && s.Alias != "" {
+		if a, found := cfg.Lookup(s.Alias); found && a.Shapeable() {
+			d, ok = a, true
+		}
+	}
+	if !ok || !d.Shapeable() {
 		return Device{}, fmt.Errorf("%w for %s on this host", ErrNotConfigured, s.DeviceID)
 	}
 	return d, nil

@@ -505,6 +505,9 @@ type DeviceInfo struct {
 	// AppiumVersion is the Appium major version a cloud device's provider
 	// runs ("2" or "3").
 	AppiumVersion string `json:"appiumVersion,omitempty"`
+	// Description is the free text the device's host gives it in its
+	// config.json, if any.
+	Description string `json:"description,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of

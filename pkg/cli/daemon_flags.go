@@ -50,7 +50,9 @@ type daemonOpts struct {
 	// serve: TLS files and the environment names sessions may import.
 	TLSCert, TLSKey string
 	PassEnv         []string
-	// NetworkConfig is serve's and hub start's --network-config.
+	// DeviceConfig and NetworkConfig are serve's and hub start's --config
+	// and (older) --network-config.
+	DeviceConfig  string
 	NetworkConfig string
 
 	// explicit records the table flags given on the command line (not
@@ -89,6 +91,8 @@ type hubOpts struct {
 	tokenFile string
 	share     []string
 	shareTV   []string
+	// configShare is the hubDevices of the config the hub starts with.
+	configShare []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
 	leaseMax      []string
 	remoteShell   bool

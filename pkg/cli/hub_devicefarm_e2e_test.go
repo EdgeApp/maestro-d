@@ -53,8 +53,8 @@ func startDFHubs(t *testing.T, extraB ...string) *dfHubs {
 		}
 		return out.Daemon
 	}
-	h.a = started(e.runEnv(h.envA, append([]string{"hub", "start", "--daemon", "dfhub-a", "--name", "hub-a"}, mesh...)...))
-	h.b = started(e.runEnv(h.envB, append(append([]string{"hub", "start", "--daemon", "dfhub-b", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm"}, extraB...), mesh...)...))
+	h.a = started(e.runEnv(h.envA, append([]string{"hub", "start", "--daemon", "dfhub-a", "--name", "hub-a", "--share-device", "mock-a"}, mesh...)...))
+	h.b = started(e.runEnv(h.envB, append(append([]string{"hub", "start", "--daemon", "dfhub-b", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm", "--share-device", "mock-b"}, extraB...), mesh...)...))
 	h.client = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c"), "MAESTRO_D_TEST_MACHINE=machine-a",
 		"MAESTRO_D_HUB="+h.a.HTTPAddr, "MAESTRO_D_TOKEN=df-tok")
 	// Wait for the link: hub status through a names b, linked.

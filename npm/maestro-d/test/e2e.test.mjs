@@ -636,7 +636,7 @@ describe('leases', () => {
   const hubName = 'jsleases'
 
   before(() => {
-    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--json'], {
+    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--share-device', 'mock-h1', '--share-device', 'mock-h2', '--share-device', 'mock-unlisted', '--json'], {
       env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
     })
     addr = JSON.parse(out.toString()).daemon.httpAddr

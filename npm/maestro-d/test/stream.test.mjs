@@ -136,7 +136,7 @@ describe('streams on a hub', () => {
 
   before(() => {
     const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0',
-      '--token', token, '--peer-token', 'stream-peer', '--json'], { env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-s1' } })
+      '--token', token, '--peer-token', 'stream-peer', '--share-device', 'mock-s1', '--json'], { env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-s1' } })
     addr = JSON.parse(out.toString()).daemon.httpAddr
   })
 

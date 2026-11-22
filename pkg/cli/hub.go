@@ -11,6 +11,7 @@ package cli
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,7 +64,7 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
 	strFlag("peer-ca", "PEM trust root for peers' TLS (default: the system roots)", nil,
 		func(o *daemonOpts, v string) { o.hub.peerCA = v }),
-	{name: "share-device", kind: kindSlice, usage: "Share only this device, by id or name (a running emulator's AVD name); repeatable. Default: every device (TVs are shared only with --share-tv)",
+	{name: "share-device", kind: kindSlice, usage: "Share this device, by id or name (a running emulator's AVD name); repeatable. A hub shares only the devices named here, with --share-tv or in config.json's hubDevices: none by default",
 		apply: func(o *daemonOpts, v string) error { o.hub.share = append(o.hub.share, v); return nil }},
 	{name: "share-tv", kind: kindSlice, usage: "Share this Apple TV, by id or name; repeatable. A TV pairs with several Macs, so name each TV on one hub only. Default: none",
 		apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
@@ -71,7 +72,9 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
 	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
-	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
+	strFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
+	strFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 	boolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
 		func(o *daemonOpts, v bool) { o.hub.devicefarm = v }),
@@ -237,6 +240,9 @@ func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
 	if err = checkCloudFlags(o); err != nil {
 		return "", "", err
 	}
+	if o.hub.configShare, err = configShare(o); err != nil {
+		return "", "", err
+	}
 	return token, peerToken, nil
 }
 
@@ -271,6 +277,57 @@ func checkCloudFlags(o *daemonOpts) error {
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return daemon.Errorf(daemon.CodeUsage, "--devicefarm-credentials-file %s has mode %04o; make it 0600 (chmod 600) so no one else can read it", abs, perm)
+	}
+	return nil
+}
+
+// configShare reads the device config a hub starts with and returns the
+// devices its hubDevices lists, which the hub shares. A config.json that
+// cannot be used stops the start: it decides what the hub shares. An older
+// network.json shares nothing and is not read here; its problems reach
+// the shaping commands, as before.
+func configShare(o *daemonOpts) ([]string, error) {
+	if err := checkConfigFlags(o); err != nil {
+		return nil, err
+	}
+	src := daemon.DeviceConfigSource(o.DeviceConfig, o.NetworkConfig)
+	if _, legacy := src.Resolve(); legacy {
+		return nil, nil
+	}
+	cfg, _, err := src.Load()
+	if err != nil {
+		return nil, daemon.Errorf(daemon.CodeUsage, "%v", err)
+	}
+	return cfg.Shared, nil
+}
+
+// checkConfigFlags settles which device config file is read: only one
+// ever is. A flag on the command line wins over the other's environment
+// variable; the two flags together, or the two variables, are USAGE. A
+// --config file that does not exist is USAGE too, so a mistyped path does
+// not start a daemon that shares and describes nothing.
+func checkConfigFlags(o *daemonOpts) error {
+	if o.DeviceConfig != "" && o.NetworkConfig != "" {
+		switch c, n := o.explicit["config"], o.explicit["network-config"]; {
+		case c && !n:
+			o.NetworkConfig = ""
+		case n && !c:
+			o.DeviceConfig = ""
+		case c && n:
+			return daemon.Errorf(daemon.CodeUsage, "--config and --network-config name one file each; give one (--network-config is the older format)")
+		default:
+			return daemon.Errorf(daemon.CodeUsage, "MAESTRO_D_CONFIG and MAESTRO_D_NETWORK_CONFIG name one file each; unset one (MAESTRO_D_NETWORK_CONFIG is the older format)")
+		}
+	}
+	if o.DeviceConfig == "" {
+		return nil
+	}
+	if _, err := os.Stat(o.DeviceConfig); errors.Is(err, os.ErrNotExist) {
+		from := "--config"
+		if !o.explicit["config"] {
+			from = "MAESTRO_D_CONFIG"
+		}
+		return daemon.Errorf(daemon.CodeUsage, "%s %s does not exist", from, o.DeviceConfig)
 	}
 	return nil
 }
@@ -328,6 +385,9 @@ func hubChildArgs(o *daemonOpts) []string {
 	}
 	for _, n := range o.PassEnv {
 		args = append(args, "--pass-env", n)
+	}
+	if o.DeviceConfig != "" {
+		args = append(args, "--config", abs(o.DeviceConfig))
 	}
 	if o.NetworkConfig != "" {
 		args = append(args, "--network-config", abs(o.NetworkConfig))
@@ -469,12 +529,14 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		HubName:          o.hub.name,
 		ShareDevices:     o.hub.share,
 		ShareTVs:         o.hub.shareTV,
+		ShareConfig:      o.hub.configShare,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,
 		Advertise:        o.hub.advertise,
 		AllowRemoteShell: o.hub.remoteShell,
 		PassEnv:          o.PassEnv,
 		ReportsDir:       daemon.ReportsDir(o.Name),
+		DeviceConfig:     o.DeviceConfig,
 		NetworkConfig:    o.NetworkConfig,
 		StartArgs:        redactArgs(os.Args[1:]),
 		Ready:            os.Stdout,

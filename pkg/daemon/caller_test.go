@@ -115,7 +115,7 @@ func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
 }
 
 func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: true})
+	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: true, ShareDevices: []string{"mock-1", "mock-2"}})
 	ctx := context.Background()
 	env.lease(t, "mock-1")
 	if _, err := env.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -213,7 +213,7 @@ func TestCaller_EnvironmentStaysOnTheHost(t *testing.T) {
 		cfg     Config
 		imports bool
 	}{
-		{"hub", Config{Hub: true, HTTPAddr: ":7433", Token: "t"}, false},
+		{"hub", Config{Hub: true, HTTPAddr: ":7433", Token: "t", ShareDevices: []string{"mock-1", "mock-2"}}, false},
 		{"non-loopback serve", Config{HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
 		{"loopback serve", Config{HTTPAddr: "127.0.0.1:7433"}, true},
 		{"socket only", Config{}, true},
