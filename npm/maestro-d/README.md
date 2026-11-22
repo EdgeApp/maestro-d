@@ -193,7 +193,7 @@ form for commands the library does not know yet.
 
 #### Inspection (not recorded as steps)
 
-`screenshot()` → PNG `Buffer`; `hierarchy()` → the normalized tree
+`screenshot({image?, quality?, region?})` → PNG `Buffer` (JPEG on the computer device, `mac`; `image` asks for either, `region: {x, y, width, height}` captures just that rectangle); `hierarchy()` → the normalized tree
 (`HierarchyNode`: `type`, `id`, `text`, `bounds`, `children`, the same on
 every platform) / `hierarchyRaw()` → the driver's own XML/JSON (`Buffer`); `state()`; `platformInfo()`; `vars()` / `setVars({NAME: value})`;
 `eval(script)` runs JavaScript in the session's engine; `refresh()` re-reads

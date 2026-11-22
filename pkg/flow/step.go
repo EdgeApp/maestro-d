@@ -115,6 +115,11 @@ const (
 	StepSetTrafficShape   StepType = "setTrafficShape"
 	StepResetTrafficShape StepType = "resetTrafficShape"
 
+	// maestro-d: the computer device's mouse (desktop_steps.go)
+	StepMoveMouse StepType = "moveMouse"
+	StepClickOn   StepType = "clickOn"
+	StepScrollAt  StepType = "scrollAt"
+
 	// Media
 	StepTakeScreenshot   StepType = "takeScreenshot"
 	StepAssertScreenshot StepType = "assertScreenshot"

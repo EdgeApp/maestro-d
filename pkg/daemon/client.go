@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"net"
 	"net/http"
@@ -709,26 +710,59 @@ func (c *Client) Flow(ctx context.Context, device string, req FlowRequest, wait 
 // ---------------------------------------------------------------------------
 // Inspection
 
-// Screenshot returns a PNG.
+// Screenshot returns the device's default image of the whole screen: PNG,
+// or JPEG on the computer device. ScreenshotWith also returns its type.
 func (c *Client) Screenshot(ctx context.Context, device string) ([]byte, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, devPath(device, "/screenshot"), nil)
-	if err != nil {
-		return nil, err
+	data, _, err := c.ScreenshotWith(ctx, device, ScreenshotOptions{})
+	return data, err
+}
+
+// ScreenshotOptions asks for an image type, a JPEG quality and a region of
+// the screen (maestro-d). The zero value is the device's default image of
+// the whole screen: PNG, or JPEG on the computer device.
+type ScreenshotOptions struct {
+	Image   string           // "", "png" or "jpeg"
+	Quality int              // 1–100; 0 = the daemon's default
+	Region  *image.Rectangle // nil = the whole screen
+}
+
+// ScreenshotWith returns a screenshot and its content type.
+func (c *Client) ScreenshotWith(ctx context.Context, device string, o ScreenshotOptions) ([]byte, string, error) {
+	q := url.Values{}
+	if o.Image != "" {
+		q.Set("image", o.Image)
 	}
-	req.Header.Set("Accept", "image/png")
+	if o.Quality != 0 {
+		q.Set("quality", strconv.Itoa(o.Quality))
+	}
+	if r := o.Region; r != nil {
+		q.Set("x", strconv.Itoa(r.Min.X))
+		q.Set("y", strconv.Itoa(r.Min.Y))
+		q.Set("width", strconv.Itoa(r.Dx()))
+		q.Set("height", strconv.Itoa(r.Dy()))
+	}
+	path := devPath(device, "/screenshot")
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", "image/png, image/jpeg")
 	resp, e := c.do(req)
 	if e != nil {
-		return nil, e
+		return nil, "", e
 	}
 	defer resp.Body.Close()
 	data, rerr := io.ReadAll(resp.Body)
 	if rerr != nil {
-		return nil, WrapErr(CodeDaemonUnavailable, rerr)
+		return nil, "", WrapErr(CodeDaemonUnavailable, rerr)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, errorFromResponse(resp.StatusCode, resp.Header, data)
+		return nil, "", errorFromResponse(resp.StatusCode, resp.Header, data)
 	}
-	return data, nil
+	return data, resp.Header.Get("Content-Type"), nil
 }
 
 // Hierarchy returns the view hierarchy: parsed JSON (iOS/mock) or the raw

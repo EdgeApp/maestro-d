@@ -29,6 +29,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`clearKeychain`](#clearkeychain) | _none_ | Clears keychain. |
 | [`clearNetworkMocks`](#clearnetworkmocks) | _none_ | Clears all network mocks and blocks. |
 | [`clearState`](#clearstate) | `appId` | Clears app state. |
+| [`clickOn`](#clickon) | `point` | Clicks a mouse button on the computer, optionally after moving to a point. |
 | [`closeTab`](#closetab) | _none_ | Closes the current tab and switches to the previous one. |
 | [`copyTextFrom`](#copytextfrom) | `text` | Copies text from element. |
 | [`defineVariables`](#definevariables) | — | Defines session variables; the value is a map of NAME: value. |
@@ -56,6 +57,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`loadAuthState`](#loadauthstate) | `path` | Loads cookies + localStorage + sessionStorage from a JSON file. |
 | [`longPressOn`](#longpresson) | `text` | Long presses on an element (alias for tapOn with longPress=true). |
 | [`mockNetwork`](#mocknetwork) | — | Mocks API responses matching URL pattern and method. |
+| [`moveMouse`](#movemouse) | `point` | Moves the computer's pointer to a point, keeping any held button down. |
 | [`openBrowser`](#openbrowser) | `url` | Opens a URL in the browser. |
 | [`openLink`](#openlink) | `link` | Opens a URL. |
 | [`openNotifications`](#opennotifications) | _none_ | Pulls down the Android notification shade. Android-only (no-op on iOS). |
@@ -74,6 +76,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`runWebViewScript`](#runwebviewscript) | `file` | Loads and executes a JS file in a mobile WebView via CDP. |
 | [`saveAuthState`](#saveauthstate) | `path` | Saves cookies + localStorage + sessionStorage to a JSON file. |
 | [`scroll`](#scroll) | `direction` | Scrolls the screen. |
+| [`scrollAt`](#scrollat) | — | Turns the computer's scroll wheel at a point. |
 | [`scrollUntilVisible`](#scrolluntilvisible) | `element.text` | Scrolls until element is visible. |
 | [`setAirplaneMode`](#setairplanemode) | `enabled` | Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100). |
 | [`setClipboard`](#setclipboard) | `text` | Sets the clipboard to a specific text value. |
@@ -524,6 +527,29 @@ await m.clearState({ appId: '<appId>', … })
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `appId` | `string` |  |
+
+## `clickOn`
+
+Clicks a mouse button on the computer, optionally after moving to a point.
+
+```sh
+maestro-d clickOn <point>
+maestro-d clickOn --point <point> [--key value …]
+```
+```js
+await m.clickOn('<point>')
+await m.clickOn({ point: '<point>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `point` | `string` | "x, y" in screen pixels or "x%, y%"; omitted clicks where the pointer is |
+| `button` | `string` | left (default), right or middle |
+| `count` | `number` | 1 (default) to 3: a double or triple click |
 
 ## `closeTab`
 
@@ -1227,6 +1253,27 @@ await m.mockNetwork({ … })
 | `method` | `string` | GET, POST, etc. (empty = match all) |
 | `response` | `unknown` |  |
 
+## `moveMouse`
+
+Moves the computer's pointer to a point, keeping any held button down.
+
+```sh
+maestro-d moveMouse <point>
+maestro-d moveMouse --point <point> [--key value …]
+```
+```js
+await m.moveMouse('<point>')
+await m.moveMouse({ point: '<point>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `point` | `string` | "x, y" in screen pixels or "x%, y%" |
+
 ## `openBrowser`
 
 Opens a URL in the browser.
@@ -1613,6 +1660,27 @@ await m.scroll({ direction: '<direction>', … })
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `direction` | `string` |  |
 | `engine` | `string` | Engine selects the scroll backend on Android. "" (default) and "adb" → adb input swipe (matches upstream Maestro). "agent" → driver's existing on-device gesture path (UIA2 server /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent injection for the devicelab driver). Ignored on iOS/web. |
+
+## `scrollAt`
+
+Turns the computer's scroll wheel at a point.
+
+```sh
+maestro-d scrollAt --key value […]
+```
+```js
+await m.scrollAt({ … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `point` | `string` | "x, y" in screen pixels or "x%, y%" |
+| `x` | `number` | Horizontal wheel ticks, -50 to 50; positive scrolls right |
+| `y` | `number` | Vertical wheel ticks, -50 to 50; positive scrolls down |
 
 ## `scrollUntilVisible`
 

@@ -10,6 +10,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"image"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -469,6 +470,23 @@ func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
 	}
 	defer s.enterStep(ctx)()
 	return s.fr.driver.Screenshot()
+}
+
+// Frame captures a rectangle of the screen as pixels, for a driver that
+// can (core.FrameGrabber), under the session's lock as Screenshot is
+// (maestro-d).
+func (s *Session) Frame(ctx context.Context, rect image.Rectangle) (*image.RGBA, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended() {
+		return nil, errSessionClosed
+	}
+	fg, ok := core.Unwrap(s.fr.driver).(core.FrameGrabber)
+	if !ok {
+		return nil, fmt.Errorf("the driver does not capture frames")
+	}
+	defer s.enterStep(ctx)()
+	return fg.Frame(ctx, rect)
 }
 
 // Hierarchy returns the driver's view hierarchy (XML or JSON, per driver).

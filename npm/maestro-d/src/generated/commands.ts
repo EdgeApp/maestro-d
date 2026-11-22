@@ -307,6 +307,21 @@ export interface ClearStateParams {
   appId?: string
 }
 
+/** Clicks a mouse button on the computer, optionally after moving to a point. */
+export interface ClickOnParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** "x, y" in screen pixels or "x%, y%"; omitted clicks where the pointer is */
+  point?: string
+  /** left (default), right or middle */
+  button?: string
+  /** 1 (default) to 3: a double or triple click */
+  count?: number
+}
+
 /** Closes the current tab and switches to the previous one. */
 export interface CloseTabParams {
   optional?: boolean
@@ -861,6 +876,17 @@ export interface MockNetworkParams {
   response?: unknown
 }
 
+/** Moves the computer's pointer to a point, keeping any held button down. */
+export interface MoveMouseParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** "x, y" in screen pixels or "x%, y%" */
+  point?: string
+}
+
 /** Opens a URL in the browser. */
 export interface OpenBrowserParams {
   optional?: boolean
@@ -1077,6 +1103,21 @@ export interface ScrollParams {
   direction?: string
   /** Engine selects the scroll backend on Android. "" (default) and "adb" → adb input swipe (matches upstream Maestro). "agent" → driver's existing on-device gesture path (UIA2 server /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent injection for the devicelab driver). Ignored on iOS/web. */
   engine?: string
+}
+
+/** Turns the computer's scroll wheel at a point. */
+export interface ScrollAtParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** "x, y" in screen pixels or "x%, y%" */
+  point?: string
+  /** Horizontal wheel ticks, -50 to 50; positive scrolls right */
+  x?: number
+  /** Vertical wheel ticks, -50 to 50; positive scrolls down */
+  y?: number
 }
 
 /** Scrolls until element is visible. */
@@ -1568,6 +1609,7 @@ export const COMMANDS = {
   clearKeychain: { name: 'clearKeychain', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears keychain.' },
   clearNetworkMocks: { name: 'clearNetworkMocks', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears all network mocks and blocks.' },
   clearState: { name: 'clearState', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Clears app state.' },
+  clickOn: { name: 'clickOn', scalar: 'point', bareField: 'point', valueLess: false, compound: false, doc: 'Clicks a mouse button on the computer, optionally after moving to a point.' },
   closeTab: { name: 'closeTab', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Closes the current tab and switches to the previous one.' },
   copyTextFrom: { name: 'copyTextFrom', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Copies text from element.' },
   defineVariables: { name: 'defineVariables', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Defines session variables; the value is a map of NAME: value.' },
@@ -1595,6 +1637,7 @@ export const COMMANDS = {
   loadAuthState: { name: 'loadAuthState', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Loads cookies + localStorage + sessionStorage from a JSON file.', files: { path: { kind: 'path' } } },
   longPressOn: { name: 'longPressOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Long presses on an element (alias for tapOn with longPress=true).' },
   mockNetwork: { name: 'mockNetwork', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Mocks API responses matching URL pattern and method.' },
+  moveMouse: { name: 'moveMouse', scalar: 'point', bareField: 'point', valueLess: false, compound: false, doc: 'Moves the computer\'s pointer to a point, keeping any held button down.' },
   openBrowser: { name: 'openBrowser', scalar: 'url', bareField: 'url', valueLess: false, compound: false, doc: 'Opens a URL in the browser.' },
   openLink: { name: 'openLink', scalar: 'link', bareField: 'link', valueLess: false, compound: false, doc: 'Opens a URL.' },
   openNotifications: { name: 'openNotifications', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Pulls down the Android notification shade. Android-only (no-op on iOS).' },
@@ -1613,6 +1656,7 @@ export const COMMANDS = {
   runWebViewScript: { name: 'runWebViewScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in a mobile WebView via CDP.', files: { file: { kind: 'path' } } },
   saveAuthState: { name: 'saveAuthState', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Saves cookies + localStorage + sessionStorage to a JSON file.', files: { path: { kind: 'output' } } },
   scroll: { name: 'scroll', scalar: 'direction', bareField: 'direction', valueLess: false, compound: false, doc: 'Scrolls the screen.' },
+  scrollAt: { name: 'scrollAt', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Turns the computer\'s scroll wheel at a point.' },
   scrollUntilVisible: { name: 'scrollUntilVisible', scalar: 'element.text', bareField: 'element.text', valueLess: false, compound: false, doc: 'Scrolls until element is visible.' },
   setAirplaneMode: { name: 'setAirplaneMode', scalar: 'enabled', bareField: 'enabled', valueLess: false, compound: false, doc: 'Sets airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100).' },
   setClipboard: { name: 'setClipboard', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Sets the clipboard to a specific text value.' },
@@ -1662,6 +1706,7 @@ export interface CommandParams {
   clearKeychain: ClearKeychainParams
   clearNetworkMocks: ClearNetworkMocksParams
   clearState: ClearStateParams
+  clickOn: ClickOnParams
   closeTab: CloseTabParams
   copyTextFrom: CopyTextFromParams
   defineVariables: DefineVariablesParams
@@ -1689,6 +1734,7 @@ export interface CommandParams {
   loadAuthState: LoadAuthStateParams
   longPressOn: LongPressOnParams
   mockNetwork: MockNetworkParams
+  moveMouse: MoveMouseParams
   openBrowser: OpenBrowserParams
   openLink: OpenLinkParams
   openNotifications: OpenNotificationsParams
@@ -1707,6 +1753,7 @@ export interface CommandParams {
   runWebViewScript: RunWebViewScriptParams
   saveAuthState: SaveAuthStateParams
   scroll: ScrollParams
+  scrollAt: ScrollAtParams
   scrollUntilVisible: ScrollUntilVisibleParams
   setAirplaneMode: SetAirplaneModeParams
   setClipboard: SetClipboardParams

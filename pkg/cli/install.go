@@ -24,6 +24,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/computer"
 )
 
 // appExecCommand is the seam over exec.Command for the app tools (aapt2,
@@ -172,6 +173,9 @@ var (
 
 // daemonInstallApp is daemon.Deps.InstallApp.
 func daemonInstallApp(ctx context.Context, id, platform, path string) error {
+	if id == computer.DeviceID || platform == computer.Platform { // maestro-d
+		return daemon.Errorf(daemon.CodeUsage, "the computer device (%s) installs no apps", id)
+	}
 	if platform == "" {
 		platform = guessPlatform(id)
 	}
@@ -188,6 +192,9 @@ func daemonInstallApp(ctx context.Context, id, platform, path string) error {
 
 // daemonUninstallApp is daemon.Deps.UninstallApp.
 func daemonUninstallApp(ctx context.Context, id, platform, appID string) error {
+	if id == computer.DeviceID || platform == computer.Platform { // maestro-d
+		return daemon.Errorf(daemon.CodeUsage, "the computer device (%s) installs no apps", id)
+	}
 	if platform == "" {
 		platform = guessPlatform(id)
 	}

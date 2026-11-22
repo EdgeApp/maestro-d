@@ -580,7 +580,7 @@ curl -s -H "$H" $D/v1/devices/FAKE-IOS-UDID-0001/attach -d '{
 
 | field | maps to `test` flag | |
 | --- | --- | --- |
-| `platform` | `--platform` | `android`, `ios`, `web`, `mock`; inferred from the id when omitted |
+| `platform` | `--platform` | `android`, `ios`, `web`, `mock`, `macos` (the [computer device](../macos.md), id `mac`, local callers only); inferred from the id when omitted |
 | `driver` | `--driver` | |
 | `appFile` | `--app-file` | installed on attach unless `noAppInstall`; a host path, or an uploaded `blob:sha256:<hex>/<basename>` ref (the only form a remote caller may send) |
 | `appId` | `--app-id` | default for `launchApp`, `stopApp`, `clearState`, … |
@@ -1148,11 +1148,25 @@ symlink that leads out of the directory is `FORBIDDEN`.
 
 ### `GET /v1/devices/{id}/screenshot`
 
-PNG bytes (`Content-Type: image/png`), or with `?format=json` /
+PNG bytes (`Content-Type: image/png`), or JPEG on the
+[computer device](../macos.md), or with `?format=json` /
 `Accept: application/json` the envelope `{"ok": true, "data": "<base64>"}`.
+`Accept` never picks the image type.
+
+| query | |
+| --- | --- |
+| `image` | `jpeg` or `png` (default: `jpeg` on the computer, `png` on every other driver) |
+| `quality` | JPEG quality, 1–100 (default 80) |
+| `x`, `y`, `width`, `height` | all four or none: capture just that rectangle, in screen pixels; outside the screen is `USAGE` naming its size |
+
+With no query a driver's PNG is answered as before, byte for byte. Otherwise
+the computer captures just the rectangle, and any other driver's PNG is
+decoded, cropped and re-encoded. Those answers carry `X-Maestro-Screen: W,H`
+and `X-Maestro-Rect: x,y,w,h`.
 
 ```sh
 curl -s -H "$H" $D/v1/devices/FAKEPIXEL0002/screenshot -o now.png
+curl -s -H "$H" "$D/v1/devices/mac/screenshot?image=png&x=0&y=0&width=800&height=600" -o corner.png
 ```
 
 ### `GET /v1/devices/{id}/stream?fps=15&audio=false`

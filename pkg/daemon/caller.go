@@ -110,6 +110,10 @@ func forbidden(format string, args ...any) *Error {
 // browser profile, an app file that is not a blob ref, or Appium (its
 // driver, server URL or capabilities file).
 func checkRemoteAttach(cfg *AttachConfig) *Error {
+	if strings.EqualFold(cfg.Platform, ComputerPlatform) {
+		return forbidden("a remote caller cannot attach this computer: the computer device is local only").
+			WithDetails("field", "platform")
+	}
 	if strings.EqualFold(cfg.Platform, "web") || isWebDriver(cfg.Driver) {
 		return forbidden("a remote caller cannot attach a web session: hubs share simulators, emulators and phones, not the host's browser").
 			WithDetails("field", "platform")

@@ -17,6 +17,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/computer"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
@@ -67,6 +68,9 @@ var iosUDIDRe = regexp.MustCompile(`^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]
 // guessPlatform infers a platform from a device id when --platform was not
 // given: look the id up among visible devices, else fall back on its shape.
 func guessPlatform(id string) string {
+	if id == computer.DeviceID { // maestro-d: the computer device
+		return computer.Platform
+	}
 	for _, d := range collectDevices("", true) {
 		if d.ID == id {
 			return d.Platform
@@ -172,6 +176,9 @@ func teamIDFromEnv(lookup func(string) (string, bool)) string {
 // daemonNewDriver opens a driver for one device through upstream's
 // CreateDriver and describes it for the session report.
 func daemonNewDriver(ctx context.Context, id string, cfg daemon.AttachConfig) (core.Driver, daemon.DriverInfo, func(), error) {
+	if isComputerAttach(id, cfg) {
+		return computerNewDriver(ctx, id, cfg)
+	}
 	rc := attachToRunConfig(id, cfg)
 	if rc.Platform == "" && strings.ToLower(rc.Driver) != "mock" {
 		return nil, daemon.DriverInfo{}, nil, fmt.Errorf("cannot infer platform for device %q; pass --platform", id)
@@ -277,10 +284,19 @@ func daemonListDevices(platform string) []daemon.DeviceInfo {
 	if platform == "web" {
 		return nil
 	}
+	if platform == computer.Platform {
+		if mac, ok := computerEntry(); ok {
+			return []daemon.DeviceInfo{mac}
+		}
+		return nil
+	}
 	entries := collectDevices(platform, true)
-	out := make([]daemon.DeviceInfo, 0, len(entries)+len(mocks))
+	out := make([]daemon.DeviceInfo, 0, len(entries)+len(mocks)+1)
 	if platform == "" {
 		out = append(out, mocks...)
+		if mac, ok := computerEntry(); ok {
+			out = append(out, mac)
+		}
 	}
 	for _, e := range entries {
 		out = append(out, daemon.DeviceInfo{

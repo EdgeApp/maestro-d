@@ -206,9 +206,9 @@ export interface DeviceInfo {
   hub?: string
   /** On a hub: the device's id on its own hub's machine. */
   localId?: string
-  /** android | ios | web | mock */
+  /** android | ios | web | mock | macos (the computer device, `mac`) */
   platform: string
-  /** device | emulator | simulator */
+  /** device | emulator | simulator | tv | computer */
   kind?: string
   /** An Android phone's user-set name (else its model), an emulator's AVD name, an iOS device's or simulator's name. */
   name?: string

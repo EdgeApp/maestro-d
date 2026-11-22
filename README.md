@@ -109,6 +109,10 @@ can share one device session.
   with `create`, `DELETE …?delete=true`) and JavaScript (`catalog()`,
   `createDevice()`, `deleteDevice()`). Only what maestro-d created is deleted
   without `--force`.
+- **The Mac as a device.** On macOS, `mac` is the Mac maestro-d runs on,
+  driven over its own Screen Sharing: screenshots (JPEG, PNG, any region),
+  clicks, drags, scrolling, keys and text, with `moveMouse`, `clickOn` and
+  `scrollAt` for the mouse. Local only. See [docs/macos.md](docs/macos.md).
 - **Devices on another machine.** `--target-hub[=HOST[:PORT]]` (or
   `$MAESTRO_D_HUB`) points any client command at a daemon started with
   `serve --http ADDR --token T` (`--tls-cert`/`--tls-key` for HTTPS);

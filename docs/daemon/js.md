@@ -53,6 +53,13 @@ directory stays after `detach()` for local readers and is swept 3 days after
 its last write; `attach({…, discardReports: true})` deletes it at detach
 instead.
 
+`device.screenshot({image, quality, region})` resolves a `Buffer`: PNG, or
+JPEG on the [computer device](../macos.md), unless `image` asks for
+`'jpeg'` or `'png'`; `quality` is JPEG's 1–100 (default 80) and `region:
+{x, y, width, height}` captures just that rectangle in screen pixels
+([`GET …/screenshot`](rest.md#get-v1devicesidscreenshot)). With no options a
+phone's PNG is byte for byte what it was before.
+
 `device.stream({fps, audio, signal})` resolves a `VideoStream`
 (`{fps: number | 'device', audio, codecs, body: ReadableStream<Uint8Array>}`):
 the device's live screen as fragmented MP4 from

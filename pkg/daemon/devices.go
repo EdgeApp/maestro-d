@@ -457,7 +457,7 @@ func shutdownDevice(info DeviceInfo) error {
 		if err := emulator.ShutdownEmulator(info.ID, 60*time.Second); err != nil {
 			return WrapErr(CodeDeviceError, err)
 		}
-	case info.Platform == "mock" || info.Platform == "web":
+	case info.Platform == "mock" || info.Platform == "web" || info.Platform == ComputerPlatform:
 		return nil
 	default:
 		return Errorf(CodeUsage, "device %s is a physical device and cannot be stopped", info.ID)

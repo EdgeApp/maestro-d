@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"image"
 	"os"
 	"path/filepath"
 	"testing"
@@ -297,6 +298,34 @@ func TestSession_ClosedRejects(t *testing.T) {
 	}
 	if _, err := s.Screenshot(context.Background()); err == nil {
 		t.Fatal("closed session took a screenshot")
+	}
+}
+
+// frameMock is the mock driver with a FrameGrabber.
+type frameMock struct{ *mock.Driver }
+
+func (frameMock) Frame(_ context.Context, r image.Rectangle) (*image.RGBA, error) {
+	return image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy())), nil
+}
+
+func TestSession_Frame(t *testing.T) {
+	r := image.Rect(1, 1, 4, 3)
+	s, err := NewSession(context.Background(), frameMock{mock.New(mock.Config{})}, RunnerConfig{OutputDir: t.TempDir()}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := s.Frame(context.Background(), r)
+	if err != nil || img.Bounds().Dx() != 3 {
+		t.Fatalf("Frame: %v", err)
+	}
+	s.Close()
+	if _, err := s.Frame(context.Background(), r); err == nil || err.Error() != "session is closed" {
+		t.Errorf("closed session: %v", err)
+	}
+
+	plain, _ := newTestSession(t, SessionConfig{}, mock.Config{})
+	if _, err := plain.Frame(context.Background(), r); err == nil {
+		t.Error("a driver without frames answered a frame")
 	}
 }
 

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +51,8 @@ type attached struct {
 	// BUSY without queueing.
 	busy    sync.Mutex
 	inFlite int32
+	// lastUsed is when a call last held the device (idledetach.go).
+	lastUsed atomic.Int64
 	// stopCapture ends the device.capture events (watchCapture).
 	stopCapture func()
 	// closing is closed when a detach's teardown has finished: until then
@@ -132,6 +136,12 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		driver, dinfo, cleanup = rd.driver, rd.dinfo, func() {}
 	} else if driver, dinfo, cleanup, err = s.deps.NewDriver(ctx, id, cfg); err != nil {
 		cancel()
+		// A driver factory that already chose a code (USAGE for a bad
+		// computer.json) keeps it; anything else is a device fault.
+		var de *Error
+		if errors.As(err, &de) {
+			return nil, Errorf(de.Code, "attach %s: %s", id, de.Message)
+		}
 		return nil, WrapErr(CodeDeviceError, fmt.Errorf("attach %s: %w", id, err))
 	}
 	if cleanup == nil {

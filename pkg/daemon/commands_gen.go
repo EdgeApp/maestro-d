@@ -243,6 +243,15 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "appId", Type: "string", Doc: ""},
 	}},
+	"clickOn": {Name: "clickOn", Scalar: "point", BareField: "point", ValueLess: false, Compound: false, FreeForm: false, Doc: "Clicks a mouse button on the computer, optionally after moving to a point.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "point", Type: "string", Doc: "\"x, y\" in screen pixels or \"x%, y%\"; omitted clicks where the pointer is"},
+		{Key: "button", Type: "string", Doc: "left (default), right or middle"},
+		{Key: "count", Type: "int", Doc: "1 (default) to 3: a double or triple click"},
+	}},
 	"closeTab": {Name: "closeTab", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Closes the current tab and switches to the previous one.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -595,6 +604,13 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "method", Type: "string", Doc: "GET, POST, etc. (empty = match all)"},
 		{Key: "response", Type: "MockResponseSpec", Doc: ""},
 	}},
+	"moveMouse": {Name: "moveMouse", Scalar: "point", BareField: "point", ValueLess: false, Compound: false, FreeForm: false, Doc: "Moves the computer's pointer to a point, keeping any held button down.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "point", Type: "string", Doc: "\"x, y\" in screen pixels or \"x%, y%\""},
+	}},
 	"openBrowser": {Name: "openBrowser", Scalar: "url", BareField: "url", ValueLess: false, Compound: false, FreeForm: false, Doc: "Opens a URL in the browser.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -737,6 +753,15 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "direction", Type: "string", Doc: ""},
 		{Key: "engine", Type: "string", Doc: "Engine selects the scroll backend on Android. \"\" (default) and \"adb\" → adb input swipe (matches upstream Maestro). \"agent\" → driver's existing on-device gesture path (UIA2 server /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent injection for the devicelab driver). Ignored on iOS/web."},
+	}},
+	"scrollAt": {Name: "scrollAt", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Turns the computer's scroll wheel at a point.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "point", Type: "string", Doc: "\"x, y\" in screen pixels or \"x%, y%\""},
+		{Key: "x", Type: "int", Doc: "Horizontal wheel ticks, -50 to 50; positive scrolls right"},
+		{Key: "y", Type: "int", Doc: "Vertical wheel ticks, -50 to 50; positive scrolls down"},
 	}},
 	"scrollUntilVisible": {Name: "scrollUntilVisible", Scalar: "element.text", BareField: "element.text", ValueLess: false, Compound: false, FreeForm: false, Doc: "Scrolls until element is visible.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

@@ -220,6 +220,7 @@ on-demand capture stopping because nobody watches is not published.
 | `wda`, a physical iPhone or iPad on a macOS host, over USB | Apple's QuickTime screen-capture channel through the capture helper ([below](#iphones-and-ipads)): the device's own H.264 at about 60 fps (`X-Maestro-Fps: device`; `fps` is advisory) and LPCM audio as the device delivers it (48 kHz, 2 channels, 16-bit integer as `ipcm` or 32-bit float as `fpcm`). Always on while the device is attached |
 | `wda`, an iOS simulator | `CAPTURE_UNAVAILABLE` `simulator`; `--record` still records through `simctl io recordVideo`, and the recording steps stay unsupported |
 | `wda` on tvOS; `devicelab` (iOS simulators), `appium`, `cdp` (web) | `CAPTURE_UNAVAILABLE` `unsupported-platform` |
+| `computer` (the Mac, [macos.md](../macos.md)) | `CAPTURE_UNAVAILABLE` `unsupported-platform`: Screen Sharing sends VNC clients pixels, never video |
 | every other driver | `CAPTURE_UNAVAILABLE` `unsupported-platform` for now |
 
 Measured on an M1 Max MacBook Pro (macOS 26) with an iPhone 13

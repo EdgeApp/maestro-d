@@ -71,6 +71,7 @@ type daemonOpts struct {
 	force   bool             // device stop --force, run --continue-on-error, get hierarchy --raw
 	orphans bool             // device stop --orphans
 	outPath string           // get screenshot -o, stream -o
+	shot    shotFlags        // get screenshot --image, --quality, --region (maestro-d)
 	compact bool             // get hierarchy --compact
 	find    string           // get hierarchy --find
 	manage  deviceManageOpts // device catalog / create

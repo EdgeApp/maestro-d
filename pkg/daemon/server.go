@@ -826,6 +826,11 @@ func (s *Server) getAttached(id string) *attached {
 func (s *Server) takeAttached(id string) *attached {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.takeAttachedLocked(id)
+}
+
+// takeAttachedLocked is takeAttached with s.mu held.
+func (s *Server) takeAttachedLocked(id string) *attached {
 	a := s.attached[id]
 	delete(s.attached, id)
 	if a != nil && s.attaching[id] == nil {
@@ -899,6 +904,12 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 		}
 		s.mu.Unlock()
 		unlockInstall()
+		if e == nil {
+			// maestro-d (idledetach.go): watched only once stored, so a
+			// detach the watchers start finds the attachment.
+			s.watchIdle(a, a.session.Driver())
+			s.watchConnection(a, a.session.Driver())
+		}
 		return a, e
 	}
 }
@@ -953,10 +964,12 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, a *attached) bo
 	atomic.AddInt32(&a.inFlite, 1)
 	s.registry.SetBusy(a.id, true)
 	s.idle.Hold()
+	a.touch()
 	return true
 }
 
 func (s *Server) release(a *attached) {
+	a.touch()
 	s.idle.Release()
 	if atomic.AddInt32(&a.inFlite, -1) == 0 {
 		s.registry.SetBusy(a.id, false)
@@ -1294,23 +1307,32 @@ func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	opts, e := parseShotOptions(r.URL.Query()) // maestro-d: screenshot.go
+	if e != nil {
+		writeError(w, e)
+		return
+	}
 	if !s.acquire(w, r, a) {
 		return
 	}
 	defer s.release(a)
-	png, err := a.session.Screenshot(r.Context())
-	if err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+	sh, e := takeShot(r.Context(), a.session, opts)
+	if e != nil {
+		writeError(w, e)
 		return
 	}
 	if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
-		writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: base64.StdEncoding.EncodeToString(png)})
+		writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: base64.StdEncoding.EncodeToString(sh.data)})
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Length", strconv.Itoa(len(png)))
+	w.Header().Set("Content-Type", sh.contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(sh.data)))
+	if sh.described {
+		w.Header().Set("X-Maestro-Screen", fmt.Sprintf("%d,%d", sh.screen.X, sh.screen.Y))
+		w.Header().Set("X-Maestro-Rect", fmt.Sprintf("%d,%d,%d,%d", sh.rect.Min.X, sh.rect.Min.Y, sh.rect.Dx(), sh.rect.Dy()))
+	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(png)
+	_, _ = w.Write(sh.data)
 }
 
 func (s *Server) handleHierarchy(w http.ResponseWriter, r *http.Request) {
