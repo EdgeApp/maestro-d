@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -110,12 +111,12 @@ func TestLeases_SelectorMatchesAndroidPhoneProps(t *testing.T) {
 func TestSharedInfoMatchesAPhoneBySerialOrName(t *testing.T) {
 	phone := DeviceInfo{ID: "FAKEPIXEL0001", Platform: "android", Kind: "device", Name: "Lab Pixel", Model: "Pixel 8"}
 	for _, entry := range []string{"FAKEPIXEL0001", "Lab Pixel"} {
-		s := &Server{cfg: Config{ShareDevices: []string{entry}}}
+		s := &Server{cfg: Config{Hub: true, ShareDevices: []string{entry}}}
 		if !s.sharedInfo(phone) {
 			t.Errorf("--share-device %q does not share %+v", entry, phone)
 		}
 	}
-	s := &Server{cfg: Config{ShareDevices: []string{"Other"}}}
+	s := &Server{cfg: Config{Hub: true, ShareDevices: []string{"Other"}}}
 	if s.sharedInfo(phone) {
 		t.Error("--share-device Other shares the phone")
 	}
@@ -189,4 +190,200 @@ func TestLeases_SelectorBootOfAnAVDNamedLikeAPhone(t *testing.T) {
 	if res.Lease.Device != "emulator-5554" || len(booted) != 1 {
 		t.Fatalf("lease %+v, booted %v", res.Lease, booted)
 	}
+}
+
+// A hub shares only what it names, through --share-device, --share-tv or
+// config.json's hubDevices; a daemon that is not a hub shares everything.
+func TestSharedInfo_ExplicitOnly(t *testing.T) {
+	phone := DeviceInfo{ID: "PHONE-A", Platform: "android", Kind: "device", Name: "Lab Pixel"}
+	tv := DeviceInfo{ID: "TV-1", Platform: "ios", Kind: "tv", Name: "Lab TV"}
+	for _, c := range []struct {
+		name      string
+		cfg       Config
+		phone, tv bool
+	}{
+		{"hub naming nothing", Config{Hub: true}, false, false},
+		{"plain daemon", Config{}, true, true},
+		{"--share-device", Config{Hub: true, ShareDevices: []string{"PHONE-A"}}, true, false},
+		{"--share-device never shares a TV", Config{Hub: true, ShareDevices: []string{"TV-1"}}, false, false},
+		{"--share-tv", Config{Hub: true, ShareTVs: []string{"Lab TV"}}, false, true},
+		{"config.json phone", Config{Hub: true, ShareConfig: []string{"PHONE-A"}}, true, false},
+		{"config.json TV", Config{Hub: true, ShareConfig: []string{"TV-1"}}, false, true},
+		{"flags and config.json add up", Config{Hub: true, ShareDevices: []string{"Lab Pixel"}, ShareConfig: []string{"TV-1"}}, true, true},
+	} {
+		s := &Server{cfg: c.cfg}
+		if got := s.sharedInfo(phone); got != c.phone {
+			t.Errorf("%s: phone shared %v", c.name, got)
+		}
+		if got := s.sharedInfo(tv); got != c.tv {
+			t.Errorf("%s: TV shared %v", c.name, got)
+		}
+	}
+	s := &Server{cfg: Config{Hub: true, ShareDevices: []string{"a"}, ShareTVs: []string{"t"}, ShareConfig: []string{"c"}}}
+	if got := s.shareList(); got != "a; TVs t; config.json c" {
+		t.Errorf("shareList = %q", got)
+	}
+}
+
+// A hub that names nothing lists nothing to a remote caller, refuses its
+// lease and its create, and still lists everything to a local one.
+func TestLeases_HubNamingNothingSharesNothing(t *testing.T) {
+	env := newHubEnv(t, Config{ShareDevices: []string{}})
+	ctx := context.Background()
+	if devs, err := env.remote.Devices(ctx, ""); err != nil || len(devs) != 0 {
+		t.Fatalf("remote listing: %+v %v", devs, err)
+	}
+	if devs, err := env.local.Devices(ctx, ""); err != nil || len(devs) == 0 {
+		t.Fatalf("local listing: %+v %v", devs, err)
+	}
+	_, err := env.remote.AcquireLease(ctx, LeaseRequest{Device: "mock-1"})
+	wantErrCode(t, err, CodeDeviceNotFound)
+	_, err = env.remote.CreateDevice(ctx, BootRequest{Platform: "ios", Name: "sim", Create: &CreateSpec{Type: "iPhone 16"}})
+	if de := wantErrCode(t, err, CodeForbidden); !strings.Contains(de.Message, "this hub shares only nothing") {
+		t.Fatalf("create: %v", de.Message)
+	}
+}
+
+// config.json's hubDevices put a device in the pool.
+func TestLeases_ShareConfigShares(t *testing.T) {
+	env := newHubEnv(t, Config{ShareConfig: []string{"mock-2"}})
+	ctx := context.Background()
+	devs, err := env.remote.Devices(ctx, "")
+	if err != nil || len(devs) != 1 || devs[0].ID != "mock-2" {
+		t.Fatalf("remote listing: %+v %v", devs, err)
+	}
+	if res := env.lease(env.remote, LeaseRequest{Device: "mock-2"}); res.Lease.Device != "mock-2" {
+		t.Fatalf("lease: %+v", res.Lease)
+	}
+}
+
+// A hubDevices avd:<name> entry shares the AVD, its running emulator, and
+// an android boot or create by its bare name. An entry is an id: a device's name
+// shares nothing, as it would through --share-device.
+func TestSharedInfo_ConfigAVDEntry(t *testing.T) {
+	s := &Server{cfg: Config{Hub: true, ShareConfig: []string{"avd:ci-pixel", "Lab Pixel"}}}
+	for _, c := range []struct {
+		d    DeviceInfo
+		want bool
+	}{
+		{DeviceInfo{ID: "avd:ci-pixel", Kind: "emulator", Name: "ci-pixel"}, true},
+		{DeviceInfo{ID: "emulator-5554", Kind: "emulator", Name: "ci-pixel"}, true},
+		{DeviceInfo{ID: "ci-pixel", Name: "ci-pixel", Platform: "android"}, true},
+		// Without android, a bare name may boot or create a simulator.
+		{DeviceInfo{ID: "ci-pixel", Name: "ci-pixel"}, false},
+		{DeviceInfo{ID: "ci-pixel", Name: "ci-pixel", Platform: "ios"}, false},
+		{DeviceInfo{ID: "emulator-5556", Kind: "emulator", Name: "other"}, false},
+		{DeviceInfo{ID: "PHONE-A", Kind: "device", Name: "ci-pixel"}, false},
+		{DeviceInfo{ID: "PHONE-B", Kind: "device", Name: "Lab Pixel"}, false},
+	} {
+		if got := s.sharedInfo(c.d); got != c.want {
+			t.Errorf("%+v: shared %v", c.d, got)
+		}
+	}
+}
+
+// An AVD shared through hubDevices stays leasable by a remote caller once
+// it runs under its serial.
+func TestLeases_ShareConfigAVDRunning(t *testing.T) {
+	env := newHubEnv(t, Config{ShareConfig: []string{"avd:Pixel_Lab"}})
+	ctx := context.Background()
+	env.mu.Lock()
+	env.emuAVD = "Pixel_Lab"
+	env.mu.Unlock()
+	if res := env.lease(env.remote, LeaseRequest{Device: "emulator-5554"}); res.Lease.Device != "emulator-5554" {
+		t.Fatalf("lease: %+v", res.Lease)
+	}
+	if _, err := env.remote.Device(ctx, "emulator-5554"); err != nil {
+		t.Fatal(err)
+	}
+	// The session's shaper knows the AVD from attach: no shaping call
+	// runs discovery.
+	if got := env.s.avdAlias("emulator-5554"); got != "avd:Pixel_Lab" {
+		t.Fatalf("avdAlias = %q", got)
+	}
+	before := env.lists.Load()
+	sh := env.s.trafficShaper("emulator-5554")
+	after := env.lists.Load()
+	_, _ = sh.Device()
+	_, _ = sh.Reset(ctx)
+	if sh.Alias != "avd:Pixel_Lab" || env.lists.Load() != after || after != before+1 {
+		t.Fatalf("alias %q; listings %d, %d, %d", sh.Alias, before, after, env.lists.Load())
+	}
+	if env.s.avdAlias("mock-1") != "" || env.lists.Load() != after {
+		t.Fatal("a device that is no emulator ran discovery for its alias")
+	}
+}
+
+// A remote iOS boot or create under a bare name is refused even when an
+// avd:<name> entry names that AVD.
+func TestLeases_ShareConfigAVDEntryIsNoSimulator(t *testing.T) {
+	env := newHubEnv(t, Config{ShareConfig: []string{"avd:Lab"}})
+	ctx := context.Background()
+	_, err := env.remote.CreateDevice(ctx, BootRequest{Platform: "ios", Name: "Lab", Create: &CreateSpec{Type: "iPhone 16"}})
+	wantErrCode(t, err, CodeForbidden)
+	_, err = env.remote.StartDevice(ctx, BootRequest{Platform: "ios", Name: "Lab"})
+	wantErrCode(t, err, CodeDeviceNotFound)
+	_, err = env.remote.StartDevice(ctx, BootRequest{Name: "Lab"})
+	wantErrCode(t, err, CodeDeviceNotFound)
+}
+
+// A remote boot of a listed AVD by its bare name, with no platform, is
+// android as a local boot infers it, so avd:<name> lets it through.
+func TestLeases_ShareConfigAVDBareNameBoot(t *testing.T) {
+	env := newHubEnv(t, Config{ShareConfig: []string{"avd:Lab"}})
+	env.mu.Lock()
+	env.downAVD = "Lab"
+	env.mu.Unlock()
+	req := BootRequest{Name: "Lab"}
+	r := httptest.NewRequest("POST", "/v1/devices", nil)
+	r = r.WithContext(withCaller(r.Context(), Caller{Remote: true}))
+	if e := env.s.checkShareBoot(r, req); e != nil {
+		t.Fatalf("bare AVD name: %v", e)
+	}
+	env.s.cfg.ShareConfig = []string{"avd:Other"}
+	if e := env.s.checkShareBoot(r, req); e == nil || e.Code != CodeDeviceNotFound {
+		t.Fatalf("an AVD the hub does not name: %v", e)
+	}
+}
+
+// A remote caller's status, which reads records, lists an emulator the hub
+// shares as avd:<name> while it is attached and, booted by the hub, after
+// it detaches: the attach keeps the AVD's name on the record, not the
+// driver's.
+func TestLeases_ShareConfigAVDInStatus(t *testing.T) {
+	env := newHubEnv(t, Config{ShareConfig: []string{"avd:Pixel_Lab"}})
+	ctx := context.Background()
+	env.mu.Lock()
+	env.emuAVD = "Pixel_Lab"
+	env.mu.Unlock()
+	env.s.registry.mu.Lock()
+	env.s.registry.records["emulator-5554"] = &DeviceInfo{ID: "emulator-5554", Platform: "android", Kind: "emulator",
+		Name: "Pixel_Lab", BootedBy: BootedByDaemon, BootedAt: nowRFC3339()}
+	env.s.registry.mu.Unlock()
+	inStatus := func(when string) {
+		t.Helper()
+		st, err := env.remote.Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range st.Devices {
+			if d.ID == "emulator-5554" {
+				return
+			}
+		}
+		t.Fatalf("%s: status: %+v", when, st.Devices)
+	}
+	res := env.lease(env.remote, LeaseRequest{Device: "emulator-5554", Attach: &AttachConfig{Platform: "mock"}})
+	inStatus("attached")
+	if rec, _ := env.s.registry.Record("emulator-5554"); rec.Name != "Pixel_Lab" || rec.Kind != "emulator" {
+		t.Fatalf("attached record: %+v", rec)
+	}
+	if _, err := env.remote.ReleaseLease(ctx, res.Lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = env.local.Detach(ctx, "emulator-5554")
+	if rec, ok := env.s.registry.Record("emulator-5554"); !ok || rec.Attached {
+		t.Fatalf("detached record: %+v %v", rec, ok)
+	}
+	inStatus("detached")
 }

@@ -350,7 +350,8 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
 | `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
-| `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its `network.json` ([network](network.md)); omitted otherwise |
+| `description` | Free text the device's host gives it in its [config.json](config.md); omitted when it has none |
+| `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) (or older `network.json`) ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
 | `available` | on a plain daemon: `true` for a ready device that is attached by no daemon (an AVD that is not running is never available) |
@@ -390,8 +391,10 @@ On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
 and the list covers every hub of the mesh, with `unreachable` naming a hub
 that did not answer; see [The hub mesh](#the-hub-mesh).
 
-On a hub started with `--share-device`, a remote caller sees only the
-shared devices, here and in `GET /v1/status`; every other device is
+On a hub, a remote caller sees only the shared devices (those that
+`--share-device`, `--share-tv` or [config.json](config.md)'s `hubDevices`
+name, and the cloud devices the hub launched), here and in
+`GET /v1/status`; every other device is
 `DEVICE_NOT_FOUND` on every route, and booting or creating one is refused.
 Its leases are left out of `GET /v1/leases`, and to that caller are
 `LEASE_EXPIRED` on the `/v1/leases/{lid}` routes, as an unknown lease is.
@@ -818,8 +821,8 @@ released only after that attach has unwound.
 ### `GET /v1/leases`, `GET /v1/leases/{lid}`
 
 The live leases (`{leases: [Lease…]}`), or one (`{lease}`); a lease that
-has ended is `LEASE_EXPIRED`. On a hub started with `--share-device`, a
-remote caller gets only the shared devices' leases: another device's lease
+has ended is `LEASE_EXPIRED`. On a hub, a remote caller gets only the
+shared devices' leases: another device's lease
 is `LEASE_EXPIRED` to it here, on renew and on `DELETE`, and is left as it
 is.
 

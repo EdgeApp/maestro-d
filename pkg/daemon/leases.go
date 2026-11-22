@@ -684,12 +684,17 @@ func shareMatches(entry string, d DeviceInfo) bool {
 		(strings.HasPrefix(d.ID, AVDPrefix) && strings.EqualFold(entry, strings.TrimPrefix(d.ID, AVDPrefix)))
 }
 
-// sharedInfo reports whether a listed device is in the hub's pool. On a hub
-// a TV is in it only when --share-tv names it (see Config.ShareTVs); any other
-// device when --share-device names it, or when that list is empty.
+// sharedInfo reports whether a listed device is in the hub's pool. A hub
+// shares only what it names: a TV when --share-tv or config.json names it
+// (see Config.ShareTVs), any other device when --share-device or
+// config.json does. A daemon that is not a hub shares every device unless
+// Config.ShareDevices names some.
 func (s *Server) sharedInfo(d DeviceInfo) bool {
 	if isComputer(d) {
 		return false // local only, whatever --share-device says
+	}
+	if s.sharesAll() {
+		return true
 	}
 	// A cloud device a hub launched for a lease is always in its pool. On a
 	// plain daemon a cloud device (its owner's credentials pay for it)
@@ -700,10 +705,34 @@ func (s *Server) sharedInfo(d DeviceInfo) bool {
 	if s.cfg.Hub && strings.EqualFold(d.Kind, "tv") {
 		return s.sharedTV(d)
 	}
-	if len(s.cfg.ShareDevices) == 0 {
-		return true
+	return namedIn(s.cfg.ShareDevices, d) || s.configShares(d)
+}
+
+// sharesAll reports whether remote callers see every device: on a daemon
+// that is not a hub and names none. A hub shares only what it names.
+func (s *Server) sharesAll() bool {
+	return !s.cfg.Hub && len(s.cfg.ShareDevices) == 0
+}
+
+// sharedTV reports whether --share-tv or config.json names the TV d.
+func (s *Server) sharedTV(d DeviceInfo) bool {
+	return namedIn(s.cfg.ShareTVs, d) || s.configShares(d)
+}
+
+// configShares reports whether config.json's hubDevices names device d
+// (see configNames).
+func (s *Server) configShares(d DeviceInfo) bool {
+	for _, id := range s.cfg.ShareConfig {
+		if configNames(id, d) {
+			return true
+		}
 	}
-	for _, entry := range s.cfg.ShareDevices {
+	return false
+}
+
+// namedIn reports whether an entry of list names device d.
+func namedIn(list []string, d DeviceInfo) bool {
+	for _, entry := range list {
 		if shareMatches(entry, d) {
 			return true
 		}
@@ -711,14 +740,20 @@ func (s *Server) sharedInfo(d DeviceInfo) bool {
 	return false
 }
 
-// sharedTV reports whether --share-tv names the TV d.
-func (s *Server) sharedTV(d DeviceInfo) bool {
-	for _, entry := range s.cfg.ShareTVs {
-		if shareMatches(entry, d) {
-			return true
-		}
+// shareList describes what a hub shares, for its log and refusals: "" when
+// it names nothing.
+func (s *Server) shareList() string {
+	var parts []string
+	if len(s.cfg.ShareDevices) > 0 {
+		parts = append(parts, strings.Join(s.cfg.ShareDevices, ", "))
 	}
-	return false
+	if len(s.cfg.ShareTVs) > 0 {
+		parts = append(parts, "TVs "+strings.Join(s.cfg.ShareTVs, ", "))
+	}
+	if len(s.cfg.ShareConfig) > 0 {
+		parts = append(parts, "config.json "+strings.Join(s.cfg.ShareConfig, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // tvInfo reports whether id is an Apple TV on this host, and its name: from
@@ -757,7 +792,7 @@ type shareAnswer struct {
 // per event: a lookup runs live discovery (adb, emulator, simctl).
 func (s *Server) shared(id string) bool {
 	// The computer device is never in the pool. Checked first: the empty
-	// --share-device answer below and the positive cache would share it.
+	// share-all answer below and the positive cache would share it.
 	if id == ComputerID {
 		return false
 	}
@@ -769,7 +804,7 @@ func (s *Server) shared(id string) bool {
 			return s.sharedTV(tv)
 		}
 	}
-	if len(s.cfg.ShareDevices) == 0 {
+	if s.sharesAll() {
 		return true
 	}
 	stable := !isEmulatorSerial(id)
@@ -1347,6 +1382,7 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 	if info != nil {
 		devs := []DeviceInfo{*info}
 		s.annotate(devs)
+		s.applyDeviceConfig(devs)
 		info = &devs[0]
 	}
 	l, _ := s.leases.get(entry.id)
@@ -2097,9 +2133,9 @@ func DefaultHubName() string {
 
 // checkShareBoot refuses a remote caller's boot or create of a device the
 // hub does not share: booting an unshared one is DEVICE_NOT_FOUND, and a
-// device may be created only under a name --share-device lists.
+// device may be created only under a name the hub shares.
 func (s *Server) checkShareBoot(r *http.Request, req BootRequest) *Error {
-	if len(s.cfg.ShareDevices) == 0 || !CallerFrom(r.Context()).Remote {
+	if s.sharesAll() || !CallerFrom(r.Context()).Remote {
 		return nil
 	}
 	if req.Create != nil {
@@ -2107,13 +2143,23 @@ func (s *Server) checkShareBoot(r *http.Request, req BootRequest) *Error {
 		if name == "" {
 			name = req.Name
 		}
-		if !s.sharedInfo(DeviceInfo{ID: name, Name: name}) {
-			return forbidden("this hub shares only %s; a remote caller cannot create %q", strings.Join(s.cfg.ShareDevices, ", "), name).
+		if !s.sharedInfo(DeviceInfo{ID: name, Name: name, Platform: strings.ToLower(req.Platform)}) {
+			shares := s.shareList()
+			if shares == "" {
+				shares = "nothing"
+			}
+			return forbidden("this hub shares only %s; a remote caller cannot create %q", shares, name).
 				WithDetails("field", "name")
 		}
 		return nil
 	}
-	if s.sharedInfo(DeviceInfo{ID: req.Name, Name: strings.TrimPrefix(req.Name, AVDPrefix)}) || s.shared(req.Name) {
+	// A boot without a platform takes the one Boot infers, so a bare AVD
+	// name is android; a simulator's, or one naming both, is not.
+	platform := strings.ToLower(req.Platform)
+	if platform == "" && len(s.cfg.ShareConfig) > 0 {
+		platform, _ = s.registry.inferBootPlatform(req.Name)
+	}
+	if s.sharedInfo(DeviceInfo{ID: req.Name, Name: strings.TrimPrefix(req.Name, AVDPrefix), Platform: platform}) || s.shared(req.Name) {
 		return nil
 	}
 	return Errorf(CodeDeviceNotFound, "device %s not found", req.Name)

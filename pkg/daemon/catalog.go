@@ -380,7 +380,7 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request, req 
 	if info.Ready {
 		s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: info.Name})
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }
 
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id string, force bool) {
@@ -398,5 +398,5 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id s
 	}
 	s.endStoppedLease(r.Context(), endDeleted, id, info.ID)
 	s.events.Publish(Event{Type: "device.deleted", Device: info.ID, Message: info.Name})
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }

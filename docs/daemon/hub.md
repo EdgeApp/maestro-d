@@ -66,9 +66,9 @@ token of every request it is forwarded) and the **same peer token**.
 | `--peer-token P` / `--peer-token-file F` | required | The mesh's shared secret, sent on every peer link |
 | `--tls-cert F --tls-key F` | none | Serve HTTPS and WSS |
 | `--peer-ca F` | system roots | Trust root for peers' TLS |
-| `--share-device ID\|NAME` | every device (repeatable) | Only these local devices join the pool; the rest stay private to this machine. Never a TV: TVs join only through `--share-tv` |
-| `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner. Naming a TV leaves `--share-device`'s pool as it is |
-| (the computer, `mac`) | never shared | The [computer device](../macos.md) is local only: no `--share-device` puts it in the pool. Local callers on the hub's socket lease it (`lease --device mac`, or a selector with `kind: computer` or `platform: macos`); peers and remote callers never see it |
+| `--share-device ID\|NAME` | none (repeatable) | Share this local device, by id or name. A hub shares only the devices named here, with `--share-tv` or in its [config.json](config.md)'s `hubDevices`; the rest stay private to this machine, and a hub that names none shares none. Never a TV: TVs join only through `--share-tv` or `hubDevices` |
+| `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner |
+| (the computer, `mac`) | never shared | The [computer device](../macos.md) is local only: neither `--share-device` nor `hubDevices` puts it in the pool. Local callers on the hub's socket lease it (`lease --device mac`, or a selector with `kind: computer` or `platform: macos`); peers and remote callers never see it |
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it. A cloud device's lease is at most 150 minutes, its provider's session |
 | `--devicefarm` | off | Launch AWS Device Farm devices for the mesh's cloud leases ([Cloud devices](cloud.md#hub-mode-cloud-devices-for-every-client)), with this hub's AWS credentials: the standard chain, or the two flags below. At start the hub checks them with one account call and refuses to start when it fails |
 | `--devicefarm-credentials-file F` | none | An AWS shared credentials file: a regular file, mode 0600 or stricter |
@@ -77,7 +77,8 @@ token of every request it is forwarded) and the **same peer token**.
 | `--cloud-max-devices N` | 2 | How many cloud devices the hub holds at once, 0–20 (Device Farm allows 2 metered sessions per account by default). A cloud lease beyond it is `BUSY` |
 | `--allow-remote-shell` | off | Let remote callers run `runShell` |
 | `--pass-env NAME` | none (repeatable) | A variable of the hub's environment that sessions may import |
-| `--network-config FILE` | `<home>/network.json` | The [traffic-shaping](network.md) config: each device's `setTrafficShape` and `resetTrafficShape` calls. The hub that owns a device makes its calls, so each hub keeps the config for its own devices; listings show `trafficShaping: true` for the devices it can shape |
+| `--config FILE` | `<home>/config.json`, else `<home>/network.json` | The [device config](config.md): `hubDevices` lists the devices this hub shares (read at start), each with an optional `description` and [traffic-shaping](network.md) calls (read on every call). Each hub keeps the config for its own devices; listings show each device's `description`, and `trafficShaping: true` for the devices it can shape |
+| `--network-config FILE` | none | Deprecated: an older `network.json` (traffic-shaping calls only) in place of `--config` |
 | `--foreground` | off | Run in the foreground, for launchd or another supervisor |
 | `--daemon NAME` | `hub` | The daemon name the hub runs under (its run directory and unix socket) |
 
@@ -216,9 +217,10 @@ steps by bare id does not repeat the lookup for every step.
 - Sessions import none of the hub's environment except `--pass-env` names.
   Targeted clients send their `-e`/`--env-file` values (CLI) and `env` (JS),
   but not their own shell environment — the one difference from local use.
-- `--share-device` keeps a hub's other devices out of the mesh: peers never
-  list them or their leases, requests for them are `DEVICE_NOT_FOUND`, and
-  their leases are `LEASE_EXPIRED` to a peer, as an unknown lease is.
+- A device the hub does not name (`--share-device`, `--share-tv`,
+  `config.json`'s `hubDevices`) stays out of the mesh: peers never list it
+  or its leases, requests for it are `DEVICE_NOT_FOUND`, and its leases are
+  `LEASE_EXPIRED` to a peer, as an unknown lease is.
 - On a LAN plain HTTP is accepted. Across the internet run with
   `--tls-cert/--tls-key` (or behind a TLS proxy) and dial `https://` peers.
 - A hub that serves TLS, or has `--peer-ca`, dials peers only over TLS, so

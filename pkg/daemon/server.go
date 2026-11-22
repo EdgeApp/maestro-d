@@ -46,14 +46,18 @@ type Config struct {
 	Hub bool
 	// HubName names a hub (default: the short host name).
 	HubName string
-	// ShareDevices, on a hub, limits the devices remote callers see and
-	// may lease to these ids or names; empty shares every device but TVs.
+	// ShareDevices, on a hub, names the devices remote callers see and may
+	// lease, by id or name (--share-device). A hub shares only the devices
+	// it names here, in ShareTVs or in ShareConfig: none by default.
 	ShareDevices []string
 	// ShareTVs, on a hub, names the Apple TVs it shares, by id or name. A
 	// TV pairs with several Macs, so it is shared only when named, and
 	// naming it on one hub keeps one owner for it. TVs are left out of
 	// ShareDevices either way.
 	ShareTVs []string
+	// ShareConfig, on a hub, is its config.json's hubDevices, read when it
+	// starts: it shares each of them, TVs included.
+	ShareConfig []string
 	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
@@ -75,8 +79,11 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
-	// NetworkConfig is the traffic-shaping config (default
-	// <home>/network.json).
+	// DeviceConfig is the device config (--config): read as config.json,
+	// with no fallback. NetworkConfig (--network-config) is an older
+	// network.json, read as one. With neither, <home>/config.json is read
+	// when it exists, else <home>/network.json.
+	DeviceConfig  string
 	NetworkConfig string
 	// BlobsDir is the blob store's root (default <home>/blobs).
 	BlobsDir string
@@ -352,13 +359,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if httpAddr != "" && !s.importsEnv() {
 		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
 	}
+	s.logDeviceConfig()
 	if s.cfg.Hub {
-		share := "every device but TVs"
-		if len(s.cfg.ShareDevices) > 0 {
-			share = strings.Join(s.cfg.ShareDevices, ", ")
-		}
-		if len(s.cfg.ShareTVs) > 0 {
-			share += "; TVs " + strings.Join(s.cfg.ShareTVs, ", ")
+		share := "nothing (name devices with --share-device, --share-tv or config.json's hubDevices)"
+		if list := s.shareList(); list != "" {
+			share = list
 		}
 		logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.info.Hub, s.hubLeaseMax(),
 			leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
@@ -673,7 +678,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	SetLocations(devs, s.callerMachine(r))
 	s.decorateCloud(devs)
 	devs = q.Filter(devs)
-	s.markTrafficShaping(devs)
+	s.applyDeviceConfig(devs)
 	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
@@ -692,7 +697,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	SetLocations(devs, s.callerMachine(r))
 	s.decorateCloud(devs)
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(devs[0])})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(devs[0])})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
@@ -723,7 +728,7 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }
 
 func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
@@ -789,7 +794,7 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withTrafficShaping(s.deviceInfo(a))})
+	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(s.deviceInfo(a))})
 }
 
 func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {

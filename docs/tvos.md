@@ -36,9 +36,9 @@ through WebDriverAgent. TVs have no touch screen: move focus with
 swipes on a physical TV need the Companion pairing below.
 
 A TV can pair with several Macs, so a hub shares one only when `--share-tv`
-names it (by id or name); name each TV on exactly one hub. `--share-tv`
-leaves the rest of the pool as it is: without `--share-device` the hub still
-shares every phone, simulator and emulator. An unnamed TV is private to the
+names it (by id or name) or its `config.json`'s `hubDevices` does (by id);
+name each TV on exactly one hub. A hub shares only the devices it names, TVs or not
+(`--share-device`, `--share-tv`, `hubDevices`). An unnamed TV is private to the
 machine: no remote route lists, reads, stops or leases it. A shared TV is
 leased like any device. A selector picks a TV only when it asks for
 `--kind tv` or names the TV, so `lease --platform ios` still means a phone or

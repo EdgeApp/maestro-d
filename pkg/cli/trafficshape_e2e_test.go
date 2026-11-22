@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
@@ -120,7 +121,7 @@ func TestE2E_TrafficShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r := run("setTrafficShape", "--device", "mock-1", "--lossPct", "100"); r.code != 2 || envelopeCode(t, r.stderr) != daemon.CodeUsage ||
-		!strings.Contains(r.stderr, "network config "+cfg) {
+		!strings.Contains(r.stderr, "config "+cfg) {
 		t.Fatalf("broken config: exit %d\n%s", r.code, r.stderr)
 	}
 	if err := os.WriteFile(cfg, good, 0o600); err != nil {
@@ -168,8 +169,8 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "shape-a", "--name", "hub-a"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "shape-b", "--name", "hub-b", "--peer", a.HTTPAddr}, mesh...)...))
+	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "shape-a", "--name", "hub-a", "--share-device", "mock-1"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "shape-b", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=shape-tok"}
 
 	// Without a lease the owner refuses, and nothing is sent.
@@ -201,5 +202,112 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 	}
 	if !shaping["mock-1@hub-a"] || shaping["mock-3@hub-b"] {
 		t.Fatalf("listing: %v", shaping)
+	}
+}
+
+// config.json through real hubs: hub-a shares only the device its
+// hubDevices lists, which carries its description and shaping across the
+// mesh; a broken config.json, or --config with --network-config, stops
+// hub start.
+func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
+	e := newE2E(t)
+	sr := newShapeRecorder(t)
+	homeA, homeB, homeC := filepath.Join(e.cwd, "cfg-a"), filepath.Join(e.cwd, "cfg-b"), filepath.Join(e.cwd, "cfg-c")
+	for _, h := range []string{homeA, homeB, homeC} {
+		if err := os.MkdirAll(h, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, _ := json.Marshal(map[string]any{"hubDevices": []any{map[string]any{
+		"id": "mock-1", "description": "Lab phone on hub A",
+		"trafficShaping": map[string]any{
+			"setTrafficShape":   map[string]any{"method": "POST", "url": sr.URL + "/v1/shape", "body": map[string]any{"device": "${deviceId}", "lossPct": "${lossPct}"}},
+			"resetTrafficShape": map[string]any{"method": "POST", "url": sr.URL + "/v1/shape", "body": map[string]any{"device": "${deviceId}"}},
+		},
+	}}})
+	if err := os.WriteFile(filepath.Join(homeA, "config.json"), cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
+	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
+	t.Cleanup(func() {
+		e.runEnv(envB, "hub", "stop", "--daemon", "cfg-b")
+		e.runEnv(envA, "hub", "stop", "--daemon", "cfg-a")
+	})
+	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "cfg-tok", "--peer-token", "cfg-peer", "--json"}
+
+	// Both flags, or a config.json that cannot be used: USAGE, no hub.
+	other := filepath.Join(e.cwd, "other.json")
+	if err := os.WriteFile(other, []byte(`{"hubDevices":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a", "--config", other, "--network-config", other}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
+		t.Fatalf("both flags: exit %d\n%s", r.code, r.stderr)
+	}
+	if r := e.runEnv(envA, "serve", "--daemon", "cfg-s", "--config", other, "--network-config", other); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
+		t.Fatalf("serve with both flags: exit %d\n%s", r.code, r.stderr)
+	}
+	broken := filepath.Join(e.cwd, "broken.json")
+	if err := os.WriteFile(broken, []byte(`{"hubDevices":[{"description":"no id"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a", "--config", broken}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "hubDevices[0] has no id") {
+		t.Fatalf("broken config: exit %d\n%s", r.code, r.stderr)
+	}
+
+	started := func(r result) daemon.Info {
+		t.Helper()
+		var out struct {
+			Daemon daemon.Info `json:"daemon"`
+		}
+		if r.code != 0 || json.Unmarshal([]byte(r.stdout), &out) != nil || out.Daemon.HTTPAddr == "" {
+			t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+		}
+		return out.Daemon
+	}
+	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "cfg-b", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
+	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=cfg-tok"}
+
+	var listed daemon.DevicesResult
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		r := e.runEnv(client, "device", "list", "--platform", "mock", "--json")
+		listed = daemon.DevicesResult{}
+		if err := json.Unmarshal([]byte(r.stdout), &listed); err != nil {
+			t.Fatalf("%v\n%s", err, r.stdout)
+		}
+		found := false
+		for _, d := range listed.Devices {
+			found = found || d.ID == "mock-1@hub-a"
+		}
+		if found || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	byID := map[string]daemon.DeviceInfo{}
+	for _, d := range listed.Devices {
+		byID[d.ID] = d
+	}
+	if d, ok := byID["mock-1@hub-a"]; !ok || d.Description != "Lab phone on hub A" || !d.TrafficShaping {
+		t.Fatalf("mock-1@hub-a: %+v (listing %v)", d, listed.Devices)
+	}
+	if _, ok := byID["mock-2@hub-a"]; ok {
+		t.Fatalf("hub-a shared mock-2, which its config.json does not list: %v", listed.Devices)
+	}
+	if _, ok := byID["mock-3@hub-b"]; !ok {
+		t.Fatalf("hub-b's --share-device mock-3 missing: %v", listed.Devices)
+	}
+	if r := e.runEnv(client, "lease", "--device", "mock-1@hub-a"); r.code != 0 {
+		t.Fatalf("lease: exit %d\n%s", r.code, r.stderr)
+	}
+	if r := e.runEnv(client, "setTrafficShape", "--device", "mock-1@hub-a", "--lossPct", "100"); r.code != 0 {
+		t.Fatalf("setTrafficShape: exit %d\n%s", r.code, r.stderr)
+	}
+	if got := sr.take(t); len(got) != 1 || got[0] != `POST /v1/shape {"device":"mock-1","lossPct":100}` {
+		t.Fatalf("calls: %v", got)
+	}
+	if r := e.runEnv(client, "release", "--device", "mock-1@hub-a"); r.code != 0 {
+		t.Fatalf("release: exit %d\n%s", r.code, r.stderr)
 	}
 }

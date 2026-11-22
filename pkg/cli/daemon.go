@@ -609,7 +609,9 @@ var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
 		func(o *daemonOpts, v string) { o.TLSCert = v }),
 	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
-	strFlag("network-config", "The traffic-shaping config: each device's setTrafficShape and resetTrafficShape calls (default <home>/network.json)", []string{"MAESTRO_D_NETWORK_CONFIG"},
+	strFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
+	strFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import when --http listens beyond loopback (repeatable); no other one is imported",
 		apply: func(o *daemonOpts, v string) error {
@@ -640,6 +642,9 @@ var daemonServeCommand = &cli.Command{
 			fmt.Fprintf(os.Stderr, "warning: cannot open daemon.log: %v\n", err)
 		}
 		defer logger.Close()
+		if err := checkConfigFlags(o); err != nil {
+			return err
+		}
 		srv := daemon.New(daemon.Config{
 			KeepRunDir:    serviceInstalled,
 			Name:          o.Name,
@@ -650,6 +655,7 @@ var daemonServeCommand = &cli.Command{
 			PassEnv:       o.PassEnv,
 			IdleTimeout:   idle,
 			ReportsDir:    daemon.ReportsDir(o.Name),
+			DeviceConfig:  o.DeviceConfig,
 			NetworkConfig: o.NetworkConfig,
 			StartArgs:     os.Args[1:],
 			Ready:         os.Stdout,

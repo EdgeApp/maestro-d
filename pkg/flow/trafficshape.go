@@ -1,8 +1,8 @@
 package flow
 
 // maestro-d: the traffic-shaping steps. The host that owns the device sends
-// the HTTP call its network.json configures for it (pkg/netshape); the
-// executor runs them, never a driver.
+// the HTTP call its config.json (or older network.json) configures for it
+// (pkg/netshape); the executor runs them, never a driver.
 
 import (
 	"errors"
@@ -16,7 +16,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
-// SetTrafficShapeStep sets the device's whole network shape through the call its host's network.json configures for it.
+// SetTrafficShapeStep sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.
 //
 // Every value is optional and defaults to 0 (no cap, no loss, no latency,
 // no jitter) or both, and every call sends all five, so a value left out is
@@ -30,7 +30,7 @@ type SetTrafficShapeStep struct {
 	Direction string  `yaml:"direction"` // download, upload or both (default both); ${VAR} allowed
 }
 
-// ResetTrafficShapeStep removes the device's network shape through the call its host's network.json configures for it.
+// ResetTrafficShapeStep removes the device's network shape through the call its host's config.json (or older network.json) configures for it.
 type ResetTrafficShapeStep struct {
 	BaseStep `yaml:",inline"`
 }

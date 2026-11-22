@@ -264,6 +264,8 @@ export interface DeviceInfo {
   manufacturer?: string
   /** The Appium major version a cloud device's provider runs (`2` or `3`). */
   appiumVersion?: string
+  /** Free text the device's host gives it in its config.json (`hubDevices[].description`). */
+  description?: string
 }
 
 /** The device time a cloud session used. */
