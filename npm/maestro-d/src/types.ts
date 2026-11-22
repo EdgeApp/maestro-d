@@ -236,12 +236,187 @@ export interface DeviceInfo {
   available?: boolean
   /** On a hub: the longest lease window the device takes, in seconds. */
   maxSec?: number
-  /** On a hub: the host name of the machine the device is attached to. */
+  /** The host name of the machine the device is attached to (for a cloud device, the machine holding its session). */
   machine?: string
   /** On a hub: the owning hub's advertised address, then that machine's non-loopback IPs. */
   addresses?: string[]
   /** True when the device's host has a traffic shaper configured for it (setTrafficShape). */
   trafficShaping?: boolean
+  /** Where the device is, relative to this computer: local, mesh or cloud. */
+  location?: DeviceLocation
+  /** The cloud provider that holds the device (`devicefarm`); absent otherwise. */
+  provider?: string
+  /** A cloud device's provider session (a Device Farm session ARN). */
+  providerRef?: string
+  /** The session's page in the provider's console. */
+  dashboardUrl?: string
+  /** RFC 3339: when the provider ends the session. */
+  expiresAt?: string
+  /** Seconds without a request before the cloud device is released. */
+  idleReleaseSec?: number
+  /** RFC 3339: when it is released if no request comes. */
+  idleReleaseAt?: string
+  /** Why a cloud device's session ended (`state: 'ended'`). */
+  endedReason?: string
+  /** The device time a released cloud session used. */
+  deviceMinutes?: DeviceMinutes
+  formFactor?: string
+  manufacturer?: string
+  /** The Appium major version a cloud device's provider runs (`2` or `3`). */
+  appiumVersion?: string
+}
+
+/** The device time a cloud session used. */
+export interface DeviceMinutes {
+  metered: number
+  total: number
+  /**
+   * True until the provider settles its figure: then the minutes run from
+   * the session's creation to its release, and the billed figure is higher,
+   * because the provider also bills the cleanup after the release.
+   */
+  estimated?: boolean
+}
+
+/** What a cloud device launch asks for. */
+export interface CloudSpec {
+  /** Default `devicefarm`. */
+  provider?: string
+  platform: 'ios' | 'android' | string
+  /** The model: exact name, catalog id or a regular expression. */
+  name?: string
+  osVersion?: string
+  osVersionMin?: string
+  osVersionMax?: string
+  /**
+   * An .apk or .ipa on the daemon's machine (a relative path is resolved
+   * against this process's directory), a `blob:` ref, or an upload ARN.
+   */
+  app?: string
+  /** At most 3 more apps to install, as `app`. */
+  auxiliaryApps?: string[]
+  /** The app's id, the default for attach. */
+  appId?: string
+  /** '2' or '3' (default '3' on iOS 27 and later). */
+  appiumVersion?: string
+  /** Merged into the WebDriver session's capabilities. */
+  caps?: Record<string, unknown>
+  /** Seconds without a request before release: default 600, 60–9000. */
+  idleReleaseSec?: number
+  /** Seconds to wait for the provider's session (default 900). */
+  bootTimeoutSec?: number
+}
+
+/** Where a device is, relative to the caller's computer. */
+export type DeviceLocation = 'local' | 'mesh' | 'cloud'
+
+/** Filters for `devices()` (`GET /v1/devices`). */
+export interface DeviceQuery {
+  /** Keep only these locations. */
+  location?: DeviceLocation | DeviceLocation[]
+  /** The cloud provider (`devicefarm`). */
+  provider?: string
+  platform?: string
+  /** device | emulator | simulator | tv | cloud */
+  kind?: string
+  /** A case-insensitive regular expression matched against name and id. */
+  name?: string
+  /** Inclusive OS version bounds; max compares at its own precision (17 admits 17.5). */
+  osVersionMin?: string
+  osVersionMax?: string
+  /** Only devices a lease could take now. */
+  available?: boolean
+}
+
+/** Filters for `catalog()` (`GET /v1/catalog`). */
+export interface CatalogQuery extends Omit<DeviceQuery, 'kind'> {
+  /** On a hub: the hub whose machine (or cloud credentials) answers. */
+  hub?: string
+}
+
+/** A model a cloud provider can launch. */
+export interface CloudModel {
+  /** `df:<platform>:<slug>:<os>` */
+  id: string
+  arn: string
+  platform: string
+  name: string
+  osVersion: string
+  formFactor?: string
+  manufacturer?: string
+  /** HIGHLY_AVAILABLE | AVAILABLE | BUSY | TEMPORARY_NOT_AVAILABLE */
+  availability?: string
+  available: boolean
+}
+
+/** One cloud provider's launchable models. */
+export interface CloudCatalog {
+  provider: string
+  /** The hub that launches them (absent on a plain daemon). */
+  hub?: string
+  models: CloudModel[]
+}
+
+/** An app uploaded to a cloud provider. */
+export interface AppRef {
+  /** The provider's upload reference (an ARN). */
+  appRef: string
+  name: string
+  type?: string
+  status?: string
+  created?: string
+  /** True when an identical earlier upload was reused. */
+  reused?: boolean
+}
+
+/** `md.devicefarm.account()`. */
+export interface ProviderAccount extends Envelope {
+  provider: string
+  hub?: string
+  /** trialMinutes {total, remaining}, unmeteredDevices, … */
+  account: Record<string, unknown>
+}
+
+/** `md.devicefarm.apps()`. */
+export interface ProviderApps extends Envelope {
+  provider: string
+  hub?: string
+  apps: AppRef[]
+}
+
+/** `md.devicefarm.upload()`. */
+export interface ProviderUpload extends Envelope, AppRef {
+  provider: string
+  hub?: string
+}
+
+/** One provider session. */
+export interface ProviderSession {
+  /** The device id maestro-d gave it. */
+  name: string
+  ref: string
+  status: string
+  result?: string
+  /** The device model, e.g. "Google Pixel 8". */
+  model?: string
+  created?: string
+  deviceMinutes?: DeviceMinutes
+}
+
+/** `md.devicefarm.sessions()`. */
+export interface ProviderSessions extends Envelope {
+  provider: string
+  hub?: string
+  sessions: ProviderSession[]
+}
+
+/** A cloud provider a daemon or hub launches devices on. */
+export interface CloudStatus {
+  provider: string
+  /** On a hub: how many cloud devices it holds at most. */
+  maxDevices?: number
+  /** How many of the provider's devices it holds now. */
+  held: number
 }
 
 /** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
@@ -256,6 +431,8 @@ export interface HubStatus {
   /** False with --no-mdns. */
   mdns: boolean
   peers: HubPeer[]
+  /** The cloud providers this hub launches devices on. */
+  cloud?: CloudStatus[]
 }
 
 /** One peer of a hub. */
@@ -271,6 +448,8 @@ export interface HubPeer {
   devices?: number
   since?: string
   error?: string
+  /** The cloud providers a linked peer launches devices on. */
+  cloud?: string[]
 }
 
 /** The lease state a hub's device listings carry. */
@@ -309,6 +488,13 @@ export interface LeaseSelector {
   hub?: string
   /** Let a shut-down simulator or AVD be picked; the hub boots it for the lease. */
   boot?: boolean
+  /** 'cloud' launches a cloud device for the lease (name is then the model). */
+  location?: 'cloud'
+  /** The cloud provider (default devicefarm). */
+  provider?: string
+  /** A cloud lease's OS range, at max's own precision. */
+  osVersionMin?: string
+  osVersionMax?: string
 }
 
 /** Options for opening a driver on a device (`maestro-d attach`). */
@@ -376,9 +562,12 @@ export interface BootOptions {
 
 /** Options for `createDevice()`: a simulator (`type`, `runtime`) or an AVD (`image`, `profile`, …). */
 export interface CreateDeviceOptions {
-  platform: 'ios' | 'android' | string
-  /** Name of the new simulator or AVD. */
-  name: string
+  /** Required for a simulator or AVD; a cloud device takes `cloud.platform`. */
+  platform?: 'ios' | 'android' | string
+  /** Name of the new simulator or AVD (required for one). */
+  name?: string
+  /** Launch a cloud device instead (direct mode, on this computer's daemon). */
+  cloud?: CloudSpec
   /** iOS device type name or id (default: the newest iPhone the runtime supports). */
   type?: string
   /** iOS runtime, e.g. 'iOS-26-5' or '26.5' (default: the newest installed). */
@@ -433,6 +622,8 @@ export interface CatalogResult extends Envelope {
   android?: { images: CatalogImage[]; profiles: string[] }
   /** Why a platform's catalog is missing, when no platform was asked for. */
   errors?: Record<string, string>
+  /** With `location: 'cloud'`: each cloud provider's launchable models. */
+  cloud?: CloudCatalog[]
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +652,8 @@ export interface StatusResult extends Envelope {
   daemon: DaemonInfo
   devices: DeviceInfo[]
   idleShutdownAt?: string
+  /** The cloud providers this daemon launches devices on. */
+  cloud?: CloudStatus[]
 }
 
 export interface DaemonEvent {

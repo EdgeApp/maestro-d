@@ -20,10 +20,13 @@ curl -s -H 'Authorization: Bearer s3cret' http://127.0.0.1:7788/v1/status
 
 The examples below assume `D=http://127.0.0.1:7788` and `H='Authorization: Bearer s3cret'`.
 
-Two headers matter:
+Three headers matter:
 
 - `X-Maestro-Api-Version: 1` — optional on requests; a mismatch is refused
   with `DAEMON_UNAVAILABLE`. Every response carries it.
+- `X-Maestro-Client-Machine: <host name>` — the caller's computer, which
+  `location` in device listings is relative to; the CLI, the Go client and
+  the JavaScript library always send it.
 - `Authorization: Bearer <token>` — required on TCP when the daemon has a
   token; never checked on the unix socket (file permissions do that).
   A missing or wrong token is `401` with a `USAGE` body. A daemon whose
@@ -235,9 +238,16 @@ curl -s -H "$H" $D/v1/status
     "hub": "lab-mac"
   },
   "devices": [ … as GET /v1/devices, only the ones this daemon has attached or booted … ],
-  "idleShutdownAt": "2026-09-10T10:30:00Z"
+  "idleShutdownAt": "2026-09-10T10:30:00Z",
+  "cloud": [ { "provider": "devicefarm", "maxDevices": 2, "held": 1 } ]
 }
 ```
+
+`cloud` lists the cloud providers the daemon launches devices on
+([Cloud devices](cloud.md)): on a hub every provider it was started with
+(`--devicefarm`) and its `--cloud-max-devices` as `maxDevices`; on a plain
+daemon the providers it has used since it started. `held` is how many of
+the provider's devices it holds now.
 
 `daemon.hub` is the hub's name, present only on a hub (`hub start`):
 clients use it to know the daemon leases its devices. The name is the
@@ -278,7 +288,14 @@ data: {"seq":18,"time":"…","type":"device.detached","device":"FAKEPIXEL0002"}
 
 Event types: `step` (`step`, `passed`, `durationMs`, `error`, `depth` for
 nested steps), `device.attached`, `device.detached`, `device.booted`,
-`device.stopped`, `device.capture` (a device with screen capture: `message`
+`device.stopped`, `device.created` and `device.deleted` (`message` the
+name), `app.installed` and `app.uninstalled` (`message` the app id),
+`device.allocating` (a cloud launch: `message` is the provider session's
+state, such as `PENDING_CONCURRENCY`), `device.released` (a cloud device's
+session ended: `message` is the reason — `idle`, `session-limit`,
+`deleted`, `stopped`, `daemon-exit`, `lease-end` or `orphaned` — and
+`deviceMinutes` the time it used), `device.ended` (the provider ended a
+cloud session: `message` the reason), `device.capture` (a device with screen capture: `message`
 is `capturing`, `unavailable` or `lost`, `error` the reason; an on-demand
 capture stopping when nobody watches is not published), `daemon.shutdown`,
 and on a hub `lease.granted`,
@@ -291,10 +308,12 @@ stop.
 
 ## Devices
 
-### `GET /v1/devices[?platform=android|ios|web]`
+### `GET /v1/devices[?location=…&provider=…&platform=…&kind=…&name=…&osVersionMin=…&osVersionMax=…&available=true]`
 
 Everything the host can see — connected devices, simulators (booted or
-not), emulator AVDs — merged with what this and other daemons hold.
+not), emulator AVDs — merged with what this and other daemons hold, plus
+the cloud devices it holds ([Cloud devices](cloud.md)). Every entry says
+where it is relative to the caller's computer in `location`.
 
 ```json
 {
@@ -334,7 +353,38 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its `network.json` ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
-| `machine`, `addresses` | hub only: the machine the device is attached to — its host name (`os.Hostname()`), and the owning hub's `--advertise` address (when set) followed by that machine's non-loopback IPs. Set by the owner and carried through the mesh, so a client compares them with its own host name and IPs to find the devices on its own machine, whichever hub it asked |
+| `available` | on a plain daemon: `true` for a ready device that is attached by no daemon (an AVD that is not running is never available) |
+| `machine` | the machine the device is attached to: its host name (`os.Hostname()`). For a cloud device, the machine whose daemon or hub holds its session |
+| `addresses` | hub only: the owning hub's `--advertise` address (when set) followed by the machine's non-loopback IPs, carried through the mesh |
+| `location` | `local` (attached to or running on the caller's computer), `mesh` (on another computer in the hub mesh, named by `machine`) or `cloud` (held by a cloud provider) |
+| `provider` | the cloud provider of a cloud device (`devicefarm`); absent otherwise |
+
+**Location.** A device with a `provider` is `cloud`. Any other device is
+`local` when its `machine` is the caller's machine and `mesh` otherwise;
+names compare case-insensitively, ignoring a trailing `.local`. The
+caller's machine is the `X-Maestro-Client-Machine` request header, which
+the CLI, the Go client and the JavaScript library always send (their host
+name). Without the header, a request over the unix socket or from a
+loopback address is on the daemon's own machine, and a TCP request from
+elsewhere is from an unknown machine, which sees every non-cloud device as
+`mesh`. On a hub the entry hub computes `location` once it has merged the
+peers' lists, so it is relative to the client wherever the device is.
+
+**Filters.** Each applies to every entry, cloud devices included:
+
+| query | keeps |
+| --- | --- |
+| `location` | a comma list of `local`, `mesh`, `cloud` |
+| `provider` | the cloud provider's devices |
+| `platform` | `android`, `ios`, `web`, `mock` |
+| `kind` | `device`, `emulator`, `simulator`, `tv`, `cloud` |
+| `name` | a case-insensitive Go regular expression, matched against `name` and `id` |
+| `osVersionMin`, `osVersionMax` | the OS version range, inclusive. Versions compare as numbers, component by component, a missing component counting as 0; `osVersionMax` compares at its own precision, so `17` admits `17.5` and `17.2` does not admit `17.4`. A device with no `osVersion` fails either bound |
+| `available` | `true`: devices a lease or attach could take now |
+
+An unknown location word, an invalid regular expression or a version that
+is not digits and dots is `USAGE`. On a hub the peers get every filter but
+`location`, which the entry hub applies after computing it.
 
 On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
 and the list covers every hub of the mesh, with `unreachable` naming a hub
@@ -351,9 +401,10 @@ hub's life, while an emulator serial (whichever AVD boots on that port next
 reuses it) and an id outside the pool are remembered for 30 s, or until a
 device is booted, stopped, created or deleted on the hub, or a lease ends.
 
-### `GET /v1/catalog[?platform=ios|android][&available=true]`
+### `GET /v1/catalog[?platform=ios|android][&available=true][&location=cloud…]`
 
-What `create` can use. iOS comes from `simctl list runtimes -j` and
+What `create` can use, and with `location=cloud` the models a cloud
+provider can launch. iOS comes from `simctl list runtimes -j` and
 `simctl list devicetypes -j` (iPhone and iPad types only); Android from
 `sdkmanager --list_installed` (`--list` with `available=true`, which adds
 the images that can be downloaded) and `avdmanager list device -c`.
@@ -376,6 +427,29 @@ Without `platform`, a platform whose tools are missing is left out and
 named in `"errors": {"android": "sdkmanager not found; …"}`. With
 `platform`, a missing tool fails `DEVICE_ERROR` naming the tool and how to
 install it.
+
+**Cloud models.** `location=cloud` answers the cloud section instead of the
+simulator and AVD catalog (`location=local,cloud` answers both: on a hub,
+the simulator and AVD sections are the asked hub's own and the cloud
+section the launching hub's); without it no cloud provider is asked. `provider`, `platform`, `name`,
+`osVersionMin`, `osVersionMax` and `available` filter the models as they
+filter `GET /v1/devices`.
+
+```json
+{ "ok": true, "exitCode": 0,
+  "cloud": [ { "provider": "devicefarm", "hub": "lab-mac",
+    "models": [ { "id": "df:android:google-pixel-8:14", "arn": "arn:aws:devicefarm:us-west-2::device:…",
+                  "platform": "android", "name": "Google Pixel 8", "osVersion": "14", "formFactor": "phone",
+                  "manufacturer": "Google", "availability": "HIGHLY_AVAILABLE", "available": true } ] } ] }
+```
+
+`available` is true for `HIGHLY_AVAILABLE` and `AVAILABLE`. `hub` is the
+hub that launches the models (absent on a plain daemon). In a mesh the
+cloud catalog is not fanned out: it is answered by the hub named in `hub`,
+else by the hub that would launch ([the launch routing
+rule](cloud.md#which-hub-launches)). A daemon without credentials answers
+`USAGE`, naming the variables and files it read; a mesh where no hub has
+them answers `USAGE` "no hub in this mesh has Device Farm credentials".
 
 ### `POST /v1/devices` — boot, or create and boot, a simulator or emulator
 
@@ -414,11 +488,71 @@ image without `installImage`, and a field of the other platform fail
 `USAGE` before anything is created. Without `boot: false` the answer is the
 booted device; with it, the shut-down one (an AVD as `avd:<name>`).
 
+**A cloud device.** `create.cloud` launches a real phone on a cloud
+provider instead (direct mode: see [Cloud devices](cloud.md)). Only a plain
+daemon launches one, for a local caller (unix socket or loopback), with its
+own credentials: a remote caller gets `FORBIDDEN`, and a hub answers every
+caller `FORBIDDEN` with the hint to lease one (`lease --location cloud`).
+
+```sh
+curl -s -H "$H" $D/v1/devices -d '{"platform":"android","create":{"cloud":{"provider":"devicefarm",
+  "name":"Google Pixel 8","osVersionMin":"14","app":"/path/WikipediaSample.apk","appId":"org.wikipedia.alpha","idleReleaseSec":1800}}}'
+```
+
+| `create.cloud` field | |
+| --- | --- |
+| `provider` | `devicefarm` (the default) |
+| `platform` | `android` or `ios`; the request's `platform` fills it in when it is empty, and the two may not differ |
+| `name` | the model: an exact name, a catalog id (`df:android:google-pixel-8:14`) or a case-insensitive regular expression; empty takes the first available model of the platform and OS range |
+| `osVersion`, `osVersionMin`, `osVersionMax` | the exact OS version, or the range (as in the filters) |
+| `app`, `auxiliaryApps` | an `.apk` or `.ipa` installed when the session starts, and at most 3 more: a path on the daemon's host, a `blob:` ref, or an upload ARN. A file is uploaded once, under its content hash, and reused for 30 days |
+| `appId` | the app's id, the default for attach |
+| `appiumVersion` | `2` or `3`; the default is 3 on iOS 27 and later, else 2 |
+| `caps` | capabilities merged into the WebDriver session's; never `appium:udid`, `platformVersion`, `app` or `deviceName` |
+| `idleReleaseSec` | how long the device may go without a request before it is released: default 600, 60–9000 |
+| `bootTimeoutSec` | how long to wait for the provider's session (default 900) |
+
+The launch picks up to three models (by availability, then OS version,
+newest first) and moves past one that stays busy for two minutes; it waits
+up to `bootTimeoutSec` while the account's concurrency is full, then fails
+`BUSY`. No matching model is `DEVICE_NOT_FOUND`, naming the closest ones;
+missing credentials or a denied AWS action is `USAGE`. Every session it
+creates is recorded before it waits, and every session it gives up on is
+stopped, also when the client disconnects. The answer is the device:
+
+```json
+{ "ok": true, "exitCode": 0,
+  "device": { "id": "df-3f2a9c1e", "platform": "android", "kind": "cloud", "name": "Google Pixel 8", "model": "Google Pixel 8", "osVersion": "14",
+    "state": "allocated", "ready": true, "provider": "devicefarm", "location": "cloud", "machine": "lab-mac",
+    "providerRef": "arn:aws:devicefarm:us-west-2:…:session:…", "dashboardUrl": "https://us-west-2.console.aws.amazon.com/devicefarm/…",
+    "expiresAt": "2026-11-21T03:15:24Z", "idleReleaseSec": 1800, "idleReleaseAt": "2026-11-21T01:15:24Z",
+    "formFactor": "phone", "manufacturer": "Google", "appiumVersion": "2", "bootedBy": "daemon", "createdBy": "maestro-d" } }
+```
+
+`appiumVersion` is the Appium major version the provider runs for it: 3
+for iOS 27 and later, else 2, unless `cloud.appiumVersion` asked for one.
+Attach it (`POST /v1/devices/{id}/attach` with no driver, URL or
+capabilities: the daemon holds its Appium driver) and drive it like any
+other device. Any request on its routes keeps it; after `idleReleaseSec`
+without one it is released (`device.released`, `idle`), and 30 s before
+the provider's 150-minute cap (`expiresAt`) it is released too
+(`session-limit`); inside the last 10 minutes every step result carries
+`warnings: ["cloud session ends at …"]`. A session the provider ends turns
+the device `state: ended` with `endedReason`, and later requests answer
+`DEVICE_ERROR` with the reason until it is deleted.
+
 ### `DELETE /v1/devices/{id}`
 
 Detaches if attached, then shuts the simulator/emulator down. Refuses with
 `DEVICE_EXTERNAL` unless the daemon booted it; body `{"force": true}` or
-`?force=true` overrides. Answers `{"ok": true}`.
+`?force=true` overrides. Answers `{"ok": true}`. A cloud device is released
+instead, with or without `?delete=true`: its session ends, and the answer
+is `{"ok": true, "device": {…}}` with `deviceMinutes` (`{metered, total}`;
+`estimated: true` when the provider has not settled its figure yet: then
+it counts from the session's creation to the release, and the billed
+figure is higher, because Device Farm also bills the cleanup after the
+release, ten minutes or more for an iPhone — `GET /v1/providers/devicefarm/sessions` shows the
+billed figure afterwards).
 
 With `?delete=true` (or body `{"delete": true}`) it deletes the simulator
 or AVD instead: `{id}` may be a UDID, a simulator name, `avd:<name>`, an
@@ -488,6 +622,58 @@ Closes the driver; the device keeps running. `{"ok": true}`, or
 One device, same shape as the list entries. `DEVICE_NOT_FOUND` if the host
 cannot see it and the daemon does not hold it.
 
+## Cloud providers
+
+These routes reach a provider without a device. `{provider}` is
+`devicefarm`; a daemon or hub without that provider's credentials answers
+`USAGE`. On a hub they go where a cloud launch would: the hub `?hub=` names,
+else the hub you ask when it has the provider, else the first linked hub by
+name that has it; the answer then carries `"hub"`. Every caller may read;
+only a local caller uploads.
+
+### `GET /v1/providers/{provider}/account`
+
+The account: the free trial's minutes, the unmetered device slots and the
+job timeout.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "account": { "trialMinutes": { "total": 1000, "remaining": 941 }, "unmeteredDevices": {},
+               "unmeteredRemoteAccessDevices": {}, "maxJobTimeoutMinutes": 150 } }
+```
+
+### `GET /v1/providers/{provider}/apps`
+
+The project's uploaded apps (`.apk` and `.ipa`). maestro-d names each upload
+`maestro-d-<first 20 hex digits of its SHA-256>.apk|.ipa`, so an identical
+file is recognised.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "apps": [ { "appRef": "arn:aws:devicefarm:…:upload:…", "name": "maestro-d-3f2a9c1e0b4d5a6f7e81.apk",
+              "type": "ANDROID_APP", "status": "SUCCEEDED", "created": "2026-11-20T14:02:11Z" } ] }
+```
+
+### `POST /v1/providers/{provider}/apps`
+
+Uploads an `.apk` or `.ipa` from the daemon's own disk: `{"app": "/abs/path/app.apk"}`.
+A `SUCCEEDED` upload of the same content younger than 30 days is reused
+instead (`"reused": true`). The answer is one entry of the list above. A
+remote caller is refused `FORBIDDEN`: its app goes up under a lease with
+`POST /v1/devices/{id}/apps` on the leased cloud device. A failed upload
+is `DEVICE_ERROR`; no `app` is `USAGE`.
+
+### `GET /v1/providers/{provider}/sessions`
+
+The provider's sessions, newest first: for Device Farm, the remote access
+sessions of its project, each named with the device id maestro-d gave it.
+
+```json
+{ "ok": true, "exitCode": 0, "provider": "devicefarm",
+  "sessions": [ { "name": "df-3f2a9c1e", "ref": "arn:aws:devicefarm:…", "status": "COMPLETED", "result": "STOPPED",
+                  "model": "Google Pixel 8", "created": "2026-11-21T00:44:28Z", "deviceMinutes": { "metered": 3, "total": 3 } } ] }
+```
+
 ## The hub mesh
 
 Hubs link into a mesh ([hub.md](hub.md)); any hub serves the full API for
@@ -523,11 +709,14 @@ same.
 { "ok": true, "exitCode": 0,
   "hub": { "name": "hub-b", "version": "1.1.0", "apiVersion": "1", "listen": "[::]:7433", "mdns": true,
     "peers": [ { "name": "hub-a", "addr": "10.0.0.2:7433", "state": "linked", "direction": "outbound",
-                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z" } ] } }
+                 "rttMs": 2.4, "devices": 1, "since": "2026-11-08T12:00:00Z", "cloud": ["devicefarm"] } ],
+    "cloud": [ { "provider": "devicefarm", "maxDevices": 2, "held": 0 } ] } }
 ```
 
 `state` is `linked`, `down`, `stopped` (it shut down cleanly), `connecting`
-or `refused`. A daemon that is not a hub answers `USAGE`.
+or `refused`. A peer's `cloud` lists the cloud providers it announced when
+its link opened (its `hello`); the hub's own `cloud` is as in `GET
+/v1/status`. A daemon that is not a hub answers `USAGE`.
 
 ### `GET /v1/hub/link`
 
@@ -601,6 +790,7 @@ curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"sim
 | `ttlSec` | the window: default 28800 (8 hours), or the device's maximum when that is shorter; over the maximum is `USAGE` naming it. A selector skips a candidate whose maximum is shorter, and answers that `USAGE` when none is left |
 | `holder` | who holds it, as listings show; default the caller's address |
 | `attach` | an attach body ([`POST …/attach`](#post-v1devicesidattach)); the device is attached in the same call, and a failed attach ends the lease. Without it the device is only reserved |
+| `select.location`, `select.provider`, `select.osVersionMin`, `select.osVersionMax`, `cloud` | `osVersionMin`/`osVersionMax` bound the OS of any device, as `GET /v1/devices` filters do. `provider` and `cloud` apply only with `"location": "cloud"` (otherwise `USAGE`), which launches a cloud device for the lease instead: `platform` (required), `name` (the model: exact name, catalog id or regexp), `osVersion` (the version or a prefix, as above) or the range, and `provider` (default `devicefarm`) pick it; `cloud` takes `idleReleaseSec`, `appiumVersion`, `caps`, `appId` and `bootTimeoutSec`, but no app (install it under the lease). In a mesh it goes to the hub `select.hub` names, else the hub you ask when it has the provider, else the first linked hub by name that has it, and that hub's answer is final. The hub holds at most `--cloud-max-devices` (`BUSY` beyond), the window is at most 9000 s, and the device belongs to the lease: it is listed `available: false`, the lease's end releases it (`device.released`, `lease-end`), and its idle release or the session cap ends the lease (`lease.expired`, then `LEASE_EXPIRED`) |
 
 ```json
 {
@@ -648,7 +838,10 @@ curl -s -H "$H" -X POST $D/v1/leases/$LEASE/renew -d '{"ttlSec":1800}'
 
 Ends the lease: the device is detached (and shut down when the hub booted
 it for the lease). Answers the lease as it was; `LEASE_EXPIRED` when it had
-already ended.
+already ended. A cloud device the lease launched is released: the answer
+carries `deviceMinutes`, unless work under the lease kept the release
+waiting more than 30 s (or it failed), in which case `device.released`
+carries them.
 
 ## Steps
 
@@ -911,9 +1104,26 @@ the device imply. The answer names the app:
 (the newest `build-tools` under `$ANDROID_HOME`); without `aapt2` it is
 left out. An installer failure is `DEVICE_ERROR`.
 
+On a cloud device the app is uploaded to the provider (reused when an
+identical one was uploaded in the last 30 days, as in
+`POST /v1/providers/{provider}/apps`) and installed into the running
+session. The provider installs asynchronously (Device Farm's iOS installs
+land 10-20 s after it answers), so when the app id is known the daemon
+then asks the device until it lists the app (`mobile: isAppInstalled`), up
+to 120 s, and answers `DEVICE_ERROR` if it never does. When the device is
+attached, its WebDriver session is then reopened with the same
+capabilities (tried three times, 2 s apart, as a device can refuse a new
+session for a moment after an install), so the next step sees the new
+app.
+The device keeps its id and its session. An install waits for a step in
+flight on the device (`?wait=false` answers `BUSY` instead), and the idle
+release does not count the time it takes. `reinstall` is ignored: Device
+Farm installs over the existing app.
+
 ### `DELETE /v1/devices/{id}/apps/{appId}`
 
-Uninstalls by bundle id or package name.
+Uninstalls by bundle id or package name. A cloud device has no uninstall
+during its session: `USAGE` (release the device instead).
 
 ## Artifacts
 

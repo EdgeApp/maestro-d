@@ -116,6 +116,26 @@ func (d *Driver) RestartSession() error {
 	return nil
 }
 
+// AppInstalled reports whether the app is installed on the device
+// (mobile: isAppInstalled). maestro-d: the daemon waits on it after
+// installing into a cloud session, whose provider installs asynchronously.
+// An answer that is not a boolean is an error.
+func (d *Driver) AppInstalled(appID string) (bool, error) {
+	key := "appId"
+	if d.platform == "ios" {
+		key = "bundleId"
+	}
+	v, err := d.client.ExecuteMobile("isAppInstalled", map[string]interface{}{key: appID})
+	if err != nil {
+		return false, err
+	}
+	installed, ok := v.(bool)
+	if !ok {
+		return false, fmt.Errorf("mobile: isAppInstalled answered %v", v)
+	}
+	return installed, nil
+}
+
 // deepCopyCaps returns a deep copy of a capabilities map via JSON round-trip.
 func deepCopyCaps(caps map[string]interface{}) map[string]interface{} {
 	if caps == nil {

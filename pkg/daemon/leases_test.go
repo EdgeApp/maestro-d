@@ -1061,10 +1061,11 @@ func TestLeases_ListingsCarryLeaseState(t *testing.T) {
 	if err != nil || st.Daemon.Hub != "hubtest" {
 		t.Fatalf("status: %+v %v", st, err)
 	}
-	// A plain daemon's listing has neither field, and no lease routes.
+	// A plain daemon's listing has no lease state and no lease routes; it
+	// still says which devices are available.
 	plain := newTestEnv(t, 0)
 	pdevs, _ := plain.c.Devices(ctx, "")
-	if pdevs[0].Lease != nil || pdevs[0].Available {
+	if pdevs[0].Lease != nil || pdevs[0].MaxSec != 0 || !pdevs[0].Available {
 		t.Fatalf("plain daemon: %+v", pdevs[0])
 	}
 	for _, f := range []func() error{
@@ -1610,7 +1611,7 @@ func TestLeases_ClientForgetsExpiredLease(t *testing.T) {
 	env := newHubEnv(t, Config{})
 	ctx := context.Background()
 	var told []string
-	env.remote.OnLeaseExpired = func(device, lease string) { told = append(told, device+"="+lease) }
+	env.remote.OnLeaseExpired = func(device, lease, _ string) { told = append(told, device+"="+lease) }
 	env.remote.SetLease("mock-1", "gone")
 	_, err := env.remote.Command(ctx, "mock-1", "tapOn", "x", true)
 	wantErrCode(t, err, CodeLeaseExpired)

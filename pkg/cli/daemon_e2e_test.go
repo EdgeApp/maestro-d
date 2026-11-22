@@ -31,6 +31,9 @@ type e2e struct {
 	// coverDir, from MAESTRO_D_E2E_COVERDIR, is where the -cover binary
 	// and the daemons it spawns write their coverage (GOCOVERDIR).
 	coverDir string
+	// drop lists inherited variables (or prefixes ending in *) that every
+	// command runs without.
+	drop []string
 }
 
 // envE2ECoverDir makes newE2E build the binary with -cover; `make
@@ -84,8 +87,12 @@ func (e *e2e) env(extra ...string) []string {
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
 		drop := false
-		for _, t := range targetEnv {
-			drop = drop || k == t
+		for _, t := range append(targetEnv, e.drop...) {
+			if p, ok := strings.CutSuffix(t, "*"); ok {
+				drop = drop || strings.HasPrefix(k, p)
+			} else {
+				drop = drop || k == t
+			}
 		}
 		if !drop {
 			env = append(env, kv)

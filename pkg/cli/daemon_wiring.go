@@ -13,8 +13,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
@@ -41,6 +43,20 @@ func daemonDeps() daemon.Deps {
 		UninstallApp:       daemonUninstallApp,
 		AppID:              appIDOf,
 		TVInfo:             physicalTVInfo,
+		Providers:          map[string]func() (cloudprov.RemoteProvider, error){"devicefarm": deviceFarmProvider(devicefarm.Options{})},
+		NewRemoteDriver:    newRemoteAppiumDriver,
+	}
+}
+
+// deviceFarmProvider constructs the Device Farm provider from opts and the
+// process's AWS credential chain.
+func deviceFarmProvider(opts devicefarm.Options) func() (cloudprov.RemoteProvider, error) {
+	return func() (cloudprov.RemoteProvider, error) {
+		p, err := devicefarm.NewProvider(context.Background(), opts)
+		if err != nil {
+			return nil, err
+		}
+		return p, nil
 	}
 }
 

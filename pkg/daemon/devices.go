@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -115,8 +116,9 @@ func (r *Registry) List(platform string) []DeviceInfo {
 		}
 		out = append(out, d)
 	}
-	// Records the live list can't see (mock devices, or a device that
-	// dropped off adb while attached) still show so they can be detached.
+	// Records the live list can't see (mock devices, a cloud provider's
+	// devices, or a device that dropped off adb while attached) still show
+	// so they can be driven, detached or released.
 	for id, rec := range r.records {
 		if seen[id] {
 			continue
@@ -124,7 +126,7 @@ func (r *Registry) List(platform string) []DeviceInfo {
 		if platform != "" && rec.Platform != platform {
 			continue
 		}
-		if rec.Attached || rec.Platform == "mock" || rec.Platform == "web" {
+		if rec.Attached || rec.Platform == "mock" || rec.Platform == "web" || rec.Provider != "" {
 			out = append(out, *rec)
 		}
 	}
@@ -245,6 +247,36 @@ func (r *Registry) MarkDetached(id string) {
 		delete(r.records, id)
 	}
 	r.persistLocked()
+}
+
+// PutRecord records info as held by this daemon (a cloud device), replacing
+// any record of that id.
+func (r *Registry) PutRecord(info DeviceInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec := info
+	r.records[info.ID] = &rec
+	r.persistLocked()
+}
+
+// UpdateRecord changes the record of id in place (no-op without one).
+func (r *Registry) UpdateRecord(id string, fn func(*DeviceInfo)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rec, ok := r.records[id]; ok {
+		fn(rec)
+		r.persistLocked()
+	}
+}
+
+// DropRecord forgets id.
+func (r *Registry) DropRecord(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.records[id]; ok {
+		delete(r.records, id)
+		r.persistLocked()
+	}
 }
 
 // SetBusy flags a step in flight (not persisted).
@@ -439,7 +471,9 @@ func (r *Registry) ShutdownOwned() {
 	r.mu.Lock()
 	var owned []DeviceInfo
 	for _, rec := range r.records {
-		if rec.BootedBy == BootedByDaemon {
+		// A cloud device is released by the server (releaseAllRemote),
+		// never shut down.
+		if rec.BootedBy == BootedByDaemon && rec.Provider == "" {
 			owned = append(owned, *rec)
 		}
 	}
@@ -462,33 +496,101 @@ func (r *Registry) ShutdownOwned() {
 	wg.Wait()
 }
 
+// OrphanOptions configure StopOrphans.
+type OrphanOptions struct {
+	// ReleaseCloud releases a dead daemon's cloud session. Nil leaves every
+	// cloud ledger entry in place, reported as unreleased.
+	ReleaseCloud func(ctx context.Context, e CloudEntry) (*cloudprov.DeviceMinutes, error)
+}
+
+// OrphanResult is what StopOrphans did.
+type OrphanResult struct {
+	// Stopped are the simulators and emulators it shut down.
+	Stopped []string `json:"stopped"`
+	// Released are the cloud devices whose sessions it released.
+	Released []ReleasedCloud `json:"released,omitempty"`
+	// Unreleased are the cloud sessions it could not release, kept in the
+	// ledger so the command can be run again with credentials.
+	Unreleased []UnreleasedCloud `json:"unreleased,omitempty"`
+}
+
+// ReleasedCloud is a dead daemon's cloud session StopOrphans released, with
+// the minutes it used (estimated until the provider settles them).
+type ReleasedCloud struct {
+	ID            string                   `json:"id"`
+	DeviceMinutes *cloudprov.DeviceMinutes `json:"deviceMinutes,omitempty"`
+}
+
+// UnreleasedCloud is a dead daemon's cloud session StopOrphans left.
+type UnreleasedCloud struct {
+	ID          string `json:"id"`
+	Daemon      string `json:"daemon"`
+	Provider    string `json:"provider"`
+	ProviderRef string `json:"providerRef"`
+	Error       string `json:"error"`
+}
+
 // StopOrphans shuts down devices recorded as daemon-booted by daemons that
-// are no longer alive and removes their run files. It returns the device
-// IDs it stopped. Used by `device stop --orphans`; needs no daemon.
-func StopOrphans() ([]string, error) {
+// are no longer alive and removes their run files, and releases the cloud
+// sessions the cloud ledger holds for dead daemons. Used by `device stop
+// --orphans`; needs no daemon.
+func StopOrphans(ctx context.Context, opts OrphanOptions) (*OrphanResult, error) {
 	daemons, err := ListDaemons()
 	if err != nil {
 		return nil, err
 	}
-	var stopped []string
+	res := &OrphanResult{}
 	var errs []error
 	for _, d := range daemons {
 		if d.Alive {
 			continue
 		}
 		for _, dev := range d.Devices {
-			if dev.BootedBy != BootedByDaemon {
+			// The ledger pass below owns cloud devices.
+			if dev.BootedBy != BootedByDaemon || dev.Provider != "" {
 				continue
 			}
 			if err := shutdownDevice(dev); err != nil {
 				errs = append(errs, fmt.Errorf("%s (%s): %w", dev.ID, d.Name, err))
 				continue
 			}
-			stopped = append(stopped, dev.ID)
+			res.Stopped = append(res.Stopped, dev.ID)
 		}
 		RemoveRunFiles(d.Name)
 	}
-	return stopped, errors.Join(errs...)
+	releaseOrphanedCloud(ctx, opts, res)
+	return res, errors.Join(errs...)
+}
+
+// releaseOrphanedCloud releases the ledger entries of dead daemons. An entry
+// whose release fails stays, and is reported.
+func releaseOrphanedCloud(ctx context.Context, opts OrphanOptions, res *OrphanResult) {
+	entries, err := ReadLedger()
+	if err != nil {
+		logger.Warn("cloud ledger: %v", err)
+		return
+	}
+	for _, e := range entries {
+		if !deadEntry(e) {
+			continue
+		}
+		var rerr error
+		var minutes *cloudprov.DeviceMinutes
+		if opts.ReleaseCloud == nil {
+			rerr = errors.New("no cloud credentials to release it with")
+		} else {
+			minutes, rerr = opts.ReleaseCloud(ctx, e)
+		}
+		if rerr != nil {
+			res.Unreleased = append(res.Unreleased, UnreleasedCloud{ID: e.ID, Daemon: e.Daemon, Provider: e.Provider,
+				ProviderRef: e.ProviderRef, Error: rerr.Error()})
+			continue
+		}
+		if err := removeLedgerEntry(e.ProviderRef); err != nil {
+			logger.Warn("cloud ledger: %v", err)
+		}
+		res.Released = append(res.Released, ReleasedCloud{ID: e.ID, DeviceMinutes: minutes})
+	}
 }
 
 // ---------------------------------------------------------------------------

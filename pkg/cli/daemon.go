@@ -388,15 +388,54 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		fmt.Fprintln(w, "No devices.")
 		return
 	}
-	// A hub's listing carries lease state: show who holds each device.
+	// A hub's listing carries lease state (every hub entry has maxSec):
+	// show who holds each device.
 	leases := false
 	for _, d := range devs {
-		leases = leases || d.Lease != nil || d.Available
+		leases = leases || d.Lease != nil || d.MaxSec > 0
+	}
+	// A cloud row shows its provider.
+	cloud := false
+	for _, d := range devs {
+		cloud = cloud || d.Provider != ""
+	}
+	loc := func(d daemon.DeviceInfo) string {
+		switch {
+		case d.Location == daemon.LocationMesh && d.Machine != "":
+			return "mesh (" + d.Machine + ")"
+		case d.Location == daemon.LocationCloud:
+			if d.Hub != "" {
+				return "cloud (" + d.Provider + "@" + d.Hub + ")"
+			}
+			return "cloud (" + d.Provider + ")"
+		case d.Location != "":
+			return d.Location
+		}
+		return "-"
+	}
+	prov := func(d daemon.DeviceInfo) string {
+		if !cloud {
+			return ""
+		}
+		p := d.Provider
+		if p == "" {
+			p = "-"
+		}
+		return fmt.Sprintf("%-11s ", p)
+	}
+	provHdr := ""
+	if cloud {
+		provHdr = fmt.Sprintf("%-11s ", "PROVIDER")
+	}
+	// LOCATION is as wide as its longest value ("cloud (devicefarm@<hub>)").
+	locW := 24
+	for _, d := range devs {
+		locW = max(locW, len(loc(d)))
 	}
 	if leases {
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", "NAME")
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", locW, "LOCATION", provHdr, "NAME")
 	} else {
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "NAME")
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", locW, "LOCATION", provHdr, "NAME")
 	}
 	for _, d := range devs {
 		state := d.State
@@ -420,7 +459,7 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 		if d.OSVersion != "" {
 			name += " " + d.OSVersion
 		}
-		if d.BootedBy == daemon.BootedByDaemon {
+		if d.BootedBy == daemon.BootedByDaemon && d.Provider == "" {
 			name += " [booted by daemon]"
 		}
 		if leases {
@@ -431,10 +470,10 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 			case d.Available:
 				lease = "available"
 			}
-			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %s\n", d.ID, d.Platform, d.Kind, state, att, lease, strings.TrimSpace(name))
+			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, lease, locW, loc(d), prov(d), strings.TrimSpace(name))
 			continue
 		}
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %s\n", d.ID, d.Platform, d.Kind, state, att, strings.TrimSpace(name))
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, locW, loc(d), prov(d), strings.TrimSpace(name))
 	}
 }
 
@@ -446,7 +485,7 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 func daemonCommands() []*cli.Command {
 	return append([]*cli.Command{
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
-		daemonDeviceCommand, daemonAttachCommand, daemonDetachCommand,
+		daemonDeviceCommand, devicefarmCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
 		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
 		gcCommand,
@@ -803,13 +842,20 @@ var daemonPsCommand = &cli.Command{
 }
 
 var (
-	deviceListFlags  = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags)
+	deviceListFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, queryFlags(true), []dflag{
+		boolFlag("available", "Only devices a lease could take now (ready, not leased, not attached)", nil,
+			func(o *daemonOpts, v bool) { o.manage.query.Available = v }),
+	})
 	deviceStartFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
 		intFlag("boot-timeout", "Seconds to wait for boot (default 180)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	})
 	deviceStopFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
 		boolFlag("force", "Shut down even if the daemon did not boot it", nil, func(o *daemonOpts, v bool) { o.force = v }),
-		boolFlag("orphans", "Shut down devices left behind by dead daemons", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
+		boolFlag("orphans", "Shut down devices left behind by dead daemons, and release their cloud sessions", nil, func(o *daemonOpts, v bool) { o.orphans = v }),
+		strFlag("devicefarm-credentials-file", "With --orphans: release Device Farm sessions with this AWS shared credentials file", nil,
+			func(o *daemonOpts, v string) { o.dfCreds.CredentialsFile = v }),
+		strFlag("devicefarm-profile", "With --orphans: release Device Farm sessions with this AWS profile", nil,
+			func(o *daemonOpts, v string) { o.dfCreds.Profile = v }),
 	})
 )
 
@@ -829,7 +875,9 @@ var daemonDeviceCommand = &cli.Command{
 				if err != nil {
 					return err
 				}
-				res, err := client.DeviceList(ctx, o.Attach.Platform)
+				q := o.manage.query
+				q.Platform = o.Attach.Platform
+				res, err := client.DeviceListQuery(ctx, q)
 				if err != nil {
 					return err
 				}
@@ -892,21 +940,7 @@ daemons that are no longer alive.`, deviceStopFlags),
 			SkipFlagParsing: true,
 			Action: withArgs(deviceStopFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 				if o.orphans {
-					stopped, err := daemon.StopOrphans()
-					if err != nil {
-						return daemon.WrapErr(daemon.CodeDeviceError, err)
-					}
-					if o.JSON {
-						if stopped == nil {
-							stopped = []string{}
-						}
-						printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": stopped})
-					} else if len(stopped) == 0 {
-						fmt.Println("No orphaned devices.")
-					} else {
-						fmt.Printf("stopped: %s\n", strings.Join(stopped, ", "))
-					}
-					return nil
+					return runStopOrphans(ctx, o)
 				}
 				if len(args) != 1 {
 					return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device stop <device-id> [--force] | --orphans")
@@ -915,13 +949,19 @@ daemons that are no longer alive.`, deviceStopFlags),
 				if err != nil {
 					return err
 				}
-				if err := client.StopDevice(ctx, args[0], o.force); err != nil {
+				res, err := client.StopDeviceResult(ctx, args[0], o.force)
+				if err != nil {
 					return err
 				}
 				if o.JSON {
-					printJSON(os.Stdout, daemon.Envelope{OK: true})
+					if res.Device.ID == "" {
+						printJSON(os.Stdout, daemon.Envelope{OK: true})
+					} else {
+						res.Envelope = daemon.Envelope{OK: true}
+						printJSON(os.Stdout, res)
+					}
 				} else {
-					fmt.Printf("%s stopped\n", args[0])
+					fmt.Printf("%s stopped%s\n", args[0], minutesNote(res.Device.DeviceMinutes))
 				}
 				return nil
 			}),

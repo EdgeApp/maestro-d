@@ -1,0 +1,9 @@
+# Opens General in the Settings app of a cloud iPhone (no app needed).
+appId: com.apple.Preferences
+---
+- launchApp
+# A supervised phone lists banners above General.
+- scrollUntilVisible:
+    element: "General"
+- tapOn: "General"
+- assertVisible: "About"

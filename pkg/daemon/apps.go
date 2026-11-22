@@ -68,10 +68,6 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, Errorf(CodeUsage, "install: app is required (a blob: ref, or a path for local callers)"))
 		return
 	}
-	if s.deps.InstallApp == nil {
-		writeError(w, Errorf(CodeInternal, "install: no installer configured"))
-		return
-	}
 	path := req.App
 	if strings.HasPrefix(path, "blob:") {
 		if _, _, err := executor.ParseBlobRef(path); err != nil {
@@ -97,6 +93,16 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		e := forbidden("app %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", path).WithDetails("field", "app")
 		s.logForbidden(r, e)
 		writeError(w, e)
+		return
+	}
+	if rd := s.remote(id); rd != nil {
+		// A cloud device: the provider installs it (remote.go), before and
+		// instead of the reinstall's uninstall, which it has no use for.
+		s.handleInstallCloud(w, r, rd, path)
+		return
+	}
+	if s.deps.InstallApp == nil {
+		writeError(w, Errorf(CodeInternal, "install: no installer configured"))
 		return
 	}
 	platform := strings.ToLower(req.Platform)
@@ -134,6 +140,10 @@ func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {
 	id, appID := r.PathValue("id"), r.PathValue("appId")
 	if appID == "" {
 		writeError(w, Errorf(CodeUsage, "uninstall: app id is required"))
+		return
+	}
+	if s.remote(id) != nil {
+		writeError(w, Errorf(CodeUsage, "Device Farm has no uninstall during a session; release the device"))
 		return
 	}
 	if s.deps.UninstallApp == nil {

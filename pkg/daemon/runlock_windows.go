@@ -5,6 +5,7 @@ package daemon
 import (
 	"errors"
 	"os"
+	"time"
 )
 
 var errRunLocked = errors.New("run dir locked")
@@ -16,3 +17,6 @@ func lockRunDir(path string) (*os.File, error) {
 
 // unlockRunDir closes a file lockRunDir opened.
 func unlockRunDir(f *os.File) { _ = f.Close() }
+
+// lockLedger opens path; Windows has no flock, so it guards nothing there.
+func lockLedger(path string, _ time.Duration) (*os.File, error) { return lockRunDir(path) }

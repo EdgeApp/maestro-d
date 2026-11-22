@@ -119,7 +119,7 @@ func TestLease_Printing(t *testing.T) {
 	var b bytes.Buffer
 	printDevices(&b, []daemon.DeviceInfo{
 		{ID: "a", Platform: "mock", Lease: &daemon.DeviceLease{Holder: "bob", ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339)}, Attached: true},
-		{ID: "b", Platform: "mock", Available: true},
+		{ID: "b", Platform: "mock", Available: true, MaxSec: 3600},
 		{ID: "c", Platform: "mock"},
 	})
 	out := b.String()
@@ -127,7 +127,7 @@ func TestLease_Printing(t *testing.T) {
 		t.Fatalf("lease column:\n%s", out)
 	}
 	b.Reset()
-	printDevices(&b, []daemon.DeviceInfo{{ID: "a", Platform: "mock"}})
+	printDevices(&b, []daemon.DeviceInfo{{ID: "a", Platform: "mock", Available: true}})
 	if strings.Contains(b.String(), "LEASE") {
 		t.Fatal("no LEASE column off a hub")
 	}
@@ -265,7 +265,7 @@ func TestHeldLease_UsesTheFileAndNeverTakesOne(t *testing.T) {
 		t.Fatal("leases on file make a fresh client send them")
 	}
 	// The expiry hook drops the entry.
-	c2.OnLeaseExpired("mock-7", c2.LeaseOf("mock-7"))
+	c2.OnLeaseExpired("mock-7", c2.LeaseOf("mock-7"), "")
 	if findLease(leaseKey(c2, o), "mock-7") != nil {
 		t.Fatal("hook did not drop the entry")
 	}

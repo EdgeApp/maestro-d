@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
@@ -46,4 +47,29 @@ type Deps struct {
 	// fails. nil means no TVs. A hub shares a TV only when --share-tv names
 	// it.
 	TVInfo func(id string) (name string, ok bool)
+
+	// Providers maps a cloud provider's name ("devicefarm") to its
+	// constructor (cloud.go). A plain daemon constructs a provider on first
+	// use, from its own credentials; a hub is given only the providers it
+	// was started with (`hub start --devicefarm`).
+	Providers map[string]func() (cloudprov.RemoteProvider, error)
+	// NewRemoteDriver opens a WebDriver session on a cloud device's Appium
+	// endpoint with caps, never touching local discovery or adb (remote.go).
+	NewRemoteDriver func(ctx context.Context, endpoint string, caps map[string]any) (RemoteDriver, DriverInfo, error)
+}
+
+// RemoteDriver is the Appium driver the daemon holds for a cloud device.
+type RemoteDriver interface {
+	core.Driver
+	// Keepalive sends a cheap session command so the provider does not end
+	// an idle session.
+	Keepalive() error
+	// RestartSession ends the WebDriver session and opens a new one with
+	// the same capabilities, on the same driver (after an install).
+	RestartSession() error
+	// AppInstalled reports whether the app is on the device. A provider
+	// that installs asynchronously is polled with it after an install.
+	AppInstalled(appID string) (bool, error)
+	// Close ends the WebDriver session.
+	Close() error
 }

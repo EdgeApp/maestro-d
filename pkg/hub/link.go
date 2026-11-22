@@ -69,8 +69,10 @@ type Link struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// peer, instance and addr describe the other hub (from its hello).
+	// peer, instance and addr describe the other hub (from its hello),
+	// and cloud lists the cloud providers it launches devices on.
 	peer, instance, addr string
+	cloud                []string
 	// outbound is true on the side that dialed.
 	outbound bool
 	// bulk links carry one exchange and are never pinged.
