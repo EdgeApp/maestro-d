@@ -286,6 +286,39 @@ func TestHub_FlagsAndTokens(t *testing.T) {
 	}
 }
 
+// --reservation-lead: a duration or seconds, at least 1s, default 24h,
+// checked with the other flags and passed to a detached or launchd hub.
+func TestHub_ReservationLead(t *testing.T) {
+	for v, want := range map[string]time.Duration{"": 24 * time.Hour, "24h": 24 * time.Hour, "90m": 90 * time.Minute, "3600": time.Hour} {
+		if got, err := parseReservationLead(v); err != nil || got != want {
+			t.Errorf("%q: %v %v", v, got, err)
+		}
+	}
+	for _, v := range []string{"0", "-5m", "soon"} {
+		if _, err := parseReservationLead(v); !isCode(err, daemon.CodeUsage) {
+			t.Errorf("%q accepted: %v", v, err)
+		}
+		if _, _, err := checkHubFlags(hubFlags(t, "--token", "t", "--peer-token", "p", "--reservation-lead="+v)); err == nil {
+			t.Errorf("hub start --reservation-lead %q accepted", v)
+		}
+	}
+	o := hubFlags(t, "--token", "t", "--peer-token", "p", "--reservation-lead", "2h")
+	if _, _, err := checkHubFlags(o); err != nil {
+		t.Fatal(err)
+	}
+	if args := strings.Join(hubChildArgs(o), " "); !strings.Contains(args, "--reservation-lead 2h") {
+		t.Fatalf("child args: %s", args)
+	}
+	if args := strings.Join(hubChildArgs(hubFlags(t, "--token", "t", "--peer-token", "p")), " "); strings.Contains(args, "reservation-lead") {
+		t.Fatalf("default passed on: %s", args)
+	}
+	var b bytes.Buffer
+	printHubStatus(&b, daemon.HubStatus{Name: "lab-a", ReservationLeadSec: 7200})
+	if !strings.Contains(b.String(), "reservations start up to 2h0m0s ahead") {
+		t.Fatalf("status: %s", b.String())
+	}
+}
+
 func selfSignedPEM(t *testing.T) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

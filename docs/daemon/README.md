@@ -159,6 +159,7 @@ throws a `MaestroError` carrying all of it.
 | `PEER_UNAVAILABLE` | 3 | 503 | hub mesh: the hub that owns the device is unreachable; clients retry it |
 | `HUB_NAME_TAKEN`, `HUB_VERSION` | 5 | 409 | hub mesh: a joining hub's name is taken, or it speaks another API version |
 | `LEASE_REQUIRED`, `LEASE_EXPIRED` | 5 | 409 | hub: a mutating request without the device's lease, or with an expired one |
+| `LEASE_NOT_STARTED` | 5 | 409 | hub: the request's lease is a reservation whose window has not started (`details.startsAt`) |
 
 Every failure is the same JSON, on stderr for the CLI and as the body for
 REST:

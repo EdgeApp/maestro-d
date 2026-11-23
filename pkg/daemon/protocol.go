@@ -82,6 +82,10 @@ const (
 	// CodeLeaseExpired: the request's lease has expired or was released.
 	// Exit 5 / HTTP 409.
 	CodeLeaseExpired Code = "LEASE_EXPIRED"
+	// CodeLeaseNotStarted: the request's lease is a reservation whose
+	// window has not started; details.startsAt says when it does. Exit 5 /
+	// HTTP 409.
+	CodeLeaseNotStarted Code = "LEASE_NOT_STARTED"
 	// CodeCaptureUnavailable: the device has no screen capture, or its
 	// capture failed or produced no frames. Exit 4 / HTTP 503;
 	// details.reason names why (pkg/capture's reasons: simulator,
@@ -99,7 +103,7 @@ var Codes = []Code{
 	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
-	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeCaptureUnavailable, CodeUnsupported,
+	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted, CodeCaptureUnavailable, CodeUnsupported,
 }
 
 // ExitCode returns the CLI exit status for the code.
@@ -115,7 +119,7 @@ func (c Code) ExitCode() int {
 		return 3
 	case CodeDeviceError, CodeDeviceNotFound, CodeInternal, CodeCaptureUnavailable:
 		return 4
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted:
 		return 5
 	case CodeInterrupted:
 		return 130
@@ -138,7 +142,7 @@ func (c Code) HTTPStatus() int {
 		return http.StatusBadGateway
 	case CodeForbidden:
 		return http.StatusForbidden
-	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired:
+	case CodeBusy, CodeDeviceExternal, CodeDeviceInUse, CodeHubNameTaken, CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted:
 		return http.StatusConflict
 	case CodeDeviceNotFound, CodeDeviceNotAttached:
 		return http.StatusNotFound
@@ -245,6 +249,16 @@ func WrapErr(code Code, err error) *Error {
 }
 
 // WithDetails adds structured context and returns the same error.
+// detail returns a string detail of e ("" and false when e is nil or has
+// none).
+func (e *Error) detail(key string) (string, bool) {
+	if e == nil {
+		return "", false
+	}
+	v, ok := e.Details[key].(string)
+	return v, ok
+}
+
 func (e *Error) WithDetails(kv ...any) *Error {
 	if e.Details == nil {
 		e.Details = map[string]any{}
@@ -464,6 +478,9 @@ type DeviceInfo struct {
 	CreatedBy string `json:"createdBy,omitempty"`
 	// Lease is the device's lease on a hub, when it is leased.
 	Lease *DeviceLease `json:"lease,omitempty"`
+	// Reservations, on a hub, are the device's reservations that have not
+	// started, by start: holder and window, never the lease id.
+	Reservations []DeviceLease `json:"reservations,omitempty"`
 	// Available is true on a hub for a ready device that is neither leased
 	// nor attached.
 	Available bool `json:"available,omitempty"`

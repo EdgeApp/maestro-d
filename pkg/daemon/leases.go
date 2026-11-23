@@ -11,7 +11,10 @@ package daemon
 // A lease is a fixed window: ttlSec seconds from the grant (8 hours by
 // default), never longer than the device's maximum (8 hours, or the hub's
 // --lease-max, hub-wide or per device). Using it never moves its expiry;
-// only POST /v1/leases/{lid}/renew does. At expiry, or on DELETE
+// only POST /v1/leases/{lid}/renew does. A reservation (POST
+// /v1/reservations, reservations.go) is a lease whose window starts later:
+// it is "scheduled" until then, and the sweeper starts it on time. No two
+// windows on one device overlap, whether started or scheduled. At expiry, or on DELETE
 // /v1/leases/{lid}, the hub ends the lease: a request still running under
 // it is cancelled (a step reports INTERRUPTED; one whose driver call
 // ignores that is answered LEASE_EXPIRED), and once every request under it
@@ -66,9 +69,14 @@ type Lease struct {
 	ID     string `json:"id"`
 	Device string `json:"device"`
 	Holder string `json:"holder,omitempty"`
+	// StartsAt is RFC 3339: the start of the window (the grant, for a
+	// lease taken at once). A renew leaves it as it is.
+	StartsAt string `json:"startsAt"`
 	// ExpiresAt is RFC 3339: the end of the window. Only an explicit
 	// renew moves it.
 	ExpiresAt string `json:"expiresAt"`
+	// State is LeaseScheduled until the window starts, then LeaseActive.
+	State string `json:"state"`
 	// TTLSec is the window's length; MaxSec the device's maximum window.
 	TTLSec int `json:"ttlSec"`
 	MaxSec int `json:"maxSec"`
@@ -77,9 +85,17 @@ type Lease struct {
 	Booted bool `json:"booted,omitempty"`
 }
 
-// DeviceLease is the lease state a hub's device listings carry.
+// The states of a lease.
+const (
+	LeaseScheduled = "scheduled"
+	LeaseActive    = "active"
+)
+
+// DeviceLease is the lease state a hub's device listings carry: the
+// active lease, and each reservation, which carries StartsAt.
 type DeviceLease struct {
 	Holder    string `json:"holder,omitempty"`
+	StartsAt  string `json:"startsAt,omitempty"`
 	ExpiresAt string `json:"expiresAt"`
 }
 
@@ -160,14 +176,24 @@ type LeasesResult struct {
 type leaseEntry struct {
 	id, device, holder string
 	ttl, max           time.Duration
-	expires            time.Time
-	booted             bool
+	// starts is the window's start; started is set once it has begun
+	// (at once for a lease taken now, by the sweeper for a reservation).
+	starts, expires time.Time
+	started         atomic.Bool
+	// sharedAtGrant records that a reservation's device was in the hub's
+	// shared pool when it was reserved: while the device is not listed (and
+	// sharing cannot be checked), only such a reservation is shown to a
+	// remote caller.
+	sharedAtGrant atomic.Bool
+	booted        bool
 	// avd is the bootKey of the AVD an emulator lease's device runs
 	// ("" for any other device): shut down, the AVD is listed under it.
 	avd string
 	// ended is closed when the lease ends, cancelling the requests that
-	// run under it.
+	// run under it; torn once its teardown is done (detached, and shut
+	// down when it booted the device), which may be later.
 	ended chan struct{}
+	torn  chan struct{}
 	// work counts the requests (serveLeased) and attaches (attachLeased)
 	// running under the lease, and inFlight is its value: the lease's
 	// teardown waits for them, so a driver call that ignores cancellation
@@ -303,12 +329,27 @@ func (t *leaseTable) reserved(d DeviceInfo) bool {
 	return t.reservedLocked(d) || t.ending[bootKey(d)] || t.byDevice[d.ID] != nil
 }
 
+// tearingDown reports whether device id is reserved by a teardown or a
+// boot (reservedLocked), whatever lease holds it.
+func (t *leaseTable) tearingDown(id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reservedLocked(DeviceInfo{ID: id})
+}
+
 // leaseTable holds a hub's live leases.
 type leaseTable struct {
 	mu       sync.Mutex
 	now      func() time.Time
 	byID     map[string]*leaseEntry
 	byDevice map[string]*leaseEntry
+	// scheduled holds each device's reservations that have not started,
+	// by start. byDevice holds only started leases; byID holds both.
+	scheduled map[string][]*leaseEntry
+	// torn holds, by device, the torn channel of an ended lease whose
+	// teardown is still running: the lease that starts next on the device
+	// is announced once it closes.
+	torn map[string]chan struct{}
 	// booting reserves the shut-down devices a selector lease is booting,
 	// by bootKey, until the lease on the booted device is granted.
 	booting map[string]bool
@@ -316,7 +357,37 @@ type leaseTable struct {
 	// down (detached, and shut down when the lease booted them), so no new
 	// lease takes one mid-shutdown. An emulator's AVD is reserved under
 	// its bootKey too: it can be listed shut down before the teardown ends.
-	ending map[string]bool
+	// endingN counts the teardowns running under each key: two can overlap
+	// on one device (a reservation started while the lease before it was
+	// torn down, and released in turn), and the key stays reserved until
+	// the last is done.
+	ending  map[string]bool
+	endingN map[string]int
+}
+
+// beginEndingLocked reserves keys ("" skipped) for one more teardown.
+// The caller holds t.mu.
+func (t *leaseTable) beginEndingLocked(keys ...string) {
+	for _, k := range keys {
+		if k != "" {
+			t.endingN[k]++
+			t.ending[k] = true
+		}
+	}
+}
+
+// doneEndingLocked ends one teardown under keys; a key is free once its
+// last teardown is done. The caller holds t.mu.
+func (t *leaseTable) doneEndingLocked(keys ...string) {
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if t.endingN[k]--; t.endingN[k] <= 0 {
+			delete(t.endingN, k)
+			delete(t.ending, k)
+		}
+	}
 }
 
 // bootKey names a shut-down device in the booting reservations so that
@@ -386,13 +457,23 @@ func (t *leaseTable) markBooted(device string) bool {
 }
 
 func newLeaseTable() *leaseTable {
-	return &leaseTable{now: time.Now, byID: map[string]*leaseEntry{}, byDevice: map[string]*leaseEntry{}, booting: map[string]bool{}, ending: map[string]bool{}}
+	return &leaseTable{now: time.Now, byID: map[string]*leaseEntry{}, byDevice: map[string]*leaseEntry{},
+		scheduled: map[string][]*leaseEntry{}, torn: map[string]chan struct{}{}, booting: map[string]bool{}, ending: map[string]bool{}, endingN: map[string]int{}}
 }
 
-func (e *leaseEntry) liveAt(now time.Time) bool { return now.Before(e.expires) }
+// liveAt reports whether e has started and its window has not ended.
+func (e *leaseEntry) liveAt(now time.Time) bool { return e.started.Load() && now.Before(e.expires) }
+
+// pending reports whether e is a reservation that has not started.
+func (e *leaseEntry) pending() bool { return !e.started.Load() }
 
 func (e *leaseEntry) view() Lease {
-	return Lease{ID: e.id, Device: e.device, Holder: e.holder, ExpiresAt: e.expires.UTC().Format(time.RFC3339),
+	state := LeaseActive
+	if e.pending() {
+		state = LeaseScheduled
+	}
+	return Lease{ID: e.id, Device: e.device, Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+		ExpiresAt: e.expires.UTC().Format(time.RFC3339), State: state,
 		TTLSec: int(e.ttl / time.Second), MaxSec: int(e.max / time.Second), Booted: e.booted}
 }
 
@@ -406,38 +487,49 @@ func (t *leaseTable) liveFor(device string) (Lease, bool) {
 	return Lease{}, false
 }
 
-// get returns a live lease by id.
+// get returns a live or scheduled lease by id.
 func (t *leaseTable) get(id string) (Lease, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if e := t.byID[id]; e != nil && e.liveAt(t.now()) {
+	if e := t.byID[id]; e != nil && (e.liveAt(t.now()) || e.pending()) {
 		return e.view(), true
 	}
 	return Lease{}, false
 }
 
-// list returns every live lease, by device.
+// list returns every live and scheduled lease, by device, then start.
 func (t *leaseTable) list() []Lease {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	out := []Lease{}
 	for _, e := range t.byID {
-		if e.liveAt(now) {
+		if e.liveAt(now) || e.pending() {
 			out = append(out, e.view())
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Device != out[j].Device {
+			return out[i].Device < out[j].Device
+		}
+		return out[i].StartsAt < out[j].StartsAt
+	})
 	return out
 }
 
 // renew sets a live lease's window to ttlSec seconds from now (0: its own
-// window), refusing one over the lease's maximum.
+// window), refusing one over the lease's maximum, one that would reach
+// into the device's next reservation, and a reservation that has not
+// started.
 func (t *leaseTable) renew(id string, ttlSec int) (Lease, *Error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	e := t.byID[id]
+	if e != nil && e.pending() {
+		return Lease{}, Errorf(CodeUsage, "lease %s starts at %s; a reservation is not renewed: release it and reserve again to move it",
+			id, e.starts.UTC().Format(time.RFC3339)).WithDetails("lease", id, "startsAt", e.starts.UTC().Format(time.RFC3339))
+	}
 	if e == nil || !e.liveAt(now) {
 		return Lease{}, Errorf(CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id)
 	}
@@ -448,9 +540,174 @@ func (t *leaseTable) renew(id string, ttlSec int) (Lease, *Error) {
 			return Lease{}, we
 		}
 	}
+	// Counted from the start of the current second, as a grant is.
+	expires := now.Truncate(time.Second).Add(ttl)
+	if c := t.overlapLocked(e.device, now.Truncate(time.Second), expires, e); c != nil {
+		return Lease{}, overlapErr(e.device, c)
+	}
 	e.ttl = ttl
-	e.expires = now.Add(ttl)
+	e.expires = expires
 	return e.view(), nil
+}
+
+// overlapLocked returns a lease on device whose window overlaps [from,
+// to), other than skip: the started lease (an expired one that has not
+// ended yet never overlaps a window from now on) or a reservation.
+// Windows that only touch do not overlap. The caller holds t.mu.
+func (t *leaseTable) overlapLocked(device string, from, to time.Time, skip *leaseEntry) *leaseEntry {
+	overlaps := func(e *leaseEntry) bool {
+		return e != nil && e != skip && from.Before(e.expires) && e.starts.Before(to)
+	}
+	if e := t.byDevice[device]; overlaps(e) {
+		return e
+	}
+	for _, e := range t.scheduled[device] {
+		if overlaps(e) {
+			return e
+		}
+	}
+	return nil
+}
+
+// overlapErr is DEVICE_IN_USE for a window that overlaps lease c on
+// device: c's holder and window, and nextStartsAt when c is a reservation.
+func overlapErr(device string, c *leaseEntry) *Error {
+	starts, expires := c.starts.UTC().Format(time.RFC3339), c.expires.UTC().Format(time.RFC3339)
+	if c.pending() {
+		return Errorf(CodeDeviceInUse, "device %s is reserved by %s from %s until %s; ask for a window that ends by %s",
+			device, HolderName(c.holder), starts, expires, starts).
+			WithDetails("holder", c.holder, "startsAt", starts, "expiresAt", expires, "nextStartsAt", starts)
+	}
+	return Errorf(CodeDeviceInUse, "device %s is leased by %s until %s", device, HolderName(c.holder), expires).
+		WithDetails("holder", c.holder, "startsAt", starts, "expiresAt", expires)
+}
+
+// isPending reports whether id is a reservation that has not started.
+func (t *leaseTable) isPending(id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e := t.byID[id]
+	return e != nil && e.pending()
+}
+
+// pendingFor returns the reservation id holds on device, when id names
+// one that has not started.
+func (t *leaseTable) pendingFor(id, device string) *leaseEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e := t.byID[id]; e != nil && e.pending() && e.device == device {
+		return e
+	}
+	return nil
+}
+
+// notStartedErr is LEASE_NOT_STARTED for a request under reservation e.
+func notStartedErr(e *leaseEntry) *Error {
+	starts := e.starts.UTC().Format(time.RFC3339)
+	return Errorf(CodeLeaseNotStarted, "lease %s on device %s starts at %s; run the command after then", e.id, e.device, starts).
+		WithDetails("lease", e.id, "startsAt", starts)
+}
+
+// reservations lists device's reservations that have not started, by start.
+func (t *leaseTable) reservations(device string) []DeviceLease {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []DeviceLease
+	for _, e := range t.scheduled[device] {
+		out = append(out, DeviceLease{Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+			ExpiresAt: e.expires.UTC().Format(time.RFC3339)})
+	}
+	return out
+}
+
+// scheduledOn returns device's reservations that have not started.
+func (t *leaseTable) scheduledOn(device string) []*leaseEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]*leaseEntry(nil), t.scheduled[device]...)
+}
+
+// hasDue reports whether a reservation's start has come.
+func (t *leaseTable) hasDue() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	for _, list := range t.scheduled {
+		if len(list) > 0 && !list[0].starts.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// startDue starts every reservation whose start has come, on a device
+// whose earlier lease has ended (the sweeper ends expired leases first),
+// and drops one whose whole window passed before it could start (a hub
+// that was down). The caller holds Server.leaseMu.
+func (t *leaseTable) startDue() (started, missed []*leaseEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	for device, list := range t.scheduled {
+		for len(list) > 0 && !list[0].starts.After(now) {
+			e := list[0]
+			if !now.Before(e.expires) {
+				list = list[1:]
+				delete(t.byID, e.id)
+				close(e.ended)
+				missed = append(missed, e)
+				continue
+			}
+			if t.byDevice[device] != nil {
+				break // its predecessor has not ended yet
+			}
+			list = list[1:]
+			e.started.Store(true)
+			t.byDevice[device] = e
+			started = append(started, e)
+		}
+		if len(list) == 0 {
+			delete(t.scheduled, device)
+		} else {
+			t.scheduled[device] = list
+		}
+	}
+	return started, missed
+}
+
+// successorLocked returns the lease that follows on device once its
+// current lease has gone: the started one, else the first reservation.
+// The caller holds t.mu.
+func (t *leaseTable) successorLocked(device string) *leaseEntry {
+	if e := t.byDevice[device]; e != nil {
+		return e
+	}
+	if list := t.scheduled[device]; len(list) > 0 {
+		return list[0]
+	}
+	return nil
+}
+
+// handBootGrace is how soon a reservation must start to take over the
+// shutdown of a device an ended lease booted: a device is not kept booted
+// and idle for a reservation hours away.
+const handBootGrace = time.Minute
+
+// handBoot gives the shutdown of device, which an ended lease booted, to
+// the lease that follows on it: one that has started, or a reservation
+// that starts within handBootGrace. Nil when none does, and the device is
+// shut down.
+func (t *leaseTable) handBoot(device string) *leaseEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	next := t.successorLocked(device)
+	if next != nil && next.pending() && next.starts.After(t.now().Add(handBootGrace)) {
+		next = nil
+	}
+	if next != nil {
+		next.booted = true
+	}
+	return next
 }
 
 // overMax is the USAGE error for a window over a device's maximum; device
@@ -465,27 +722,52 @@ func overMax(device string, ttlSec int, maxTTL time.Duration) *Error {
 		WithDetails("maxSec", int(maxTTL/time.Second), "ttlSec", ttlSec)
 }
 
-// grant leases device to holder, unless a lease holds it. A lease that
-// expired but has not ended yet still holds it: only endLeaseLocked drops
-// a lease, because only it cancels the lease's requests, detaches the
-// device and shuts down one the lease booted. The caller holds
-// Server.leaseMu, which serialises grants with the sweeper.
-func (t *leaseTable) grant(device, avd, holder string, ttl, maxTTL time.Duration, booted bool) (*leaseEntry, *Error) {
+// grant leases device to holder for ttl from starts (zero, or a time not
+// after now: at once), unless another lease's window overlaps it. A lease
+// that expired but has not ended yet still holds the device for a lease
+// taken now: only endLeaseLocked drops a lease, because only it cancels
+// the lease's requests, detaches the device and shuts down one the lease
+// booted. A later start is a reservation, kept in scheduled until the
+// sweeper starts it. The caller holds Server.leaseMu, which serialises
+// grants with the sweeper.
+func (t *leaseTable) grant(device, avd, holder string, starts time.Time, ttl, maxTTL time.Duration, booted bool) (*leaseEntry, *Error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	if e := t.byDevice[device]; e != nil {
-		if !e.liveAt(now) {
-			return nil, Errorf(CodeDeviceInUse, "device %s is being released (its lease expired); try again shortly", device)
-		}
-		return nil, Errorf(CodeDeviceInUse, "device %s is leased by %s until %s", device, HolderName(e.holder), e.expires.UTC().Format(time.RFC3339)).
-			WithDetails("holder", e.holder, "expiresAt", e.expires.UTC().Format(time.RFC3339))
+	// Lease times are whole seconds, as RFC 3339 reports them, so a window
+	// that starts at another's reported expiresAt only touches it, and
+	// expiresAt is always startsAt plus ttl. A lease taken now counts from
+	// the start of the current second.
+	if !starts.After(now) {
+		starts = now.Truncate(time.Second)
 	}
-	e := &leaseEntry{id: uuid.New().String(), device: device, holder: holder, ttl: ttl, max: maxTTL, expires: now.Add(ttl),
-		booted: booted, avd: avd, ended: make(chan struct{})}
+	expires := starts.Add(ttl)
+	pending := starts.After(now)
+	if e := t.byDevice[device]; e != nil && !pending && !e.liveAt(now) {
+		return nil, Errorf(CodeDeviceInUse, "device %s is being released (its lease expired); try again shortly", device)
+	}
+	if c := t.overlapLocked(device, starts, expires, nil); c != nil {
+		return nil, overlapErr(device, c)
+	}
+	e := &leaseEntry{id: uuid.New().String(), device: device, holder: holder, ttl: ttl, max: maxTTL, starts: starts,
+		expires: expires, booted: booted, avd: avd, ended: make(chan struct{})}
 	t.byID[e.id] = e
-	t.byDevice[device] = e
+	if pending {
+		t.scheduleLocked(e)
+	} else {
+		e.started.Store(true)
+		t.byDevice[device] = e
+	}
 	return e, nil
+}
+
+// scheduleLocked adds reservation e to its device's reservations, which
+// stay sorted by start (startDue, successorLocked and handBoot rely on
+// it). The caller holds t.mu.
+func (t *leaseTable) scheduleLocked(e *leaseEntry) {
+	list := append(t.scheduled[e.device], e)
+	sort.Slice(list, func(i, j int) bool { return list[i].starts.Before(list[j].starts) })
+	t.scheduled[e.device] = list
 }
 
 // remove drops e; false when it was already gone.
@@ -498,6 +780,19 @@ func (t *leaseTable) remove(e *leaseEntry) bool {
 	delete(t.byID, e.id)
 	if t.byDevice[e.device] == e {
 		delete(t.byDevice, e.device)
+	}
+	if list := t.scheduled[e.device]; len(list) > 0 {
+		kept := list[:0]
+		for _, x := range list {
+			if x != e {
+				kept = append(kept, x)
+			}
+		}
+		if len(kept) == 0 {
+			delete(t.scheduled, e.device)
+		} else {
+			t.scheduled[e.device] = kept
+		}
 	}
 	close(e.ended)
 	return true
@@ -538,13 +833,14 @@ func (t *leaseTable) lookup(id string) *leaseEntry {
 	return t.byID[id]
 }
 
-// expired returns the entries whose time has run out.
+// expired returns the started entries whose time has run out; a
+// reservation that has not started is never among them.
 func (t *leaseTable) expired() []*leaseEntry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	var out []*leaseEntry
-	for _, e := range t.byID {
+	for _, e := range t.byDevice {
 		if !e.liveAt(now) {
 			out = append(out, e)
 		}
@@ -590,7 +886,10 @@ func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *Error)
 	if cur != nil && cur.id == header {
 		return cur, nil
 	}
-	if other := t.byID[header]; other != nil && other.liveAt(now) {
+	if p := t.byID[header]; p != nil && p.pending() && p.device == device {
+		return nil, notStartedErr(p)
+	}
+	if other := t.byID[header]; other != nil && (other.liveAt(now) || other.pending()) {
 		return nil, Errorf(CodeLeaseRequired, "lease %s is for device %s, not %s", header, other.device, device).
 			WithDetails("leaseDevice", other.device)
 	}
@@ -942,6 +1241,7 @@ func (s *Server) annotate(devs []DeviceInfo) {
 		if l, ok := s.leases.liveFor(d.ID); ok {
 			d.Lease = &DeviceLease{Holder: l.Holder, ExpiresAt: l.ExpiresAt}
 		}
+		d.Reservations = s.leases.reservations(d.ID)
 		d.MaxSec = int(s.leaseMaxInfo(*d) / time.Second)
 		d.Machine, d.Addresses = machine, addrs
 		// A cloud device belongs to the lease that launched it: never free.
@@ -997,7 +1297,19 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 			target = s.stopTarget(id)
 			id = target.ID
 		}
+		if s.cfg.Hub {
+			s.startDue()
+		}
 		if !s.sharedWith(r, id) {
+			// A reservation that has not started answers LEASE_NOT_STARTED
+			// even while its device is unlisted (unplugged, or shared by a
+			// name nothing resolves now): the holder keeps it.
+			if header := r.Header.Get(HeaderLease); s.cfg.Hub && mode != leaseOpen && header != "" {
+				if p := s.leases.pendingFor(header, id); p != nil && (!CallerFrom(r.Context()).Remote || s.unlistedShared(header)) {
+					writeError(w, notStartedErr(p))
+					return
+				}
+			}
 			// A device that went away with its lease (a cloud device's
 			// idle release, the session cap) answers a request under that
 			// lease LEASE_EXPIRED, so clients forget the lease. A device
@@ -1026,6 +1338,13 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 				}
 			}
 			writeError(w, le)
+			return
+		}
+		if e != nil && s.leases.tearingDown(id) {
+			// A lease the sweeper started as the one before it ended: that
+			// lease's teardown (detach, shutdown) still runs on the device,
+			// and nothing under this one may run beside it.
+			writeError(w, beingReleasedErr(id))
 			return
 		}
 		if e == nil && mode == leaseIfHeld && s.leases.releasing(target) {
@@ -1519,7 +1838,7 @@ func (s *Server) leaseDeviceLocked(d DeviceInfo, holder string, ttlSec int, clai
 		e := Errorf(CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", device, owner.Name, owner.Info.PID)
 		return nil, e.WithDetails("owner", owner.Name, "ownerPid", owner.Info.PID)
 	}
-	e, ge := s.leases.grant(device, avdKey(d), holder, window, maxTTL, claim == claimBooted)
+	e, ge := s.leases.grant(device, avdKey(d), holder, time.Time{}, window, maxTTL, claim == claimBooted)
 	if ge != nil {
 		// A lease that expired before grant (it may have been live when
 		// leaseDevice looked) is ended in the background, under leaseMu.
@@ -1604,27 +1923,16 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 	if cloud != nil {
 		return nil, Errorf(CodeUsage, "lease: cloud (idle release, Appium version, …) applies only with select.location cloud").WithDetails("field", "cloud")
 	}
-	for f, v := range map[string]string{"osVersionMin": sel.OSVersionMin, "osVersionMax": sel.OSVersionMax} {
-		if _, ok := cloudprov.ParseVersion(v); v != "" && !ok {
-			return nil, Errorf(CodeUsage, "lease: select.%s %q is not a version", f, v).WithDetails("field", f)
-		}
-	}
-	var matches []DeviceInfo
-	for _, d := range s.visible(r, s.registry.List(strings.ToLower(sel.Platform))) {
-		// A cloud device belongs to the lease that launched it.
-		if d.Provider != "" {
-			continue
-		}
-		if sel.matches(d) {
-			matches = append(matches, d)
-		}
+	matches, me := s.selectorMatches(r, sel)
+	if me != nil {
+		return nil, me
 	}
 	if len(matches) == 0 {
 		return nil, notFound
 	}
 	// A candidate whose maximum window is shorter than ttlSec is skipped; when
 	// that leaves none, the answer is USAGE naming the maximum.
-	var tooLong *Error
+	var tooLong, reservedIn *Error
 	s.leaseMu.Lock()
 	for _, d := range matches {
 		if old := s.leases.expiredOn(d.ID); old != nil {
@@ -1646,6 +1954,13 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 		if le.Code == CodeUsage {
 			tooLong = le
 		}
+		// Free now but reserved inside the window: kept, the earliest
+		// reservation first, so the answer can say what window would fit.
+		if next, ok := le.Details["nextStartsAt"].(string); ok && le.Code == CodeDeviceInUse {
+			if prev, _ := reservedIn.detail("nextStartsAt"); reservedIn == nil || next < prev {
+				reservedIn = le
+			}
+		}
 	}
 	var boot *DeviceInfo
 	if sel.Boot {
@@ -1658,8 +1973,20 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 				s.leases.ending[d.ID] || s.leases.ending[bootKey(*d)] {
 				continue
 			}
-			if _, we := leaseWindow(d.ID, ttlSec, s.leaseMaxInfo(*d)); we != nil {
+			window, we := leaseWindow(d.ID, ttlSec, s.leaseMaxInfo(*d))
+			if we != nil {
 				tooLong = we
+				continue
+			}
+			now := s.leases.now()
+			if c := s.leases.overlapLocked(d.ID, now, now.Add(window), nil); c != nil {
+				// Reserved inside the window: the grant after the boot
+				// would refuse it, so it is not booted, and the answer can
+				// say what window would fit.
+				next := c.starts.UTC().Format(time.RFC3339)
+				if prev, _ := reservedIn.detail("nextStartsAt"); c.pending() && (reservedIn == nil || next < prev) {
+					reservedIn = overlapErr(d.ID, c)
+				}
 				continue
 			}
 			s.leases.booting[bootKey(*d)] = true
@@ -1676,6 +2003,12 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 		ids := make([]string, 0, len(matches))
 		for _, d := range matches {
 			ids = append(ids, d.ID)
+		}
+		if reservedIn != nil {
+			next, _ := reservedIn.detail("nextStartsAt")
+			return nil, Errorf(CodeDeviceInUse, "every device matching %s is leased, attached, not ready, or reserved within the window; "+
+				"ask for a ttlSec that ends by %s", sel.String(), next).
+				WithDetails("candidates", ids, "nextStartsAt", next)
 		}
 		return nil, Errorf(CodeDeviceInUse, "every device matching %s is leased, attached or not ready", sel.String()).
 			WithDetails("candidates", ids)
@@ -1721,6 +2054,28 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 		return nil, le
 	}
 	return e, nil
+}
+
+// selectorMatches lists the hub's devices the caller sees that sel
+// matches, in the order selectors try them, refusing an OS bound that is
+// not a version. Cloud devices are left out: one belongs to the lease that
+// launched it. Leases and reservations walk the same list.
+func (s *Server) selectorMatches(r *http.Request, sel LeaseSelector) ([]DeviceInfo, *Error) {
+	for f, v := range map[string]string{"osVersionMin": sel.OSVersionMin, "osVersionMax": sel.OSVersionMax} {
+		if _, ok := cloudprov.ParseVersion(v); v != "" && !ok {
+			return nil, Errorf(CodeUsage, "lease: select.%s %q is not a version", f, v).WithDetails("field", f)
+		}
+	}
+	var matches []DeviceInfo
+	for _, d := range s.visible(r, s.registry.List(strings.ToLower(sel.Platform))) {
+		if d.Provider != "" {
+			continue
+		}
+		if sel.matches(d) {
+			matches = append(matches, d)
+		}
+	}
+	return matches, nil
 }
 
 // disownBoot handles a device a selector lease booted but could not lease
@@ -1799,11 +2154,12 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	if s.notHub(w) {
 		return
 	}
+	s.startDue()
 	leases := s.leases.list()
 	if CallerFrom(r.Context()).Remote {
 		shared := leases[:0]
 		for _, l := range leases {
-			if s.shared(l.Device) {
+			if s.shared(l.Device) || s.unlistedShared(l.ID) {
 				shared = append(shared, l)
 			}
 		}
@@ -1817,10 +2173,28 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 // other is to it as a lease that does not exist.
 func (s *Server) visibleLease(r *http.Request, id string) *leaseEntry {
 	e := s.leases.lookup(id)
-	if e == nil || !s.sharedWith(r, e.device) {
+	if e == nil {
 		return nil
 	}
-	return e
+	if s.sharedWith(r, e.device) {
+		return e
+	}
+	// A reservation whose device is not listed now (unplugged, or shared by
+	// a name nothing resolves while it is gone) stays its holder's to read
+	// and cancel, as dev() keeps answering LEASE_NOT_STARTED for it, when
+	// the device was shared at its grant.
+	if s.unlistedShared(id) {
+		return e
+	}
+	return nil
+}
+
+// unlistedShared reports whether id is a reservation that has not started,
+// on a device not listed now that was in the shared pool when it was
+// reserved: a remote caller may still see it.
+func (s *Server) unlistedShared(id string) bool {
+	e := s.leases.lookup(id)
+	return e != nil && e.pending() && e.sharedAtGrant.Load() && !s.known(e.device)
 }
 
 func (s *Server) leaseGone(w http.ResponseWriter, id string) {
@@ -1831,6 +2205,7 @@ func (s *Server) handleGetLease(w http.ResponseWriter, r *http.Request) {
 	if s.notHub(w) {
 		return
 	}
+	s.startDue()
 	id := r.PathValue("lid")
 	l, ok := s.leases.get(id)
 	if !ok || s.visibleLease(r, id) == nil {
@@ -1844,6 +2219,7 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	if s.notHub(w) {
 		return
 	}
+	s.startDue()
 	id := r.PathValue("lid")
 	var req RenewRequest
 	if e := decodeBody(r, &req); e != nil {
@@ -1876,6 +2252,7 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 	if s.notHub(w) {
 		return
 	}
+	s.startDue()
 	id := r.PathValue("lid")
 	e := s.visibleLease(r, id)
 	if e == nil {
@@ -1924,25 +2301,35 @@ func (s *Server) endLease(e *leaseEntry, reason string) {
 // the teardown is done the device is reserved (leaseTable.ending), so no
 // new lease takes it mid-shutdown.
 func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) {
+	pending := e.pending()
 	if !s.leases.remove(e) {
 		return func() {}
 	}
-	s.leases.mu.Lock()
-	s.leases.ending[e.device] = true
-	if e.avd != "" {
-		s.leases.ending[e.avd] = true
+	if pending {
+		return s.endReservationLocked(e, reason)
 	}
+	s.leases.mu.Lock()
+	s.leases.beginEndingLocked(e.device, e.avd)
+	// The teardown of the lease before this one on the device, when it is
+	// still running (this one started as that one ended): this teardown
+	// waits for it, so the two never detach or shut down side by side.
+	before := s.leases.torn[e.device]
+	e.torn = make(chan struct{})
+	s.leases.torn[e.device] = e.torn
 	s.leases.mu.Unlock()
 	// Counted from here until finish is done, wherever the teardown runs
 	// (the caller, the sweeper's goroutine, or after the work under the
 	// lease unwound): Shutdown waits for it.
 	s.teardowns.add()
 	finish := func() {
+		defer close(e.torn)
 		defer s.teardowns.done()
 		defer func() {
 			s.leases.mu.Lock()
-			delete(s.leases.ending, e.device)
-			delete(s.leases.ending, e.avd)
+			s.leases.doneEndingLocked(e.device, e.avd)
+			if s.leases.torn[e.device] == e.torn {
+				delete(s.leases.torn, e.device)
+			}
 			s.leases.mu.Unlock()
 		}()
 		logger.Info("lease %s: %s %s (holder %s)", e.id, e.device, reason, HolderName(e.holder))
@@ -1959,6 +2346,11 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 		case !e.booted, e.stopped.Load():
 			// Not the hub's to shut down, or the holder stopped or
 			// deleted it itself.
+		case reason != endHubStopped && s.handBootOn(e):
+			// A later lease holds the device: it stays booted for it, and
+			// that lease shuts it down when it ends. A stopping hub hands
+			// nothing on: it shuts down what it booted, and the duty never
+			// outlives the process.
 		case !s.stillLeasedAVD(e):
 			logger.Warn("lease %s: %s no longer runs %s; not shutting it down", e.id, e.device, e.avd)
 		default:
@@ -1971,6 +2363,19 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 		s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
 	}
 	return func() {
+		if before != nil {
+			select {
+			case <-before:
+			default:
+				logger.Info("lease %s: %s %s while the lease before it is still torn down; its teardown follows", e.id, e.device, reason)
+				go func() {
+					<-before
+					e.work.Wait()
+					finish()
+				}()
+				return
+			}
+		}
 		if e.inFlight.Load() == 0 {
 			finish()
 			return
@@ -1986,6 +2391,71 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 			logger.Info("lease %s: the work on %s unwound; releasing the device", e.id, e.device)
 			finish()
 		}()
+	}
+}
+
+// handBootOn hands the shutdown of e's device, which e booted, to the
+// lease that follows e on it; false when none does.
+func (s *Server) handBootOn(e *leaseEntry) bool {
+	next := s.leases.handBoot(e.device)
+	if next == nil {
+		return false
+	}
+	logger.Info("lease %s: %s stays booted for lease %s, which shuts it down when it ends", e.id, e.device, next.id)
+	s.saveReservations()
+	return true
+}
+
+// endReservationLocked ends reservation e, already removed, which has not
+// started: nothing runs under it and nothing is attached for it, so its
+// teardown neither detaches nor reserves the device, which another lease
+// may be using. When e carried the shutdown of a device an earlier lease
+// booted, the duty moves to the next lease on the device; with none, and
+// no lease started on it, the device is shut down then.
+func (s *Server) endReservationLocked(e *leaseEntry, reason string) (teardown func()) {
+	logger.Info("lease %s: reservation on %s %s (holder %s)", e.id, e.device, reason, HolderName(e.holder))
+	// The reservations file is written in the teardown, which the caller
+	// runs after it unlocks Server.leaseMu.
+	publish := func() {
+		s.saveReservations()
+		s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
+	}
+	if !e.booted || reason == endDeleted {
+		return publish
+	}
+	if next := s.leases.handBoot(e.device); next != nil {
+		logger.Info("lease %s: the shutdown of %s goes to lease %s", e.id, e.device, next.id)
+		return publish
+	}
+	shutdown := s.shutDownBooted(e, reason)
+	return func() {
+		shutdown()
+		publish()
+	}
+}
+
+// shutDownBooted shuts down the device a reservation e held the shutdown
+// of (an earlier lease booted it and handed the duty on) when e ends
+// without a lease to pass it to: cancelled, or missed because the hub was
+// down or stalled through its window. The device is reserved (ending)
+// until the shutdown is done. The returned teardown runs it.
+func (s *Server) shutDownBooted(e *leaseEntry, reason string) (teardown func()) {
+	s.leases.mu.Lock()
+	s.leases.beginEndingLocked(e.device)
+	s.leases.mu.Unlock()
+	s.teardowns.add()
+	return func() {
+		defer s.teardowns.done()
+		defer func() {
+			s.leases.mu.Lock()
+			s.leases.doneEndingLocked(e.device)
+			s.leases.mu.Unlock()
+		}()
+		if err := s.registry.Stop(e.device, true); err != nil {
+			logger.Warn("lease %s: shut down %s: %v", e.id, e.device, err)
+		} else {
+			s.events.Publish(Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
+		}
 	}
 }
 
@@ -2028,6 +2498,13 @@ func (s *Server) endStoppedLease(ctx context.Context, reason string, devices ...
 		e := s.leases.byDevice[d]
 		s.leases.mu.Unlock()
 		end(e)
+		if reason == endDeleted {
+			// A deleted device never comes back under its id: its
+			// reservations go with it.
+			for _, r := range s.leases.scheduledOn(d) {
+				end(r)
+			}
+		}
 	}
 }
 
@@ -2042,9 +2519,65 @@ func (s *Server) sweepLeases() {
 	for _, e := range s.leases.expired() {
 		teardowns = append(teardowns, s.endLeaseLocked(e, endExpired))
 	}
+	// Then the reservations whose start has come, now that the leases
+	// before them have ended: their teardowns may still run, and dev()
+	// holds the new lease's requests until they are done.
+	started, missed := s.leases.startDue()
+	// A missed reservation that held the shutdown of a device an earlier
+	// lease booted passes it on, as a cancel does: to a lease that has
+	// started (one may have in this very sweep) or one starting soon, else
+	// the device is shut down, reserved (ending) from here.
+	for _, e := range missed {
+		if !e.booted {
+			continue
+		}
+		if next := s.leases.handBoot(e.device); next != nil {
+			logger.Info("lease %s: the shutdown of %s goes to lease %s", e.id, e.device, next.id)
+			continue
+		}
+		teardowns = append(teardowns, s.shutDownBooted(e, endExpired))
+	}
 	s.leaseMu.Unlock()
+	// Written after unlocking: file I/O never holds up a lease call.
+	if len(started)+len(missed) > 0 {
+		s.saveReservations()
+	}
+	for _, e := range missed {
+		logger.Info("lease %s: the window of the reservation on %s passed before it could start", e.id, e.device)
+		s.events.Publish(Event{Type: "lease.expired", Device: e.device, Message: HolderName(e.holder)})
+	}
+	granted := func(e *leaseEntry) {
+		logger.Info("lease %s: %s reserved by %s starts until %s", e.id, e.device, HolderName(e.holder), e.expires.UTC().Format(time.RFC3339))
+		s.events.Publish(Event{Type: "lease.granted", Device: e.device, Message: HolderName(e.holder)})
+	}
 	for _, td := range teardowns {
 		go td()
+	}
+	for _, e := range started {
+		// A reservation that starts while the lease before it is still
+		// being torn down (it ended in this sweep or an earlier one) is
+		// announced after that lease's end, so an event stream sees the
+		// device change hands in order.
+		s.leases.mu.Lock()
+		torn := s.leases.torn[e.device]
+		s.leases.mu.Unlock()
+		if torn != nil {
+			go func(torn chan struct{}, e *leaseEntry) {
+				<-torn
+				granted(e)
+			}(torn, e)
+			continue
+		}
+		granted(e)
+	}
+}
+
+// startDue runs the sweeper now when a reservation's start has come, so a
+// request at the start sees its lease started rather than waiting for the
+// next tick.
+func (s *Server) startDue() {
+	if s.leases.hasDue() {
+		s.sweepLeases()
 	}
 }
 
@@ -2062,8 +2595,10 @@ var leaseShutdownWait = 10 * time.Second
 func (s *Server) endAllLeases() {
 	s.leaseMu.Lock()
 	s.leases.mu.Lock()
-	all := make([]*leaseEntry, 0, len(s.leases.byID))
-	for _, e := range s.leases.byID {
+	// Only started leases end: a reservation outlives the hub process
+	// (saveReservations), and its device session has not begun.
+	all := make([]*leaseEntry, 0, len(s.leases.byDevice))
+	for _, e := range s.leases.byDevice {
 		all = append(all, e)
 	}
 	s.leases.mu.Unlock()

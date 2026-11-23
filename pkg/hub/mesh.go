@@ -72,6 +72,9 @@ type Config struct {
 	// Cloud lists the cloud providers this hub launches devices on, sent
 	// in hello so peers can route cloud launches to it.
 	Cloud []string
+	// ReservationLead is how far ahead this hub's reservations may start
+	// (the daemon enforces it); GET /v1/hub reports it.
+	ReservationLead time.Duration
 	// Discoverer finds hubs on the LAN (default Zeroconf).
 	Discoverer Discoverer
 	// Logf receives the mesh's log lines (default: none).
@@ -1085,7 +1088,8 @@ func (m *Mesh) routeCloud(named, provider string) (string, *daemon.Error) {
 // Status is GET /v1/hub's hub.
 func (m *Mesh) Status(ctx context.Context) daemon.HubStatus {
 	st := daemon.HubStatus{Name: m.cfg.Name, Version: m.cfg.Version, APIVersion: daemon.APIVersion,
-		Addr: m.cfg.Advertise, Listen: m.self.HTTPAddr, TLS: m.useTLS, MDNS: !m.cfg.NoMDNS, Peers: []daemon.HubPeer{}}
+		Addr: m.cfg.Advertise, Listen: m.self.HTTPAddr, TLS: m.useTLS, MDNS: !m.cfg.NoMDNS, Peers: []daemon.HubPeer{},
+		ReservationLeadSec: int(m.cfg.ReservationLead / time.Second)}
 	counts := m.deviceCounts(ctx)
 	m.mu.Lock()
 	for _, p := range m.peers {

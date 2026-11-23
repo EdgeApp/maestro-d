@@ -291,7 +291,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	c.setLeaseHeader(req, path)
-	if c.retry && (carriesRequestID(method, path) || (method == http.MethodPost && path == "/v1/leases")) {
+	if c.retry && (carriesRequestID(method, path) || (method == http.MethodPost && (path == "/v1/leases" || path == "/v1/reservations"))) {
 		req.Header.Set(HeaderRequestID, uuid.New().String())
 	}
 	if c.ClientOutputs && carriesRequestID(method, path) {
@@ -1243,6 +1243,25 @@ func boxSize(b []byte) (int, bool) {
 func (c *Client) AcquireLease(ctx context.Context, req LeaseRequest) (*LeaseResult, error) {
 	var out LeaseResult
 	if e := c.call(ctx, http.MethodPost, "/v1/leases", req, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// Reserve reserves a device for a window that starts later (POST
+// /v1/reservations), filling ClientTime from this machine's clock when it
+// is empty. A hub that predates reservations answers "no route": that is
+// USAGE naming it, with details.reason "reservations-unsupported", as the
+// mesh answers for a peer that predates them.
+func (c *Client) Reserve(ctx context.Context, req ReservationRequest) (*LeaseResult, error) {
+	if req.ClientTime == "" {
+		req.ClientTime = time.Now().UTC().Format(time.RFC3339)
+	}
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodPost, "/v1/reservations", req, &out); e != nil {
+		if e.Code == CodeUsage && strings.HasPrefix(e.Message, NoRouteMessage(http.MethodPost, "/v1/reservations")) {
+			return nil, ReservationsUnsupported(c.BaseURL())
+		}
 		return nil, e
 	}
 	return &out, nil

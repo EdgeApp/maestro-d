@@ -94,15 +94,17 @@ type hubOpts struct {
 	// configShare is the hubDevices of the config the hub starts with.
 	configShare []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
-	leaseMax      []string
-	remoteShell   bool
-	foreground    bool
-	advertise     string
-	peers         []string
-	noMDNS        bool
-	peerToken     string
-	peerTokenFile string
-	peerCA        string
+	leaseMax []string
+	// reservationLead is --reservation-lead as given ("": the default).
+	reservationLead string
+	remoteShell     bool
+	foreground      bool
+	advertise       string
+	peers           []string
+	noMDNS          bool
+	peerToken       string
+	peerTokenFile   string
+	peerCA          string
 	// purge: hub service uninstall --purge.
 	purge bool
 	// devicefarm: the hub launches AWS Device Farm devices for leases,

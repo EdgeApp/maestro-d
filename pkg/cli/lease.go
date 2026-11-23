@@ -632,9 +632,18 @@ func parseLeaseDuration(flag, v string) (time.Duration, error) {
 		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: want a duration (8h, 90m, 1h30m) or seconds", flag, v)
 	}
 	if d < time.Second {
-		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: a lease window is at least 1s", flag, v)
+		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: at least 1s", flag, v)
 	}
 	return d.Round(time.Second), nil
+}
+
+// parseReservationLead reads hub start's --reservation-lead: "" is the
+// default, DefaultReservationLead.
+func parseReservationLead(v string) (time.Duration, error) {
+	if strings.TrimSpace(v) == "" {
+		return daemon.DefaultReservationLead, nil
+	}
+	return parseLeaseDuration("reservation-lead", v)
 }
 
 // parseLeaseMax reads hub start's --lease-max values: DURATION sets the

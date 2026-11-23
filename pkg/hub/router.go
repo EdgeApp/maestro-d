@@ -141,7 +141,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.device(w, r, seg[2], fwd)
 	case len(seg) >= 3 && seg[0] == "v1" && seg[1] == "leases" && seg[2] != "":
 		rt.leaseByID(w, r, seg[2], fwd)
-	case path == "/v1/leases" && r.Method == http.MethodPost:
+	case (path == "/v1/leases" || path == "/v1/reservations") && r.Method == http.MethodPost:
 		rt.acquire(w, r, fwd)
 	case path == "/v1/devices" && r.Method == http.MethodGet && wide:
 		rt.listDevices(w, r)
@@ -437,23 +437,33 @@ func readBodyMax(r *http.Request, limit int64) ([]byte, *daemon.Error) {
 	return data, nil
 }
 
-// acquire routes POST /v1/leases: by the body's device, or a selector
-// across the mesh.
+// acquire routes POST /v1/leases and POST /v1/reservations: by the body's
+// device, or a selector across the mesh. The body is never re-encoded
+// through a Go struct: only device and select.hub (and, for a lease,
+// select.boot per pass) are rewritten, so every other key reaches the
+// owner as the client sent it, and a reservation's strict decode judges
+// the client's own body.
 func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
 	self := rt.m.cfg.Name
+	reserve := r.URL.Path == "/v1/reservations"
 	body, e := readBody(r)
 	if e != nil {
 		writeError(w, 0, e)
 		return
 	}
-	var req daemon.LeaseRequest
-	if len(bytes.TrimSpace(body)) == 0 || json.Unmarshal(body, &req) != nil {
+	var obj map[string]json.RawMessage
+	if len(bytes.TrimSpace(body)) == 0 || json.Unmarshal(body, &obj) != nil || obj == nil {
 		rt.serveLocal(w, withBody(r, body))
 		return
 	}
+	device := rawString(obj["device"])
+	var sel map[string]json.RawMessage
+	if raw, ok := obj["select"]; ok && json.Unmarshal(raw, &sel) != nil {
+		sel = nil
+	}
 	switch {
-	case req.Device != "":
-		local, hub := splitID(req.Device)
+	case device != "":
+		local, hub := splitID(device)
 		if hub == "" && fwd == "" {
 			var re *daemon.Error
 			if hub, re = rt.resolve(r, local); re != nil {
@@ -462,17 +472,26 @@ func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
 			}
 		}
 		if hub == "" || hub == self || fwd != "" {
-			req.Device = local
+			obj["device"] = mustJSON(local)
 			if hub != "" && hub != self {
-				req.Device = qualify(local, hub)
+				obj["device"] = mustJSON(qualify(local, hub))
 			}
-			rt.serveLocal(w, withBody(r, mustJSON(req)))
+			rt.serveLocal(w, withBody(r, mustJSON(obj)))
 			return
 		}
-		req.Device = qualify(local, hub)
-		rt.forward(w, withBody(r, mustJSON(req)), hub)
-	case req.Select != nil && fwd == "":
-		rt.selectLease(w, r, req)
+		obj["device"] = mustJSON(qualify(local, hub))
+		if !reserve {
+			rt.forward(w, withBody(r, mustJSON(obj)), hub)
+			return
+		}
+		rec := rt.capture(withBody(r, mustJSON(obj)), hub)
+		if noRouteBody(rec.buf.Bytes(), r.URL.Path) {
+			writeError(w, 0, daemon.ReservationsUnsupported(hub))
+			return
+		}
+		rec.copyTo(w)
+	case sel != nil && fwd == "":
+		rt.selectLease(w, r, obj, sel, reserve)
 	default:
 		rt.serveLocal(w, withBody(r, body))
 	}
@@ -483,41 +502,77 @@ func mustJSON(v any) []byte {
 	return data
 }
 
+// rawString is a JSON string value, or "" for anything else.
+func rawString(raw json.RawMessage) string {
+	var s string
+	if raw == nil || json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// rawBool is a JSON boolean value, or false for anything else.
+func rawBool(raw json.RawMessage) bool {
+	var b bool
+	return raw != nil && json.Unmarshal(raw, &b) == nil && b
+}
+
+// noRouteBody reports whether an answer is a daemon's "no route" for
+// path: an owner that predates the route.
+func noRouteBody(body []byte, path string) bool {
+	var env daemon.Envelope
+	if json.Unmarshal(body, &env) != nil || env.Error == nil || env.Error.Code != daemon.CodeUsage {
+		return false
+	}
+	return strings.HasPrefix(env.Error.Message, daemon.NoRouteMessage(http.MethodPost, path))
+}
+
 // selectLease runs a selector on the mesh: this hub first, then the
-// peers by RTT, the first owner that grants it wins. Ready devices are
-// tried on every hub before any shut-down one is booted.
-func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon.LeaseRequest) {
+// peers by RTT, the first owner that grants it wins. For a lease, ready
+// devices are tried on every hub before any shut-down one is booted; a
+// reservation boots nothing and launches no cloud device (its owner
+// refuses select.boot and select.location naming the field).
+func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel map[string]json.RawMessage, reserve bool) {
 	m := rt.m
-	sel := *req.Select
-	sel.Hub = hubName(sel.Hub)
-	if strings.EqualFold(sel.Location, daemon.LocationCloud) {
+	var desc daemon.LeaseSelector
+	if raw, err := json.Marshal(sel); err == nil {
+		_ = json.Unmarshal(raw, &desc)
+	}
+	selHub := hubName(rawString(sel["hub"]))
+	desc.Hub = selHub
+	try := func(h string, boot *bool) *http.Request {
+		sel["hub"] = mustJSON(h)
+		if boot != nil {
+			sel["boot"] = mustJSON(*boot)
+		}
+		obj["select"] = mustJSON(sel)
+		return withBody(r, mustJSON(obj))
+	}
+	if !reserve && strings.EqualFold(rawString(sel["location"]), daemon.LocationCloud) {
 		// A cloud lease launches a device, once: it goes to the one hub
 		// the launch routing rule names, and that hub's answer, whatever
 		// it is, is the client's.
-		target, e := m.routeCloud(sel.Hub, strings.ToLower(sel.Provider))
+		target, e := m.routeCloud(selHub, strings.ToLower(rawString(sel["provider"])))
 		if e != nil {
 			writeError(w, 0, e)
 			return
 		}
-		sel.Hub = target
-		try := req
-		try.Select = &sel
-		rt.capture(withBody(r, mustJSON(try)), target).copyTo(w)
+		rt.capture(try(target, nil), target).copyTo(w)
 		return
 	}
 	hubs := []string{m.cfg.Name}
 	for _, l := range m.linked() {
 		hubs = append(hubs, l.peer)
 	}
-	if sel.Hub != "" {
+	if selHub != "" {
 		var only []string
 		for _, h := range hubs {
-			if h == sel.Hub {
+			if h == selHub {
 				only = append(only, h)
 			}
 		}
 		if len(only) == 0 {
-			if _, e := m.link(sel.Hub); e != nil && e.Code == daemon.CodePeerUnavailable {
+			if _, e := m.link(selHub); e != nil && e.Code == daemon.CodePeerUnavailable {
 				writeError(w, 0, e)
 				return
 			}
@@ -525,7 +580,7 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 		hubs = only
 	}
 	passes := []bool{false}
-	if sel.Boot {
+	if !reserve && rawBool(sel["boot"]) {
 		passes = append(passes, true)
 	}
 	// Each try is its own request to its owner: a client's request id is
@@ -539,15 +594,18 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 	var inUse, tooLong *recorder
 	// unavailable names the hubs passed over because they were stopping or
 	// unreachable: when no hub granted or refused, that is the answer, a
-	// retryable PEER_UNAVAILABLE rather than "matches nothing".
-	var unavailable []string
+	// retryable PEER_UNAVAILABLE rather than "matches nothing". noRoute
+	// names the hubs that predate reservations, passed over the same way.
+	var unavailable, noRoute []string
 	for _, boot := range passes {
 		for _, h := range hubs {
-			s := sel
-			s.Hub, s.Boot = h, boot
-			try := req
-			try.Select = &s
-			tr := withBody(r, mustJSON(try))
+			var tr *http.Request
+			if reserve {
+				tr = try(h, nil)
+			} else {
+				b := boot
+				tr = try(h, &b)
+			}
 			if rid != "" {
 				pass := "ready"
 				if boot {
@@ -562,7 +620,10 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 			}
 			switch envelopeCode(rec.buf.Bytes()) {
 			case daemon.CodeDeviceInUse:
-				if inUse == nil {
+				// An answer that names the reservation a shorter window would
+				// end by (the earliest) is the more useful one to return.
+				if next := nextStartsAtOf(rec.buf.Bytes()); inUse == nil ||
+					(next != "" && (nextStartsAtOf(inUse.buf.Bytes()) == "" || next < nextStartsAtOf(inUse.buf.Bytes()))) {
 					inUse = rec
 				}
 			case daemon.CodeDeviceNotFound:
@@ -573,6 +634,12 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 					unavailable = append(unavailable, h)
 				}
 			case daemon.CodeUsage:
+				if reserve && noRouteBody(rec.buf.Bytes(), r.URL.Path) {
+					if !slices.Contains(noRoute, h) {
+						noRoute = append(noRoute, h)
+					}
+					continue
+				}
 				if !overMaxBody(rec.buf.Bytes()) {
 					rec.copyTo(w)
 					return
@@ -595,22 +662,43 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, req daemon
 		return
 	}
 	if len(unavailable) > 0 {
-		writeError(w, 0, daemon.Errorf(daemon.CodePeerUnavailable, "no hub granted the selector %s; hub %s did not answer or is stopping; retry",
-			sel.String(), strings.Join(unavailable, ", ")).WithDetails("hubs", unavailable))
+		msg := fmt.Sprintf("no hub granted the selector %s; hub %s did not answer or is stopping; retry",
+			desc.String(), strings.Join(unavailable, ", "))
+		if len(noRoute) > 0 {
+			msg += fmt.Sprintf(" (hub %s does not take reservations)", strings.Join(noRoute, ", "))
+		}
+		writeError(w, 0, daemon.Errorf(daemon.CodePeerUnavailable, "%s", msg).WithDetails("hubs", unavailable))
 		return
 	}
-	writeError(w, 0, daemon.Errorf(daemon.CodeDeviceNotFound, "no device in the mesh matches the selector %s", sel.String()).WithDetails("select", sel))
+	if len(noRoute) > 0 {
+		writeError(w, 0, daemon.ReservationsUnsupported(strings.Join(noRoute, ", ")).WithDetails("hubs", noRoute))
+		return
+	}
+	writeError(w, 0, daemon.Errorf(daemon.CodeDeviceNotFound, "no device in the mesh matches the selector %s", desc.String()).WithDetails("select", desc))
 }
 
-// overMaxBody reports whether an owner's USAGE answer refused a lease
-// window over the device's maximum (its details name maxSec).
+// overMaxBody reports whether an owner's USAGE answer refused a limit of
+// that hub's own: a lease window over its device's maximum (details name
+// maxSec), or a reservation's start past its --reservation-lead (details
+// name maxLeadSec). Another hub's devices may take it.
 func overMaxBody(body []byte) bool {
 	var env daemon.Envelope
 	if json.Unmarshal(body, &env) != nil || env.Error == nil {
 		return false
 	}
 	_, ok := env.Error.Details["maxSec"]
-	return ok
+	_, lead := env.Error.Details["maxLeadSec"]
+	return ok || lead
+}
+
+// nextStartsAtOf is a DEVICE_IN_USE answer's details.nextStartsAt, or "".
+func nextStartsAtOf(body []byte) string {
+	var env daemon.Envelope
+	if json.Unmarshal(body, &env) != nil || env.Error == nil {
+		return ""
+	}
+	next, _ := env.Error.Details["nextStartsAt"].(string)
+	return next
 }
 
 func envelopeCode(body []byte) daemon.Code {

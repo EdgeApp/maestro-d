@@ -47,6 +47,9 @@ type HubStatus struct {
 	Peers []HubPeer `json:"peers"`
 	// Cloud lists the cloud providers this hub launches devices on.
 	Cloud []CloudStatus `json:"cloud,omitempty"`
+	// ReservationLeadSec is how far ahead this hub's reservations may
+	// start (--reservation-lead).
+	ReservationLeadSec int `json:"reservationLeadSec,omitempty"`
 }
 
 // HubPeer is one peer in GET /v1/hub.
