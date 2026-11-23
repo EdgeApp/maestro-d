@@ -886,7 +886,9 @@ client sends it in `X-Maestro-Lease` (`maestro-d claim --lease <id>` records
 it for the CLI, `md.claim(id)` for JavaScript), from any machine. A
 reservation is not renewed (`USAGE`); `DELETE /v1/leases/{lid}` cancels it
 (`lease.released`) without touching the device. Deleting the device ends its
-reservations; stopping it, or unplugging it, does not.
+reservations; stopping it, or unplugging it, does not. Reservations outlive
+the hub process ([hub.md](hub.md#reservations-across-a-restart)): a hub that
+stops or crashes has them again when it starts, under the same lease ids.
 
 A hub that predates reservations answers `USAGE` "no route for POST
 /v1/reservations" and grants nothing; through the mesh, a peer's such answer

@@ -333,7 +333,3 @@ func ReservationsUnsupported(hub string) *Error {
 	return Errorf(CodeUsage, "hub %s does not take reservations; it needs a maestro-d release that has them", hub).
 		WithDetails("hub", hub, "reason", "reservations-unsupported")
 }
-
-// saveReservations records the hub's reservations; until they are kept
-// on disk, a reservation goes with the hub process.
-func (s *Server) saveReservations() {}

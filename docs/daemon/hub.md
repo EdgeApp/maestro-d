@@ -91,8 +91,23 @@ arguments with tokens redacted.
 `--peer` has had its answer, or after 10 s. If every `--peer` refused it and
 mDNS found no other hub, it exits with the refusal's code (below).
 
-`hub stop` shuts the hub down cleanly: its leases end, its devices are
+`hub stop` shuts the hub down cleanly: its leases in progress end (reservations stay; see below), its devices are
 detached, and they leave every peer's listing as soon as the links close.
+
+### Reservations across a restart
+
+A hub keeps its reservations that have not started in
+`<home>/hub/scheduled-leases.json` (`<home>/hub/daemons/<daemon>/scheduled-leases.json`
+for a daemon other than `hub`, beside its `secrets/`), mode 0600, written
+through a temp file and a rename after every reservation, cancel, start and
+device delete that ends one. When the hub starts it reads them back under
+their own lease ids: one whose window is over is dropped (`lease.expired`
+is not published for it), one whose start passed while the hub was down
+starts at once and still ends at its own `expiresAt`, and the rest wait for
+their start. A reservation whose device is not listed now is kept. Leases
+that had started are not kept: `hub stop`, or a crash, ends them with their
+device sessions. A file that does not parse is moved to
+`scheduled-leases.json.bad` and the hub starts without it.
 
 `hub status [--target-hub…] [--json]` (REST `GET /v1/hub`) prints the hub's
 name, version and listener, and for each peer its address, link state

@@ -9,8 +9,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -120,5 +122,74 @@ func TestE2E_HubReservations(t *testing.T) {
 	}
 	if _, err := c.Lease(ctx, sel.Lease.ID); !isCode(err, daemon.CodeLeaseExpired) {
 		t.Fatalf("cancelled: %v", err)
+	}
+}
+
+// A hub keeps its reservations across a clean stop and a crash: one whose
+// start passed while it was down starts as it comes back; a lease that
+// had started is gone after the crash, as every started lease is.
+func TestE2E_HubReservationsRestart(t *testing.T) {
+	e := newE2E(t)
+	home := filepath.Join(e.cwd, "restart-home")
+	env := []string{daemon.EnvHome + "=" + home, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
+	t.Cleanup(func() { e.runEnv(env, "hub", "stop", "--daemon", "rst") })
+	start := func() daemon.Info {
+		t.Helper()
+		r := e.runEnv(env, "hub", "start", "--daemon", "rst", "--name", "hub-r", "--share-device", "mock-1", "--share-device", "mock-2",
+			"--listen", "127.0.0.1:0", "--no-mdns", "--token", "rst-tok", "--peer-token", "rst-peer", "--json")
+		var out struct {
+			Daemon daemon.Info `json:"daemon"`
+		}
+		if r.code != 0 || json.Unmarshal([]byte(r.stdout), &out) != nil || out.Daemon.HTTPAddr == "" {
+			t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+		}
+		return out.Daemon
+	}
+	ctx := context.Background()
+	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	info := start()
+	c := daemon.NewHTTPClient("http://"+info.HTTPAddr, "rst-tok", nil)
+	later, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1", StartAt: rfc(time.Now().Add(5 * time.Minute)), TTLSec: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// mock-2's start leaves the hub stop below room to finish first: a
+	// reservation that starts while the hub runs is a started lease, which
+	// a stop ends.
+	soonStart := time.Now().Add(8 * time.Second).UTC().Truncate(time.Second)
+	soon, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-2", StartAt: rfc(soonStart), TTLSec: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := e.runEnv(env, "hub", "stop", "--daemon", "rst"); r.code != 0 {
+		t.Fatalf("hub stop: %s%s", r.stdout, r.stderr)
+	}
+	path := filepath.Join(home, "hub", "daemons", "rst", "scheduled-leases.json")
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%s: %v %v", path, fi, err)
+	}
+	if data, _ := os.ReadFile(path); !strings.Contains(string(data), strings.TrimSuffix(soon.Lease.ID, "@hub-r")) {
+		t.Fatalf("mock-2's reservation started before the hub stopped; %s:\n%s", path, data)
+	}
+	time.Sleep(time.Until(soonStart) + time.Second) // mock-2's start passes while the hub is down
+	info = start()
+	c = daemon.NewHTTPClient("http://"+info.HTTPAddr, "rst-tok", nil)
+	l1, err1 := c.Lease(ctx, strings.TrimSuffix(later.Lease.ID, "@hub-r"))
+	l2, err2 := c.Lease(ctx, strings.TrimSuffix(soon.Lease.ID, "@hub-r"))
+	if err1 != nil || err2 != nil || l1.Lease.State != daemon.LeaseScheduled || l2.Lease.State != daemon.LeaseActive ||
+		l2.Lease.ExpiresAt != soon.Lease.ExpiresAt || l1.Lease.ID != later.Lease.ID {
+		t.Fatalf("after a stop: %+v %v / %+v %v", l1, err1, l2, err2)
+	}
+	// A crash keeps the reservation and loses the started lease.
+	if p, err := os.FindProcess(info.PID); err == nil {
+		_ = p.Signal(syscall.SIGKILL)
+	}
+	time.Sleep(time.Second)
+	info = start()
+	c = daemon.NewHTTPClient("http://"+info.HTTPAddr, "rst-tok", nil)
+	ls, err := c.Leases(ctx)
+	if err != nil || len(ls) != 1 || ls[0].ID != later.Lease.ID || ls[0].State != daemon.LeaseScheduled {
+		t.Fatalf("after a crash: %+v %v", ls, err)
 	}
 }

@@ -124,8 +124,10 @@ type Server struct {
 	blobs          *BlobStore
 	// leases are a hub's device leases; leaseMu serialises granting and
 	// ending them.
-	leases  *leaseTable
-	leaseMu sync.Mutex
+	leases *leaseTable
+	// reservationsMu serialises the writes of scheduled-leases.json.
+	reservationsMu sync.Mutex
+	leaseMu        sync.Mutex
 	// teardowns counts the lease teardowns not finished yet, the
 	// sweeper's and those waiting for work under their lease included:
 	// Shutdown waits for them before it detaches and shuts down devices.
@@ -344,6 +346,12 @@ func (s *Server) Run(ctx context.Context) error {
 	s.registry.mu.Lock()
 	s.registry.persistLocked()
 	s.registry.mu.Unlock()
+	// A hub's reservations are back before its listeners serve: a request
+	// in between would see them missing, and a reservation taken then would
+	// be written over the file they are read from.
+	if s.cfg.Hub {
+		s.loadReservations()
+	}
 
 	errCh := make(chan error, len(s.servers))
 	for i, srv := range s.servers {
