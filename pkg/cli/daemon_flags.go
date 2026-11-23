@@ -122,7 +122,11 @@ type leaseOpts struct {
 	holder   string
 	noAttach bool
 	all      bool
-	sel      daemon.LeaseSelector
+	// id is release's and claim's --lease; startAt is reserve's
+	// --start-at as given.
+	id      string
+	startAt string
+	sel     daemon.LeaseSelector
 	// idleRelease and appiumVersion tune a cloud lease's launch.
 	idleRelease   string
 	appiumVersion string

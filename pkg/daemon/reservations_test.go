@@ -821,3 +821,39 @@ func TestReservations_BootSelectorNamesTheReservation(t *testing.T) {
 		t.Fatalf("boot pass: %+v", de)
 	}
 }
+
+// A client whose clock is off the hub's sends a device's other lease when
+// the one it chose is refused as not started or ended (OtherLease).
+func TestReservations_ClientSendsTheOtherLease(t *testing.T) {
+	env := newHubEnv(t, Config{})
+	ctx := context.Background()
+	l := env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 60}).Lease
+	r := env.mustReserve(env.remote, ReservationRequest{Device: "mock-1", StartAt: l.ExpiresAt, TTLSec: 60})
+	c := NewHTTPClient(env.remote.BaseURL(), "t", nil)
+	other := map[string]string{l.ID: r.ID, r.ID: l.ID}
+	c.OtherLease = func(device, failed string) string { return other[failed] }
+	// Ahead: it sends the reservation while the lease still runs.
+	c.SetLease("mock-1", r.ID)
+	if _, err := c.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatalf("ahead: %v", err)
+	}
+	if c.LeaseOf("mock-1") != l.ID {
+		t.Fatalf("the client kept sending %s", c.LeaseOf("mock-1"))
+	}
+	// Behind: it sends the ended lease once the reservation has started.
+	env.clock.advance(60 * time.Second)
+	env.sweep()
+	c.SetLease("mock-1", l.ID)
+	if _, err := c.Command(ctx, "mock-1", "tapOn", "x", true); err != nil && !isCode(err, CodeDeviceNotAttached) {
+		t.Fatalf("behind: %v", err)
+	}
+	if c.LeaseOf("mock-1") != r.ID {
+		t.Fatalf("the client kept sending %s", c.LeaseOf("mock-1"))
+	}
+	// With no other lease, the refusal is the answer.
+	c.OtherLease = func(string, string) string { return "" }
+	c.SetLease("mock-1", l.ID)
+	if _, err := c.Command(ctx, "mock-1", "tapOn", "x", true); !isCode(err, CodeLeaseExpired) {
+		t.Fatalf("no other lease: %v", err)
+	}
+}

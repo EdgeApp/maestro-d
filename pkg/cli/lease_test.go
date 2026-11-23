@@ -28,9 +28,9 @@ func TestLeaseFile_RecordFindDropPrune(t *testing.T) {
 	recordLease("http://a:7433", daemon.Lease{ID: "l1", Device: "d1", ExpiresAt: future, TTLSec: 600})
 	recordLease("http://a:7433", daemon.Lease{ID: "l2", Device: "d2", ExpiresAt: future})
 	recordLease("unix:hub", daemon.Lease{ID: "l3", Device: "d1", ExpiresAt: future})
-	// Re-recording a device replaces its entry.
-	recordLease("http://a:7433", daemon.Lease{ID: "l1b", Device: "d1", ExpiresAt: future})
-	if r := findLease("http://a:7433", "d1"); r == nil || r.ID != "l1b" {
+	// Re-recording a lease id replaces its entry.
+	recordLease("http://a:7433", daemon.Lease{ID: "l1", Device: "d1", ExpiresAt: future, TTLSec: 900})
+	if r := findLease("http://a:7433", "d1"); r == nil || r.ID != "l1" || r.TTLSec != 900 {
 		t.Fatalf("find: %+v", r)
 	}
 	if len(leasesFor("http://a:7433")) != 2 || len(leasesFor("unix:hub")) != 1 {
@@ -40,7 +40,7 @@ func TestLeaseFile_RecordFindDropPrune(t *testing.T) {
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode: %v %v", st, err)
 	}
-	dropLease("http://a:7433", "l1b")
+	dropLease("http://a:7433", "l1")
 	if findLease("http://a:7433", "d1") != nil || findLease("unix:hub", "d1") == nil {
 		t.Fatal("drop removes only that hub's entry")
 	}

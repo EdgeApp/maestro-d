@@ -715,8 +715,10 @@ func TestE2E_Leases(t *testing.T) {
 	// Used through the window: the uses before its end work, the first
 	// after it is LEASE_EXPIRED (the use in between did not extend it), the
 	// entry is dropped, and the next try is LEASE_REQUIRED: no new lease.
+	// A use starts only with 3 s left: one CLI one-shot under -race on a
+	// loaded machine can take more than a second.
 	end, _ := time.Parse(time.RFC3339, sel.ExpiresAt)
-	for time.Until(end) > 1500*time.Millisecond {
+	for time.Until(end) > 3*time.Second {
 		e.okEnv(hub, "tapOn", "During", "--device", "mock-1")
 		time.Sleep(time.Second)
 	}
@@ -749,6 +751,41 @@ func TestE2E_Leases(t *testing.T) {
 		t.Fatalf("unix socket: exit %d\n%s\n%s", r.code, r.stderr, leaseFile(e.home))
 	}
 	e.ok("release", "--all", "--daemon", "lh")
+
+	// Reservations: reserve records one; before its start commands carry it
+	// and get LEASE_NOT_STARTED, and another home cannot claim it; after it,
+	// another home claims it by id and drives the device; release --lease
+	// cancels one reservation and release --device the rest.
+	t.Run("reserve-claim", func(t *testing.T) {
+		e.okEnv(hub, "release", "--all")
+		start := time.Now().Add(4 * time.Second).UTC().Truncate(time.Second).Add(time.Second)
+		l := leaseOf(e.okEnv(hub, "reserve", "--device", "mock-1", "--start-at", start.Format(time.RFC3339), "--ttl", "1m", "--json").stdout)
+		if l.State != daemon.LeaseScheduled || !strings.Contains(leaseFile(e.home), `"startsAt"`) {
+			t.Fatalf("reserve: %+v\n%s", l, leaseFile(e.home))
+		}
+		if r := e.runEnv(hub, "tapOn", "Login", "--device", "mock-1"); r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseNotStarted ||
+			!strings.Contains(leaseFile(e.home), l.ID) {
+			t.Fatalf("before the start: exit %d\n%s", r.code, r.stderr)
+		}
+		if r := e.runEnv(home2, "claim", "--lease", l.ID); r.code != 5 || strings.Contains(leaseFile(filepath.Join(e.cwd, "home2")), l.ID) {
+			t.Fatalf("claim before the start: exit %d\n%s", r.code, r.stderr)
+		}
+		if r := e.okEnv(hub, "device", "list"); !strings.Contains(r.stdout, "next ") {
+			t.Fatalf("device list: %s", r.stdout)
+		}
+		time.Sleep(time.Until(start) + 1500*time.Millisecond)
+		e.okEnv(home2, "claim", "--lease", l.ID, "--platform", "mock")
+		e.okEnv(home2, "tapOn", "Login", "--device", "mock-1")
+		r1 := leaseOf(e.okEnv(hub, "reserve", "--device", "mock-1", "--start-at", "10m", "--ttl", "1m", "--json").stdout)
+		leaseOf(e.okEnv(hub, "reserve", "--device", "mock-1", "--start-at", "30m", "--ttl", "1m", "--json").stdout)
+		e.okEnv(hub, "release", "--lease", r1.ID)
+		if r := e.okEnv(hub, "release", "--device", "mock-1", "--json"); !strings.Contains(r.stdout, l.ID) {
+			t.Fatalf("release --device: %s", r.stdout)
+		}
+		if r := e.runEnv(hub, "device", "list", "--platform", "mock", "--json"); strings.Contains(r.stdout, `"reservations"`) {
+			t.Fatalf("reservations left: %s", r.stdout)
+		}
+	})
 
 	// Usage errors.
 	e.fails(2, "release", "--target-hub="+addr, "--token", "lease-token")

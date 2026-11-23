@@ -46,6 +46,10 @@ type Client struct {
 	// X-Maestro-Lease (a hub's leased devices).
 	leaseMu sync.Mutex
 	leases  map[string]string
+	// OtherLease, when set, names another lease the client holds on device
+	// besides failed ("" for none): a request refused LEASE_NOT_STARTED or
+	// LEASE_EXPIRED under failed is sent once more with it.
+	OtherLease func(device, failed string) string
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
 	// forgotten first. hint is the daemon's details.hint, the way to a new
@@ -166,6 +170,29 @@ func (c *Client) setLeaseHeader(req *http.Request, path string) {
 			req.Header.Set(HeaderLease, lease)
 		}
 	}
+}
+
+// otherLease is the lease to send instead when resp refused req's lease
+// as not started or ended and OtherLease names another for the device; ""
+// otherwise. resp's body is left readable.
+func (c *Client) otherLease(req *http.Request, resp *http.Response) string {
+	lease := req.Header.Get(HeaderLease)
+	if lease == "" || c.OtherLease == nil || resp.StatusCode != http.StatusConflict {
+		return ""
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	if code := errorFromResponse(resp.StatusCode, resp.Header, data).Code; code != CodeLeaseNotStarted && code != CodeLeaseExpired {
+		return ""
+	}
+	if alt := c.OtherLease(pathDevice(req.URL.Path), lease); alt != lease {
+		return alt
+	}
+	return ""
 }
 
 // noteLeaseExpired forgets a lease the daemon reported expired.
@@ -303,6 +330,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // do sends the request and returns the raw response. Transport failures
 // become DAEMON_UNAVAILABLE; a cancelled ctx becomes INTERRUPTED.
 func (c *Client) do(req *http.Request) (*http.Response, *Error) {
+	swapped := false
 	for attempt := 0; ; attempt++ {
 		resp, err := c.http.Do(req)
 		if err != nil && req.Context().Err() != nil {
@@ -321,6 +349,31 @@ func (c *Client) do(req *http.Request) (*http.Response, *Error) {
 				err = rerr
 			}
 		} else if err == nil {
+			// Refused under a lease that has not started or has ended, while
+			// the client holds another on the device (a lease and the
+			// reservation after it, told apart by a clock up to a minute off
+			// the hub's): sent once more with that one. The hub refused before
+			// running anything.
+			if alt := c.otherLease(req, resp); alt != "" && !swapped && (req.Body == nil || req.GetBody != nil) {
+				swapped = true
+				c.noteLeaseExpired(req, resp)
+				resp.Body.Close()
+				next := req.Clone(req.Context())
+				if req.GetBody != nil {
+					body, berr := req.GetBody()
+					if berr != nil {
+						return nil, WrapErr(CodeInternal, berr)
+					}
+					next.Body = body
+				}
+				c.SetLease(pathDevice(req.URL.Path), alt)
+				next.Header.Set(HeaderLease, alt)
+				if next.Header.Get(HeaderRequestID) != "" {
+					next.Header.Set(HeaderRequestID, uuid.New().String())
+				}
+				req = next
+				continue
+			}
 			c.noteLeaseExpired(req, resp)
 			return resp, nil
 		} else if !canRetry || !retryableErr(err) {
