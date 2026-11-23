@@ -80,6 +80,7 @@ export type ErrorCode =
   | 'HUB_VERSION'
   | 'LEASE_REQUIRED'
   | 'LEASE_EXPIRED'
+  | 'LEASE_NOT_STARTED'
   | 'CAPTURE_UNAVAILABLE'
   | 'UNSUPPORTED'
 
@@ -232,6 +233,8 @@ export interface DeviceInfo {
   createdBy?: string
   /** On a hub: the device's lease, when it is leased. */
   lease?: DeviceLease
+  /** On a hub: the device's reservations that have not started, by start (holder and window, no lease id). */
+  reservations?: DeviceLease[]
   /** On a hub: true for a ready device that is neither leased nor attached. */
   available?: boolean
   /** On a hub: the longest lease window the device takes, in seconds. */
@@ -435,6 +438,8 @@ export interface HubStatus {
   peers: HubPeer[]
   /** The cloud providers this hub launches devices on. */
   cloud?: CloudStatus[]
+  /** How far ahead this hub's reservations may start, in seconds (--reservation-lead). */
+  reservationLeadSec?: number
 }
 
 /** One peer of a hub. */
@@ -457,6 +462,8 @@ export interface HubPeer {
 /** The lease state a hub's device listings carry. */
 export interface DeviceLease {
   holder?: string
+  /** RFC 3339: a reservation's start (in `reservations`). */
+  startsAt?: string
   /** RFC 3339: the end of the lease's fixed window. */
   expiresAt: string
 }
@@ -467,8 +474,12 @@ export interface Lease {
   id: string
   device: string
   holder?: string
+  /** RFC 3339: the start of the window (the grant, for a lease taken now). A renew leaves it. */
+  startsAt?: string
   /** RFC 3339: the end of the window. Using the lease never moves it; only `renew()` does. */
   expiresAt: string
+  /** 'scheduled' until the window starts (a reservation), then 'active'. */
+  state?: 'scheduled' | 'active'
   /** The window's length in seconds. */
   ttlSec: number
   /** The device's maximum window in seconds. */

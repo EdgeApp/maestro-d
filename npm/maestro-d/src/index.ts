@@ -8,7 +8,7 @@
 
 export { machineName, CLIENT_MACHINE_HEADER } from './transport.js'
 export { MaestroD, DeviceFarmUtilities, hubURL, withQuery, ENV_HUB, ENV_TOKEN, ENV_CA, DEFAULT_HUB_PORT } from './daemon.js'
-export type { ConnectOptions, DeviceAttachOptions, LeaseOptions, ShutdownOptions } from './daemon.js'
+export type { ClaimOptions, ConnectOptions, DeviceAttachOptions, LeaseOptions, ReserveOptions, ShutdownOptions } from './daemon.js'
 export { MaestroDevice, buildValue } from './device.js'
 export type { CallOptions, CommandMethod, CommandMethods, FlowOptions, RunOptions, Scalar, ScreenshotOptions } from './device.js'
 export { MaestroError, isMaestroError, codeFromStatus, EXIT_CODES, HTTP_STATUS } from './errors.js'
