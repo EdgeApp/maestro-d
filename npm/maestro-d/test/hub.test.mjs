@@ -221,7 +221,7 @@ describe('error codes', () => {
     COMMAND_FAILED: [1, 422], USAGE: [2, 400], DAEMON_UNAVAILABLE: [3, 503], DEVICE_ERROR: [4, 502], BUSY: [5, 409],
     DEVICE_EXTERNAL: [5, 409], DEVICE_IN_USE: [5, 409], DEVICE_NOT_FOUND: [4, 404], DEVICE_NOT_ATTACHED: [2, 404],
     INTERRUPTED: [130, 499], INTERNAL: [4, 500], FORBIDDEN: [2, 403], PEER_UNAVAILABLE: [3, 503], HUB_NAME_TAKEN: [5, 409],
-    HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409], CAPTURE_UNAVAILABLE: [4, 503],
+    HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409], LEASE_NOT_STARTED: [5, 409], CAPTURE_UNAVAILABLE: [4, 503],
     UNSUPPORTED: [2, 501],
   }
   test('EXIT_CODES and HTTP_STATUS agree with the daemon for every code', () => {
@@ -285,7 +285,7 @@ describe('TLS', () => {
 })
 
 describe('leases.json', () => {
-  test('the format the CLI reads: record, replace, find, drop, prune; an unreadable file reads as empty', async () => {
+  test('the format the CLI reads: record, replace by id, find, drop, prune; an unreadable file reads as empty', async () => {
     const lf = await import('../dist/esm/leasefile.js')
     const saved = process.env.MAESTRO_D_HOME
     process.env.MAESTRO_D_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-leasefile-'))
@@ -295,12 +295,15 @@ describe('leases.json', () => {
       lf.recordLease('http://hub:7433', { id: 'l1', device: 'd1@hub', expiresAt: future, ttlSec: 600, holder: 'me' })
       lf.recordLease('http://hub:7433', { id: 'l2', device: 'd2@hub', expiresAt: '', ttlSec: 0 })
       lf.recordLease('unix:hub', { id: 'l3', device: 'd1@hub', expiresAt: future, ttlSec: 600 })
-      lf.recordLease('http://hub:7433', { id: 'l1b', device: 'd1@hub', expiresAt: future, ttlSec: 600 })
-      assert.equal(lf.findLease('http://hub:7433', 'd1@hub').id, 'l1b')
+      // Re-recording a lease id replaces its entry.
+      lf.recordLease('http://hub:7433', { id: 'l1', device: 'd1@hub', expiresAt: future, ttlSec: 900 })
+      assert.equal(lf.findLease('http://hub:7433', 'd1@hub').id, 'l1')
+      assert.equal(lf.findLease('http://hub:7433', 'd1@hub').ttlSec, 900)
+      assert.equal(lf.loadLeases().filter((r) => r.hub === 'http://hub:7433').length, 2)
       const file = JSON.parse(fs.readFileSync(lf.leasesPath(), 'utf8'))
       assert.deepEqual(Object.keys(file.leases.find((r) => r.id === 'l2')), ['hub', 'device', 'id'])
       assert.equal(fs.statSync(lf.leasesPath()).mode & 0o777, 0o600)
-      lf.dropLease('http://hub:7433', 'l1b')
+      lf.dropLease('http://hub:7433', 'l1')
       lf.dropLease('http://hub:7433', 'nothing')
       assert.equal(lf.findLease('http://hub:7433', 'd1@hub'), undefined)
       assert.equal(lf.findLease('unix:hub', 'd1@hub').id, 'l3')

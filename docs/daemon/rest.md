@@ -197,9 +197,10 @@ attaches are retried the same way.
 | `HUB_VERSION` | 409 | 5 | hub mesh: a joining hub speaks another API version |
 | `LEASE_REQUIRED` | 409 | 5 | hub: a request that drives a device without its `X-Maestro-Lease` (or with another device's lease); the message names `maestro-d lease --device <id>` and `md.lease()`, `details.hint` the command |
 | `LEASE_EXPIRED` | 409 | 5 | hub: the request's lease has expired or was released |
+| `LEASE_NOT_STARTED` | 409 | 5 | hub: the request's lease is a [reservation](#post-v1reservations) whose window has not started; `details.startsAt` says when it does, and clients keep the lease |
 
 `PEER_UNAVAILABLE`, `HUB_NAME_TAKEN` and `HUB_VERSION` come from the hub
-mesh ([below](#the-hub-mesh)); the two lease codes come from a hub. A
+mesh ([below](#the-hub-mesh)); the three lease codes come from a hub. A
 `serve` daemon answers with none of them.
 
 Every error answer also carries its code in the header
@@ -298,11 +299,13 @@ session ended: `message` is the reason — `idle`, `session-limit`,
 cloud session: `message` the reason), `device.capture` (a device with screen capture: `message`
 is `capturing`, `unavailable` or `lost`, `error` the reason; an on-demand
 capture stopping when nobody watches is not published), `daemon.shutdown`,
-and on a hub `lease.granted`,
+and on a hub `lease.scheduled` (a reservation was granted),
+`lease.granted` (a lease was granted, or a reservation started),
 `lease.released` and `lease.expired` (`message` names the holder).
 `lease.expired` is a lease whose window ran out; every other end of a lease
 is `lease.released`: a release, its device stopped or deleted, the attach in
-its `POST /v1/leases` failing, or the hub stopping. `message` carries free text where
+its `POST /v1/leases` failing, the hub stopping, or a reservation cancelled or
+its device deleted. `message` carries free text where
 there is any. The stream never ends on its own; close the connection to
 stop.
 
@@ -350,6 +353,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
 | `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
+| `reservations` | hub only: the device's [reservations](#post-v1reservations) that have not started, by start: `[{holder, startsAt, expiresAt}]`, never their lease ids |
 | `description` | Free text the device's host gives it in its [config.json](config.md); omitted when it has none |
 | `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) (or older `network.json`) ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
@@ -747,7 +751,20 @@ before.
   This holds over the hub's unix socket too.
 - **A fixed window.** A lease runs from its grant (or its last explicit
   renew) for `ttlSec` seconds: 8 hours (28800) by default. Using it never
-  moves its expiry; only `POST /v1/leases/{lid}/renew` does.
+  moves its expiry; only `POST /v1/leases/{lid}/renew` does. A
+  [reservation](#post-v1reservations) is a lease whose window starts later.
+  Lease times are whole seconds, as answers report them: a lease taken (or
+  renewed) now counts from the start of the current second and ends
+  `ttlSec` later (`expiresAt` is always `startsAt` plus `ttlSec`), and a
+  fractional `startAt` is taken to its second, so a window from another's
+  reported `expiresAt` only touches it.
+- **No overlap.** No two leases on one device overlap in time, whether each
+  has started or is a reservation: a lease, a renew or a reservation whose
+  window would overlap another's is `DEVICE_IN_USE`, naming that lease's
+  `holder`, `startsAt` and `expiresAt` (and `nextStartsAt` when it is a
+  reservation). Windows that only touch do not overlap. So a lease taken now
+  with the default 8-hour window is refused on a device reserved within the
+  next 8 hours; ask for a `ttlSec` that ends by `nextStartsAt`.
 - **Maximum.** Each device has a maximum window: 8 hours, or the hub's
   `--lease-max DURATION`, or one device's `--lease-max DEVICE=DURATION` (by
   id or name, as for `--share-device`). A `ttlSec` over it is `USAGE` naming
@@ -798,7 +815,8 @@ curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"sim
 ```json
 {
   "ok": true, "exitCode": 0,
-  "lease": { "id": "5ae28c45-60e9-46f6-89e0-66b98f06b61d", "device": "99FA590E-…", "holder": "ci@builder", "expiresAt": "2026-11-08T13:00:00Z", "ttlSec": 3600, "maxSec": 28800 },
+  "lease": { "id": "5ae28c45-60e9-46f6-89e0-66b98f06b61d", "device": "99FA590E-…", "holder": "ci@builder", "startsAt": "2026-11-08T12:00:00Z",
+             "expiresAt": "2026-11-08T13:00:00Z", "state": "active", "ttlSec": 3600, "maxSec": 28800 },
   "device": { …as GET /v1/devices/{id}, with lease… }
 }
 ```
@@ -818,20 +836,84 @@ answer is `LEASE_EXPIRED` at once, the attach is cancelled (or its driver
 discarded when it returns) and the device is left detached; it is
 released only after that attach has unwound.
 
+### `POST /v1/reservations`
+
+Reserves a device for a window that starts later. The answer is a lease in
+state `scheduled`, whose id the client keeps:
+
+```sh
+curl -s -H "$H" -X POST $D/v1/reservations \
+  -d '{"device":"99FA590E-…","startAt":"2026-11-09T02:00:00Z","clientTime":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","ttlSec":3600,"holder":"nightly"}'
+```
+
+| field | |
+| --- | --- |
+| `device` | the device, as for `POST /v1/leases`, listed and shared. An Android emulator (its serial names whichever AVD runs on that port) and a cloud device (it belongs to the lease that launched it) are `USAGE` |
+| `select` | or the first device that matches `{platform, kind, name, osVersion, osVersionMin, osVersionMax, hub}` and is free for the whole window: ready now, not an emulator or a cloud device. Whether it is leased or attached now does not matter; a lease that ends before the start leaves it free. `boot`, `location` and `provider` are `USAGE`: the hub boots and launches nothing for a reservation |
+| `startAt` | required, RFC 3339: the window's start, at most the hub's lead ahead (`--reservation-lead`, 24 hours by default; `details.maxStartAt` and `details.maxLeadSec` when over it). Up to 60 s in the past means now: the lease starts at once (`state: "active"`). Earlier is `USAGE` |
+| `clientTime` | required, RFC 3339: the caller's clock when it sent the request. More than 60 s from the hub's clock is `USAGE` with `details.reason: "clock-skew"`, `clientTime`, `hubTime` and `skewSec` |
+| `ttlSec` | the window's length, as for `POST /v1/leases`: default 28800 or the device's maximum, over it `USAGE` |
+| `holder` | who holds it, as listings show; default the caller's address |
+
+The body is strict: any other field (`attach`, `cloud`, a typo) is `USAGE`
+naming it in `details.field`. A window that overlaps another lease on the
+device is `DEVICE_IN_USE`; a selector whose matches are all taken for the
+window lists them in `details.candidates`. The request takes an
+`X-Maestro-Request-Id`. A grant publishes `lease.scheduled`.
+
+```json
+{ "ok": true, "exitCode": 0,
+  "lease": { "id": "9c1d…", "device": "99FA590E-…", "holder": "nightly", "startsAt": "2026-11-09T02:00:00Z",
+             "expiresAt": "2026-11-09T03:00:00Z", "state": "scheduled", "ttlSec": 3600, "maxSec": 28800 },
+  "device": { …as GET /v1/devices/{id}, with reservations… } }
+```
+
+Until its start, a request that carries the lease is `LEASE_NOT_STARTED`
+(`details.startsAt`), and so is one whose device is not listed at the
+moment. At the start the hub's sweeper makes it an ordinary lease
+(`lease.granted`, `state: "active"`); no connection waits for it, and a
+request at the start sees it started. If the lease before it on the device
+is still being torn down (detached, or shut down), requests under the new
+one are `DEVICE_IN_USE` "being released" until that ends. A simulator the
+earlier lease booted stays booted for a lease that follows within a
+minute, which then shuts it down when it ends; one further off finds it
+shut down. A hub that stops shuts down what it booted and hands nothing on.
+From then on it is a lease like any other: it expires at `expiresAt`,
+renews, and releases.
+
+**Claiming it.** The lease id is all a client needs: after the start, any
+client sends it in `X-Maestro-Lease` (`maestro-d claim --lease <id>` records
+it for the CLI, `md.claim(id)` for JavaScript), from any machine. A
+reservation is not renewed (`USAGE`); `DELETE /v1/leases/{lid}` cancels it
+(`lease.released`) without touching the device. Deleting the device ends its
+reservations; stopping it, or unplugging it, does not. Reservations outlive
+the hub process ([hub.md](hub.md#reservations-across-a-restart)): a hub that
+stops or crashes has them again when it starts, under the same lease ids.
+
+A hub that predates reservations answers `USAGE` "no route for POST
+/v1/reservations" and grants nothing; through the mesh, a peer's such answer
+becomes `USAGE` "hub <hub> does not take reservations" with
+`details.reason: "reservations-unsupported"`, and a selector passes over that
+hub.
+
 ### `GET /v1/leases`, `GET /v1/leases/{lid}`
 
-The live leases (`{leases: [Lease…]}`), or one (`{lease}`); a lease that
-has ended is `LEASE_EXPIRED`. On a hub, a remote caller gets only the
+The live and scheduled leases (`{leases: [Lease…]}`, each with `startsAt`
+and `state`), or one (`{lease}`); a lease that has ended is
+`LEASE_EXPIRED`. On a hub, a remote caller gets only the
 shared devices' leases: another device's lease
 is `LEASE_EXPIRED` to it here, on renew and on `DELETE`, and is left as it
 is.
 
 ### `POST /v1/leases/{lid}/renew`
 
-Body `{ttlSec?}`. Sets the expiry to now plus `ttlSec`, which becomes the
-lease's window (default the lease's own window); answers `{lease}`. Over
-the device's maximum is `USAGE` naming it, and the lease is left as it was;
-a lease that has ended is `LEASE_EXPIRED`.
+Body `{ttlSec?}`. Sets the expiry to the current second plus `ttlSec`, which becomes the
+lease's window (default the lease's own window); answers `{lease}`, whose
+`startsAt` stays as it was. Over the device's maximum is `USAGE` naming it,
+and into the device's next reservation is `DEVICE_IN_USE` with
+`details.nextStartsAt`; either way the lease is left as it was. A
+reservation that has not started is `USAGE`; a lease that has ended is
+`LEASE_EXPIRED`.
 
 ```sh
 curl -s -H "$H" -X POST $D/v1/leases/$LEASE/renew -d '{"ttlSec":1800}'

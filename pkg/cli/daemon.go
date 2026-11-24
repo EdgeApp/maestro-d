@@ -161,6 +161,21 @@ func resolveDevice(ctx context.Context, c *daemon.Client, o *daemonOpts) (string
 		targetLabel(o), len(attached), strings.Join(attached, ", "))
 }
 
+// leaseCell is a device's LEASE column on a hub: its holder and the time
+// left, its next reservation, or available.
+func leaseCell(d daemon.DeviceInfo) string {
+	switch {
+	case d.Lease != nil:
+		return fmt.Sprintf("%s (%s)", daemon.HolderName(d.Lease.Holder), untilExpiry(d.Lease.ExpiresAt))
+	case len(d.Reservations) > 0:
+		next := d.Reservations[0]
+		return fmt.Sprintf("next %s %s", daemon.HolderName(next.Holder), next.StartsAt)
+	case d.Available:
+		return "available"
+	}
+	return "-"
+}
+
 // ensureAttached attaches the device with the invocation's flags when the
 // daemon does not hold it yet. When it is already attached the flags are
 // ignored, with a warning if they differ in an obvious way.
@@ -432,8 +447,13 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 	for _, d := range devs {
 		locW = max(locW, len(loc(d)))
 	}
+	// LEASE is as wide as its longest value ("next <holder> <start>").
+	leaseW := 28
+	for _, d := range devs {
+		leaseW = max(leaseW, len(leaseCell(d)))
+	}
 	if leases {
-		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", "LEASE", locW, "LOCATION", provHdr, "NAME")
+		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", leaseW, "LEASE", locW, "LOCATION", provHdr, "NAME")
 	} else {
 		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", "ID", "PLATFORM", "KIND", "STATE", "ATTACHED", locW, "LOCATION", provHdr, "NAME")
 	}
@@ -463,14 +483,7 @@ func printDevices(w io.Writer, devs []daemon.DeviceInfo) {
 			name += " [booted by daemon]"
 		}
 		if leases {
-			lease := "-"
-			switch {
-			case d.Lease != nil:
-				lease = fmt.Sprintf("%s (%s)", daemon.HolderName(d.Lease.Holder), untilExpiry(d.Lease.ExpiresAt))
-			case d.Available:
-				lease = "available"
-			}
-			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-28s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, lease, locW, loc(d), prov(d), strings.TrimSpace(name))
+			fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, leaseW, leaseCell(d), locW, loc(d), prov(d), strings.TrimSpace(name))
 			continue
 		}
 		fmt.Fprintf(w, "%-40s %-8s %-10s %-10s %-9s %-*s %s%s\n", d.ID, d.Platform, d.Kind, state, att, locW, loc(d), prov(d), strings.TrimSpace(name))
@@ -487,7 +500,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, devicefarmCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
-		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, renewCommand, releaseCommand,
+		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, reserveCommand, claimCommand, renewCommand, releaseCommand,
 		gcCommand,
 	}, oneShotCommands()...)
 }

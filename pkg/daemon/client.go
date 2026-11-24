@@ -46,6 +46,10 @@ type Client struct {
 	// X-Maestro-Lease (a hub's leased devices).
 	leaseMu sync.Mutex
 	leases  map[string]string
+	// OtherLease, when set, names another lease the client holds on device
+	// besides failed ("" for none): a request refused LEASE_NOT_STARTED or
+	// LEASE_EXPIRED under failed is sent once more with it.
+	OtherLease func(device, failed string) string
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
 	// forgotten first. hint is the daemon's details.hint, the way to a new
@@ -166,6 +170,29 @@ func (c *Client) setLeaseHeader(req *http.Request, path string) {
 			req.Header.Set(HeaderLease, lease)
 		}
 	}
+}
+
+// otherLease is the lease to send instead when resp refused req's lease
+// as not started or ended and OtherLease names another for the device; ""
+// otherwise. resp's body is left readable.
+func (c *Client) otherLease(req *http.Request, resp *http.Response) string {
+	lease := req.Header.Get(HeaderLease)
+	if lease == "" || c.OtherLease == nil || resp.StatusCode != http.StatusConflict {
+		return ""
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	if code := errorFromResponse(resp.StatusCode, resp.Header, data).Code; code != CodeLeaseNotStarted && code != CodeLeaseExpired {
+		return ""
+	}
+	if alt := c.OtherLease(pathDevice(req.URL.Path), lease); alt != lease {
+		return alt
+	}
+	return ""
 }
 
 // noteLeaseExpired forgets a lease the daemon reported expired.
@@ -291,7 +318,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	c.setLeaseHeader(req, path)
-	if c.retry && (carriesRequestID(method, path) || (method == http.MethodPost && path == "/v1/leases")) {
+	if c.retry && (carriesRequestID(method, path) || (method == http.MethodPost && (path == "/v1/leases" || path == "/v1/reservations"))) {
 		req.Header.Set(HeaderRequestID, uuid.New().String())
 	}
 	if c.ClientOutputs && carriesRequestID(method, path) {
@@ -303,6 +330,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // do sends the request and returns the raw response. Transport failures
 // become DAEMON_UNAVAILABLE; a cancelled ctx becomes INTERRUPTED.
 func (c *Client) do(req *http.Request) (*http.Response, *Error) {
+	swapped := false
 	for attempt := 0; ; attempt++ {
 		resp, err := c.http.Do(req)
 		if err != nil && req.Context().Err() != nil {
@@ -321,6 +349,31 @@ func (c *Client) do(req *http.Request) (*http.Response, *Error) {
 				err = rerr
 			}
 		} else if err == nil {
+			// Refused under a lease that has not started or has ended, while
+			// the client holds another on the device (a lease and the
+			// reservation after it, told apart by a clock up to a minute off
+			// the hub's): sent once more with that one. The hub refused before
+			// running anything.
+			if alt := c.otherLease(req, resp); alt != "" && !swapped && (req.Body == nil || req.GetBody != nil) {
+				swapped = true
+				c.noteLeaseExpired(req, resp)
+				resp.Body.Close()
+				next := req.Clone(req.Context())
+				if req.GetBody != nil {
+					body, berr := req.GetBody()
+					if berr != nil {
+						return nil, WrapErr(CodeInternal, berr)
+					}
+					next.Body = body
+				}
+				c.SetLease(pathDevice(req.URL.Path), alt)
+				next.Header.Set(HeaderLease, alt)
+				if next.Header.Get(HeaderRequestID) != "" {
+					next.Header.Set(HeaderRequestID, uuid.New().String())
+				}
+				req = next
+				continue
+			}
 			c.noteLeaseExpired(req, resp)
 			return resp, nil
 		} else if !canRetry || !retryableErr(err) {
@@ -1243,6 +1296,25 @@ func boxSize(b []byte) (int, bool) {
 func (c *Client) AcquireLease(ctx context.Context, req LeaseRequest) (*LeaseResult, error) {
 	var out LeaseResult
 	if e := c.call(ctx, http.MethodPost, "/v1/leases", req, &out); e != nil {
+		return nil, e
+	}
+	return &out, nil
+}
+
+// Reserve reserves a device for a window that starts later (POST
+// /v1/reservations), filling ClientTime from this machine's clock when it
+// is empty. A hub that predates reservations answers "no route": that is
+// USAGE naming it, with details.reason "reservations-unsupported", as the
+// mesh answers for a peer that predates them.
+func (c *Client) Reserve(ctx context.Context, req ReservationRequest) (*LeaseResult, error) {
+	if req.ClientTime == "" {
+		req.ClientTime = time.Now().UTC().Format(time.RFC3339)
+	}
+	var out LeaseResult
+	if e := c.call(ctx, http.MethodPost, "/v1/reservations", req, &out); e != nil {
+		if e.Code == CodeUsage && strings.HasPrefix(e.Message, NoRouteMessage(http.MethodPost, "/v1/reservations")) {
+			return nil, ReservationsUnsupported(c.BaseURL())
+		}
 		return nil, e
 	}
 	return &out, nil

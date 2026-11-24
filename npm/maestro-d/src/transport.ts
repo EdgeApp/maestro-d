@@ -9,6 +9,7 @@
 // the same id after a reset or refused connection, PEER_UNAVAILABLE, or a
 // gateway's 502/504.
 
+import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as http from 'node:http'
@@ -156,6 +157,12 @@ export class Transport {
   readonly leases = new Map<string, string>()
   /** Told when the daemon answers LEASE_EXPIRED to a request that carried a lease; the lease is forgotten first. */
   onLeaseExpired?: (device: string, lease: string) => void
+  /**
+   * Names another lease this client holds on a device besides `failed`
+   * (undefined for none): a request refused LEASE_NOT_STARTED or
+   * LEASE_EXPIRED under `failed` is sent once more with it.
+   */
+  otherLease?: (device: string, failed: string) => string | undefined
 
   constructor(opts: TransportOptions) {
     this.secure = false
@@ -241,7 +248,8 @@ export class Transport {
   async raw(path: string, opts: RequestOptions = {}): Promise<RawResponse> {
     const delays = this.retryable(path, opts) ? this.retryDelays : []
     const id = pathDevice(path)
-    const lease = id === undefined ? undefined : this.leases.get(id)
+    let lease = id === undefined ? undefined : this.leases.get(id)
+    let swapped = false
     for (let attempt = 0; ; attempt++) {
       let res: RawResponse
       try {
@@ -256,6 +264,22 @@ export class Transport {
       if (attempt < delays.length && isRetryableResponse(res.status, res.body.toString('utf8'))) {
         await sleep(delays[attempt] as number, opts.signal)
         continue
+      }
+      // Refused under a lease that has not started or has ended, while the
+      // client holds another on the device (a lease and the reservation
+      // after it, told apart by a clock up to a minute off the hub's): sent
+      // once more with that one. The hub refused before running anything.
+      if (!swapped && lease && id !== undefined && res.status === 409 && this.otherLease) {
+        const code = MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code
+        const alt = code === 'LEASE_NOT_STARTED' || code === 'LEASE_EXPIRED' ? this.otherLease(id, lease) : undefined
+        if (alt && alt !== lease) {
+          this.noteLeaseExpired(path, lease, res)
+          this.leases.set(id, alt)
+          lease = alt
+          swapped = true
+          if (opts.requestId !== undefined) opts = { ...opts, requestId: randomUUID() }
+          continue
+        }
       }
       this.noteLeaseExpired(path, lease, res)
       return res

@@ -866,6 +866,29 @@ describe('leases', () => {
     )
   })
 
+  test('reserve() a device for later; claim() it from a second connection after the start', async () => {
+    const a = await connectHub()
+    // Far enough ahead that the claim below runs before the start even on a
+    // loaded machine (reserve() sends whole seconds).
+    const start = new Date(Date.now() + 10_000)
+    const lease = await a.reserve({ device: 'mock-h1', startAt: start, ttlSec: 60 })
+    assert.equal(lease.state, 'scheduled')
+    assert.match(lease.id, /@jsleases$/)
+    await rejects(
+      () => a.claim(lease.id),
+      (err) => assert.ok(isMaestroError(err, 'LEASE_NOT_STARTED') && err.details.startsAt === lease.startsAt, String(err)),
+    )
+    const listed = (await a.devices({ platform: 'mock' })).find((x) => x.localId === 'mock-h1')
+    assert.equal(listed.reservations.length, 1)
+    await a.close()
+    await new Promise((resolve) => setTimeout(resolve, Date.parse(lease.startsAt) - Date.now() + 1500))
+    const b = await connectHub()
+    const dev = await b.claim(lease.id, { attach: { platform: 'mock' } })
+    assert.equal((await dev.tapOn('Reserved')).ok, true)
+    await dev.release()
+    await b.close()
+  })
+
   test('lease() needs a device or a selector, and a hub', async () => {
     const md = await connectHub()
     await assert.rejects(() => md.lease({}), TypeError)

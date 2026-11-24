@@ -70,6 +70,8 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
 	{name: "lease-max", kind: kindSlice, value: "8h", usage: "The longest lease window, DURATION (8h, 90m, or seconds) for the whole hub, or DEVICE=DURATION for one device by id or name; repeatable",
 		apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
+	strFlag("reservation-lead", "How far ahead a reservation may start, DURATION (24h, 90m, or seconds); default 24h", nil,
+		func(o *daemonOpts, v string) { o.hub.reservationLead = v }),
 	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
 	strFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
@@ -237,6 +239,9 @@ func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
 	if _, _, err = parseLeaseMax(o.hub.leaseMax); err != nil {
 		return "", "", err
 	}
+	if _, err = parseReservationLead(o.hub.reservationLead); err != nil {
+		return "", "", err
+	}
 	if err = checkCloudFlags(o); err != nil {
 		return "", "", err
 	}
@@ -364,6 +369,9 @@ func hubChildArgs(o *daemonOpts) []string {
 	}
 	for _, m := range o.hub.leaseMax {
 		args = append(args, "--lease-max", m)
+	}
+	if o.hub.reservationLead != "" {
+		args = append(args, "--reservation-lead", o.hub.reservationLead)
 	}
 	if o.hub.remoteShell {
 		args = append(args, "--allow-remote-shell")
@@ -509,9 +517,13 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	if err != nil {
 		return err
 	}
+	lead, err := parseReservationLead(o.hub.reservationLead)
+	if err != nil {
+		return err
+	}
 	mesh := newMesh(hub.Config{
 		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
-		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version, Cloud: providerNames(deps),
+		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version, Cloud: providerNames(deps), ReservationLead: lead,
 		Logf: func(format string, args ...any) { logger.Info(format, args...) },
 	})
 	leaseMax, leaseMaxDevices, err := parseLeaseMax(o.hub.leaseMax)
@@ -532,6 +544,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		ShareConfig:      o.hub.configShare,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,
+		ReservationLead:  lead,
 		Advertise:        o.hub.advertise,
 		AllowRemoteShell: o.hub.remoteShell,
 		PassEnv:          o.PassEnv,
@@ -645,6 +658,9 @@ func printHubStatus(w io.Writer, h daemon.HubStatus) {
 		mdns = "no mDNS"
 	}
 	fmt.Fprintf(w, "hub %s: maestro-d %s, API %s, listening on %s (%s)\n", h.Name, h.Version, h.APIVersion, h.Listen, mdns)
+	if h.ReservationLeadSec > 0 {
+		fmt.Fprintf(w, "reservations start up to %v ahead\n", time.Duration(h.ReservationLeadSec)*time.Second)
+	}
 	if h.Addr != "" {
 		fmt.Fprintf(w, "advertised as %s\n", h.Addr)
 	}

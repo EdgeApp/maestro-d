@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 
 import { MaestroError } from './errors.js'
 import { MaestroDevice, anySignal } from './device.js'
-import { dropLease, findLease, recordLease, type LeaseRecord } from './leasefile.js'
+import { currentLease, dropLease, findLease, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
 import { uploadPath } from './pack.js'
 import { ENV_DEVICE, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
@@ -110,6 +110,30 @@ export interface LeaseOptions {
   signal?: AbortSignal
 }
 
+export interface ReserveOptions {
+  /** The device to reserve, by id, as for `lease()`. */
+  device?: string
+  /** Or the first device that matches and is free for the whole window (ready now; never booted, an emulator or a cloud device). */
+  select?: Omit<LeaseSelector, 'boot' | 'location' | 'provider'>
+  /**
+   * The window's start: a Date or an RFC 3339 string, at most the hub's
+   * lead ahead (24 hours by default). This machine's clock goes with it,
+   * and the hub refuses it more than 60 s off its own.
+   */
+  startAt: Date | string
+  /** The window's length in seconds, as for `lease()`. */
+  ttlSec?: number
+  /** Who holds it, as listings show it (default user@host). */
+  holder?: string
+  signal?: AbortSignal
+}
+
+export interface ClaimOptions {
+  /** How to attach the device (default `{}`); `false` only takes the lease. */
+  attach?: AttachOptions | false
+  signal?: AbortSignal
+}
+
 export interface ShutdownOptions {
   /** Milliseconds to wait for the process to exit (default 15000; 0 = don't wait). */
   wait?: number
@@ -155,6 +179,20 @@ export class MaestroD {
     this.devicefarm = new DeviceFarmUtilities(transport, () => this.signal)
     if (info) this.info = info
     if (signal) this.signal = signal
+    // Which of a device's leases has started is judged by this machine's
+    // clock, which may be up to a minute off the hub's: at one lease's end
+    // and the next one's start, a refused request goes once more with the
+    // other one on file.
+    transport.otherLease = (device, failed) => {
+      try {
+        return currentLease(
+          loadLeases().filter((r) => r.hub === leaseKey && r.id !== failed),
+          device,
+        )?.id
+      } catch {
+        return undefined
+      }
+    }
     // A lease the hub reports expired leaves leases.json too.
     transport.onLeaseExpired = (_device, lease) => {
       try {
@@ -284,6 +322,97 @@ export class MaestroD {
     } catch (err) {
       await this.transport.json<Envelope>(`/v1/leases/${encodeURIComponent(lease.id)}`, { method: 'DELETE' }).catch(() => undefined)
       this.transport.leases.delete(lease.device)
+      throw err
+    }
+    this.recordLease(lease)
+    const dev = new MaestroDevice(this.transport, this, info, signal)
+    dev.holdLease(lease, {
+      onRenew: (l) => this.recordLease(l),
+      onRelease: (d, l) => {
+        if (this.leased.get(d.id) === d) this.leased.delete(d.id)
+        this.forgetLease(l)
+      },
+    })
+    this.leased.set(lease.device, dev)
+    return dev
+  }
+
+  /**
+   * Reserve a device on a hub for a window that starts later
+   * (`POST /v1/reservations`), and resolve with the lease, in state
+   * 'scheduled'. Nothing is attached and nothing waits for the start: keep
+   * `lease.id`, and from the start take the device with `claim(lease.id)`,
+   * in this process or any other. It is recorded in `<home>/leases.json`
+   * like `maestro-d reserve`. Before the start, requests with it reject
+   * LEASE_NOT_STARTED. Cancel it with `DELETE /v1/leases/{id}` or
+   * `maestro-d release --lease`. A hub that predates reservations rejects
+   * USAGE "does not take reservations".
+   */
+  async reserve(opts: ReserveOptions): Promise<Lease> {
+    if (!opts || (opts.device === undefined) === (opts.select === undefined)) {
+      throw new TypeError('reserve() needs a device or a select, not both')
+    }
+    if (opts.startAt === undefined) throw new TypeError('reserve() needs startAt')
+    if (!this.info?.hub) await this.status({ signal: opts.signal }).then((st) => (this.info = st.daemon))
+    if (!this.info?.hub) {
+      throw MaestroError.of('USAGE', `daemon ${this.name} is not a hub and has no reservations (start one with \`maestro-d hub start\`)`)
+    }
+    const signal = this.sig(opts.signal)
+    const startAt = opts.startAt instanceof Date ? rfc3339(opts.startAt) : opts.startAt
+    const body: Record<string, unknown> = { startAt, ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
+    if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
+    else body.select = opts.select
+    body.clientTime = rfc3339(new Date())
+    let res: Envelope & { lease: Lease; device?: DeviceInfo }
+    try {
+      res = await this.transport.json<Envelope & { lease: Lease; device?: DeviceInfo }>('/v1/reservations', {
+        method: 'POST',
+        body,
+        signal,
+        requestId: this.transport.tcp ? randomUUID() : undefined,
+      })
+    } catch (err) {
+      if (err instanceof MaestroError && err.code === 'USAGE' && err.message.startsWith('no route for POST /v1/reservations')) {
+        throw MaestroError.of('USAGE', `hub ${this.name} does not take reservations; it needs a maestro-d release that has them`, {
+          details: { hub: this.name, reason: 'reservations-unsupported' },
+        })
+      }
+      throw err
+    }
+    this.recordLease(res.lease)
+    return res.lease
+  }
+
+  /**
+   * Take a lease by its id (a reservation from its start, or a lease
+   * handed over) and return its handle: attached (unless `attach: false`),
+   * sending the lease, recorded in `<home>/leases.json`, and released by
+   * `device.release()` or `close()` as a `lease()` handle is. A reservation
+   * that has not started rejects LEASE_NOT_STARTED (`details.startsAt`), and
+   * nothing is held.
+   */
+  async claim(leaseId: string, opts: ClaimOptions = {}): Promise<MaestroDevice> {
+    if (!leaseId) throw new TypeError('claim() needs a lease id')
+    const signal = this.sig(opts.signal)
+    const { lease } = await this.transport.json<Envelope & { lease: Lease }>(`/v1/leases/${encodeURIComponent(leaseId)}`, { signal })
+    if (lease.state === 'scheduled') {
+      throw MaestroError.of('LEASE_NOT_STARTED', `lease ${lease.id} on ${lease.device} starts at ${lease.startsAt}; claim it then`, {
+        details: { lease: lease.id, startsAt: lease.startsAt },
+      })
+    }
+    // A failed attach puts back the lease the device had in this process
+    // (an earlier lease() or claim() handle keeps sending it).
+    const previous = this.transport.leases.get(lease.device)
+    this.transport.leases.set(lease.device, lease.id)
+    let info: DeviceInfo
+    try {
+      info =
+        opts.attach === false
+          ? await this.device(lease.device, { signal })
+          : await this.openAttach(lease.device, { ...(opts.attach ?? {}) }, signal)
+    } catch (err) {
+      if (previous === undefined) this.transport.leases.delete(lease.device)
+      else this.transport.leases.set(lease.device, previous)
       throw err
     }
     this.recordLease(lease)
@@ -673,6 +802,11 @@ function baseURL(url: string): string {
 /** True when an attach would upload a file of this machine (a hub refuses host paths). */
 function hasLocalFiles(cfg: AttachOptions): boolean {
   return typeof cfg.appFile === 'string' && cfg.appFile !== '' && !cfg.appFile.startsWith('blob:')
+}
+
+/** An RFC 3339 time to the second, in UTC. */
+function rfc3339(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
 /** Names this client in a lease: user@host. */

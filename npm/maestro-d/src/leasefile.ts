@@ -1,13 +1,15 @@
 // <home>/leases.json: the leases a client holds, shared by the CLI and
 // this library (mirrors pkg/cli/lease.go).
 //
-//   {"leases": [{"hub": "http://hub.lan:7433", "device": "<id>@<hub>",
-//                "id": "<lease>", "holder": "...", "expiresAt": "...", "ttlSec": 28800}]}
+//   {"leases": [{"hub": "http://hub.lan:7433", "device": "<id>@<hub>", "id": "<lease>",
+//                "holder": "...", "startsAt": "...", "expiresAt": "...", "ttlSec": 28800}]}
 //
 // Entries are keyed by the hub's address (its base URL, or unix:<daemon>
-// for a hub reached over its unix socket) and the device id as the hub
-// returns it. `maestro-d lease` in a shell records one there, and a script
-// in the same home attaches with it.
+// for a hub reached over its unix socket) and the lease id; a device may
+// have several (a lease now and reservations later), and the one used is
+// the one that started last, else the reservation that starts first
+// (currentLease). `maestro-d lease` or `maestro-d reserve` in a shell
+// records one there, and a script in the same home attaches with it.
 //
 // Locking: the CLI holds an advisory flock on leases.json.lock from its
 // read to its rename, which Node cannot take. This library writes the
@@ -29,6 +31,8 @@ export interface LeaseRecord {
   device: string
   id: string
   holder?: string
+  /** The window's start: later than now for a reservation. A record without it has started. */
+  startsAt?: string
   expiresAt?: string
   ttlSec?: number
 }
@@ -69,16 +73,64 @@ function saveLeases(recs: LeaseRecord[]): void {
   fs.renameSync(tmp, leasesPath())
 }
 
-/** The entry for one device on one hub. */
-export function findLease(hub: string, device: string): LeaseRecord | undefined {
-  return loadLeases().find((r) => r.hub === hub && r.device === device)
+/** Whether r's window has started by `now`, and its start (0 when none is recorded: started, and earliest). */
+function startOf(r: LeaseRecord, now: number): { started: boolean; start: number } {
+  const t = r.startsAt ? Date.parse(r.startsAt) : NaN
+  if (Number.isNaN(t)) return { started: true, start: 0 }
+  return { started: t <= now, start: t }
 }
 
-/** Record a lease, replacing the device's entry on that hub. */
+/**
+ * The record to use for `device` among `recs` (the CLI's currentLease): of
+ * the ones that have started, the one that started last; with none
+ * started, the reservation that starts first. The recorded expiresAt is
+ * not weighed: an ended lease is still sent, the hub answers LEASE_EXPIRED
+ * and the record is dropped.
+ */
+export function currentLease(recs: LeaseRecord[], device: string, now = Date.now()): LeaseRecord | undefined {
+  let best: LeaseRecord | undefined
+  let bestStart = 0
+  let bestStarted = false
+  for (const r of recs) {
+    if (r.device !== device) continue
+    const { started, start } = startOf(r, now)
+    let take: boolean
+    if (best === undefined) take = true
+    else if (started !== bestStarted) take = started
+    else if (started) take = start > bestStart
+    else take = start < bestStart
+    if (take) {
+      best = r
+      bestStart = start
+      bestStarted = started
+    }
+  }
+  return best
+}
+
+/** The entry to use for one device on one hub (currentLease). */
+export function findLease(hub: string, device: string): LeaseRecord | undefined {
+  return currentLease(
+    loadLeases().filter((r) => r.hub === hub),
+    device,
+  )
+}
+
+/**
+ * Record a lease, replacing the entry of the same lease id on that hub; the
+ * device's reservations stay. A lease that has started also replaces the
+ * device's other started entries: no two leases on a device overlap, so
+ * those have ended.
+ */
 export function recordLease(hub: string, lease: Lease): void {
-  const recs = loadLeases().filter((r) => r.hub !== hub || r.device !== lease.device)
+  const now = Date.now()
+  const started = startOf({ hub, device: lease.device, id: lease.id, startsAt: lease.startsAt }, now).started
+  const recs = loadLeases().filter(
+    (r) => !(r.hub === hub && (r.id === lease.id || (started && r.device === lease.device && startOf(r, now).started))),
+  )
   const rec: LeaseRecord = { hub, device: lease.device, id: lease.id }
   if (lease.holder) rec.holder = lease.holder
+  if (lease.startsAt) rec.startsAt = lease.startsAt
   if (lease.expiresAt) rec.expiresAt = lease.expiresAt
   if (lease.ttlSec) rec.ttlSec = lease.ttlSec
   recs.push(rec)

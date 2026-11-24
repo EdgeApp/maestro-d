@@ -328,6 +328,7 @@ class MaestroError extends Error {
 | `PEER_UNAVAILABLE` | 3 | 503 | hub mesh: the device's hub is unreachable (retried automatically) |
 | `HUB_NAME_TAKEN`, `HUB_VERSION` | 5 | 409 | hub mesh: a joining hub's name is taken, or its API version differs |
 | `LEASE_REQUIRED`, `LEASE_EXPIRED` | 5 | 409 | hub: the device's lease is missing or expired |
+| `LEASE_NOT_STARTED` | 5 | 409 | hub: the lease is a reservation that has not started (`details.startsAt`); `md.claim()` it from then |
 
 `isMaestroError(err, code?)` narrows in a `catch`. `EXIT_CODES` and
 `HTTP_STATUS` export the table, and `codeFromStatus(status)` the code for

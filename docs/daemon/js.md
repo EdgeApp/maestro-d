@@ -115,6 +115,27 @@ hub unchanged once `maestro-d lease --device <id>` has run in the same home.
 process took (a shell's lease from `leases.json` stays); against a daemon
 that is not a hub, `release()` does nothing.
 
+**Reservations.** `md.reserve({device | select, startAt, ttlSec, holder})`
+reserves a device for a window that starts later
+([`POST /v1/reservations`](rest.md#post-v1reservations)) and resolves with
+the lease, in `state: 'scheduled'`; `startAt` is a `Date` or an RFC 3339
+string, and this machine's clock goes with it as `clientTime` (the hub
+refuses one more than 60 s off its own). Nothing is attached and nothing
+waits for the start: keep `lease.id`, and from the start take the device
+with `md.claim(lease.id, {attach})`, in this process or any other, on any
+machine. `claim()` returns the device's handle, attached unless
+`attach: false`, recorded in `leases.json` and released by `release()` or
+`close()` as a `lease()` handle is; before the start it rejects
+`LEASE_NOT_STARTED` with `details.startsAt` and holds nothing. A request
+under a reservation before its start rejects `LEASE_NOT_STARTED` too, and
+the lease stays on file. A hub that predates reservations rejects `USAGE`
+"does not take reservations" (`details.reason: 'reservations-unsupported'`).
+`leases.json` may hold several leases for one device (a lease now and
+reservations later): `attach()` sends the one that started last, else the
+reservation that starts first. Every `Lease` carries `startsAt` and
+`state`, each `DeviceInfo` on a hub its `reservations`, and `hubStatus()`
+the hub's `reservationLeadSec`.
+
 `leases.json` locking: the CLI holds an advisory `flock` on
 `leases.json.lock` while it updates the file; Node cannot take one, so the
 library writes the whole file to a temporary file and renames it into

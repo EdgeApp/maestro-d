@@ -62,6 +62,9 @@ type Config struct {
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
 	LeaseMaxDevices []LeaseMax
+	// ReservationLead, on a hub, is how far ahead a reservation may start
+	// (--reservation-lead; default DefaultReservationLead).
+	ReservationLead time.Duration
 	// CloudMaxDevices, on a hub, is how many cloud devices it holds at
 	// most (--cloud-max-devices).
 	CloudMaxDevices int
@@ -121,8 +124,10 @@ type Server struct {
 	blobs          *BlobStore
 	// leases are a hub's device leases; leaseMu serialises granting and
 	// ending them.
-	leases  *leaseTable
-	leaseMu sync.Mutex
+	leases *leaseTable
+	// reservationsMu serialises the writes of scheduled-leases.json.
+	reservationsMu sync.Mutex
+	leaseMu        sync.Mutex
 	// teardowns counts the lease teardowns not finished yet, the
 	// sweeper's and those waiting for work under their lease included:
 	// Shutdown waits for them before it detaches and shuts down devices.
@@ -341,6 +346,12 @@ func (s *Server) Run(ctx context.Context) error {
 	s.registry.mu.Lock()
 	s.registry.persistLocked()
 	s.registry.mu.Unlock()
+	// A hub's reservations are back before its listeners serve: a request
+	// in between would see them missing, and a reservation taken then would
+	// be written over the file they are read from.
+	if s.cfg.Hub {
+		s.loadReservations()
+	}
 
 	errCh := make(chan error, len(s.servers))
 	for i, srv := range s.servers {
@@ -491,6 +502,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
 	mux.HandleFunc("POST /v1/leases", s.idempotent(s.handleAcquireLease))
+	mux.HandleFunc("POST /v1/reservations", s.idempotent(s.handleReserve))
 	mux.HandleFunc("GET /v1/leases", s.handleListLeases)
 	mux.HandleFunc("GET /v1/leases/{lid}", s.handleGetLease)
 	mux.HandleFunc("POST /v1/leases/{lid}/renew", s.handleRenewLease)
@@ -537,7 +549,7 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts", leased(s.handleListArtifacts))
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", leased(s.handleGetArtifact))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, Errorf(CodeUsage, "no route for %s %s", r.Method, r.URL.Path))
+		writeError(w, Errorf(CodeUsage, "%s", NoRouteMessage(r.Method, r.URL.Path)))
 	})
 	return s.middleware(mux, tcp)
 }

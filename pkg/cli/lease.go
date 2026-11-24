@@ -41,10 +41,58 @@ type leaseRecord struct {
 	Device string `json:"device"`
 	ID     string `json:"id"`
 	Holder string `json:"holder,omitempty"`
+	// StartsAt is the start of the window: later than now for a
+	// reservation (maestro-d reserve). A record without it has started.
+	StartsAt string `json:"startsAt,omitempty"`
 	// ExpiresAt is the end of the window as the hub last reported it
 	// (moved only by an explicit renew).
 	ExpiresAt string `json:"expiresAt,omitempty"`
 	TTLSec    int    `json:"ttlSec,omitempty"`
+}
+
+// startedAt reports whether r's window has started by now, and its start
+// (zero when none is recorded: such a record has started, and ranks
+// earliest).
+func (r leaseRecord) startedAt(now time.Time) (bool, time.Time) {
+	t, err := time.Parse(time.RFC3339, r.StartsAt)
+	if r.StartsAt == "" || err != nil {
+		return true, time.Time{}
+	}
+	return !t.After(now), t
+}
+
+// currentLease picks the record to use for device among recs: of the
+// ones that have started, the one that started last; with none started,
+// the reservation that starts first. The recorded expiresAt is not
+// weighed: an ended lease is still sent, the hub answers LEASE_EXPIRED
+// and the record is dropped (wireLeases), and a lease renewed from
+// another home is still sent.
+func currentLease(recs []leaseRecord, device string, now time.Time) *leaseRecord {
+	var best *leaseRecord
+	var bestStart time.Time
+	bestStarted := false
+	for i := range recs {
+		r := recs[i]
+		if r.Device != device {
+			continue
+		}
+		started, start := r.startedAt(now)
+		take := false
+		switch {
+		case best == nil:
+			take = true
+		case started != bestStarted:
+			take = started
+		case started:
+			take = start.After(bestStart)
+		default:
+			take = start.Before(bestStart)
+		}
+		if take {
+			best, bestStart, bestStarted = &r, start, started
+		}
+	}
+	return best
 }
 
 type leaseFile struct {
@@ -140,24 +188,32 @@ func leasesFor(hub string) []leaseRecord {
 	return out
 }
 
+// findLease returns the lease on file to use for device on one hub
+// (currentLease).
 func findLease(hub, device string) *leaseRecord {
-	for _, r := range leasesFor(hub) {
-		if r.Device == device {
-			return &r
-		}
-	}
-	return nil
+	return currentLease(leasesFor(hub), device, time.Now())
 }
 
+// recordLease records l for one hub, replacing the record of the same
+// lease id; the device's reservations stay (a lease now and a reservation
+// later). A lease that has started also replaces the device's other
+// started records: no two leases on a device overlap, so those have ended.
 func recordLease(hub string, l daemon.Lease) {
+	now := time.Now()
+	started, _ := leaseRecord{StartsAt: l.StartsAt}.startedAt(now)
 	updateLeases(func(recs []leaseRecord) []leaseRecord {
 		out := recs[:0]
 		for _, r := range recs {
-			if r.Hub != hub || r.Device != l.Device {
-				out = append(out, r)
+			if r.Hub == hub && r.ID == l.ID {
+				continue
 			}
+			if rs, _ := r.startedAt(now); started && rs && r.Hub == hub && r.Device == l.Device {
+				continue
+			}
+			out = append(out, r)
 		}
-		return append(out, leaseRecord{Hub: hub, Device: l.Device, ID: l.ID, Holder: l.Holder, ExpiresAt: l.ExpiresAt, TTLSec: l.TTLSec})
+		return append(out, leaseRecord{Hub: hub, Device: l.Device, ID: l.ID, Holder: l.Holder, StartsAt: l.StartsAt,
+			ExpiresAt: l.ExpiresAt, TTLSec: l.TTLSec})
 	})
 }
 
@@ -186,8 +242,28 @@ func leaseKey(c *daemon.Client, o *daemonOpts) string {
 // ones the hub reports expired.
 func wireLeases(c *daemon.Client, o *daemonOpts) {
 	key := leaseKey(c, o)
-	for _, r := range leasesFor(key) {
-		c.SetLease(r.Device, r.ID)
+	recs := leasesFor(key)
+	now := time.Now()
+	for _, r := range recs {
+		if cur := currentLease(recs, r.Device, now); cur != nil {
+			c.SetLease(cur.Device, cur.ID)
+		}
+	}
+	// Which of a device's leases has started is judged by this machine's
+	// clock, which may be up to a minute off the hub's: at a lease's end
+	// and the next one's start, a refused request goes once more with the
+	// other.
+	c.OtherLease = func(device, failed string) string {
+		var rest []leaseRecord
+		for _, r := range leasesFor(key) {
+			if r.ID != failed {
+				rest = append(rest, r)
+			}
+		}
+		if alt := currentLease(rest, device, time.Now()); alt != nil {
+			return alt.ID
+		}
+		return ""
 	}
 	c.OnLeaseExpired = func(device, lease, hint string) {
 		dropLease(key, lease)
@@ -357,7 +433,9 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		if err != nil {
 			return err
 		}
-		if rec := findLease(key, id); rec != nil {
+		// A reservation on file does not stand in for a lease: the hub
+		// is asked, and refuses a window that reaches it.
+		if rec := findLease(key, id); rec != nil && startedRecord(*rec) {
 			if res, err := c.Lease(ctx, rec.ID); err == nil {
 				recordLease(key, res.Lease)
 				return printLease(o, res.Lease, nil)
@@ -418,9 +496,20 @@ func leaseCloudSpec(o *daemonOpts) (*cloudprov.CloudSpec, error) {
 	return spec, nil
 }
 
+// startedRecord reports whether r's window has started.
+func startedRecord(r leaseRecord) bool {
+	started, _ := r.startedAt(time.Now())
+	return started
+}
+
 func printLease(o *daemonOpts, l daemon.Lease, info *daemon.DeviceInfo) error {
 	if o.JSON {
 		printJSON(os.Stdout, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
+		return nil
+	}
+	if l.State == daemon.LeaseScheduled {
+		fmt.Printf("%s reserved: lease %s, holder %s, from %s (in %s) until %s (window %s, max %s)\n", l.Device, l.ID, l.Holder,
+			l.StartsAt, untilExpiry(l.StartsAt), l.ExpiresAt, secs(l.TTLSec), secs(l.MaxSec))
 		return nil
 	}
 	fmt.Printf("%s leased: lease %s, holder %s, expires %s (%s; window %s, max %s)\n", l.Device, l.ID, l.Holder, l.ExpiresAt,
@@ -491,17 +580,39 @@ func runRenew(ctx context.Context, o *daemonOpts, args []string) error {
 				id, targetLabel(o), o.Device).WithDetails("hint", "maestro-d lease --device "+o.Device)
 		}
 		recs = append(recs, *rec)
-	} else if recs = leasesFor(key); len(recs) == 0 {
-		return daemon.Errorf(daemon.CodeLeaseRequired, "no lease on file for %s; take one with `maestro-d lease --device ID`", targetLabel(o))
+	} else {
+		// Reservations that have not started are not renewed.
+		for _, r := range leasesFor(key) {
+			if startedRecord(r) {
+				recs = append(recs, r)
+			}
+		}
+		if len(recs) == 0 {
+			return daemon.Errorf(daemon.CodeLeaseRequired, "no lease on file for %s; take one with `maestro-d lease --device ID`", targetLabel(o))
+		}
 	}
 	renewed := []daemon.Lease{}
+	var expired error
 	for _, r := range recs {
 		res, err := c.RenewLease(ctx, r.ID, o.lease.ttl)
 		if err != nil {
+			// Without --device, a lease on file that has ended (one a later
+			// lease on its device followed) is dropped, and a reservation the
+			// hub says has not started (this machine's clock may be ahead of
+			// the hub's) is passed over; the rest are renewed, and it fails
+			// only when nothing was.
+			de, _ := err.(*daemon.Error)
+			notStarted := de != nil && de.Code == daemon.CodeUsage && de.Details["startsAt"] != nil
 			if isCode(err, daemon.CodeLeaseExpired) {
 				dropLease(key, r.ID)
+			} else if !notStarted {
+				return err
 			}
-			return err
+			if o.Device != "" {
+				return err
+			}
+			expired = err
+			continue
 		}
 		recordLease(key, res.Lease)
 		renewed = append(renewed, res.Lease)
@@ -509,6 +620,9 @@ func runRenew(ctx context.Context, o *daemonOpts, args []string) error {
 			l := res.Lease
 			fmt.Printf("%s renewed: lease %s, expires %s (%s)\n", l.Device, l.ID, l.ExpiresAt, untilExpiry(l.ExpiresAt))
 		}
+	}
+	if len(renewed) == 0 && expired != nil {
+		return expired
 	}
 	if o.JSON {
 		if len(renewed) == 1 && o.Device != "" {
@@ -536,24 +650,32 @@ func untilExpiry(expiresAt string) string {
 
 var releaseFlags = flagSet(daemonSelectFlags, one(deviceFlag), targetFlags, []dflag{
 	boolFlag("all", "Release every lease this client holds on the hub", nil, func(o *daemonOpts, v bool) { o.lease.all = v }),
+	strFlag("lease", "Release this one lease, by id (a reservation is cancelled)", nil, func(o *daemonOpts, v string) { o.lease.id = v }),
 })
 
 var releaseCommand = &cli.Command{
 	Name:      "release",
-	Usage:     "End this client's lease on a device (or --all): the hub detaches it",
+	Usage:     "End this client's leases on a device (or one lease, or --all): the hub detaches it",
 	ArgsUsage: " ",
-	Description: flagsDoc(`Against a daemon that has no leases (not a hub), release does nothing and
+	Description: flagsDoc(`--device releases every lease this client holds on that device, its
+reservations included; --lease releases that one lease (a reservation is
+cancelled, and nothing is detached); --all every lease on the hub. Against
+a daemon that has no leases (not a hub), release does nothing and
 succeeds.
 
   maestro-d release --device <udid> --target-hub=hub.lan
+  maestro-d release --lease <lease id> --target-hub=hub.lan
   maestro-d release --all --target-hub=hub.lan`, releaseFlags),
 	SkipFlagParsing: true,
 	Action:          withArgs(releaseFlags, runRelease),
 }
 
 func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
-	if o.Device == "" && !o.lease.all {
-		return daemon.Errorf(daemon.CodeUsage, "release: give --device ID or --all")
+	switch n := btoi(o.Device != "") + btoi(o.lease.all) + btoi(o.lease.id != ""); {
+	case n == 0:
+		return daemon.Errorf(daemon.CodeUsage, "release: give --device ID, --lease ID or --all")
+	case n > 1:
+		return daemon.Errorf(daemon.CodeUsage, "release: give one of --device ID, --lease ID or --all")
 	}
 	released := []string{}
 	done := func(note string) error {
@@ -581,15 +703,38 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 	}
 	key := leaseKey(c, o)
 	var recs []leaseRecord
-	if o.lease.all {
+	switch {
+	case o.lease.all:
 		recs = leasesFor(key)
-	} else {
+	case o.lease.id != "":
+		for _, r := range leasesFor(key) {
+			if r.ID == o.lease.id {
+				recs = []leaseRecord{r}
+			}
+		}
+		if len(recs) == 0 {
+			// Not on file (another client's, or a typo): the hub says which
+			// device it holds and whether it has started, or that it has no
+			// such lease, which is then the error.
+			res, err := c.Lease(ctx, o.lease.id)
+			if isCode(err, daemon.CodeLeaseExpired) {
+				return daemon.Errorf(daemon.CodeLeaseExpired, "no lease %s on %s", o.lease.id, targetLabel(o)).WithDetails("lease", o.lease.id)
+			}
+			if err != nil {
+				return err
+			}
+			l := res.Lease
+			recs = []leaseRecord{{Hub: key, ID: l.ID, Device: l.Device, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}}
+		}
+	default:
 		id, _, err := lookupDevice(ctx, c, o.Device)
 		if err != nil {
 			return err
 		}
-		if rec := findLease(key, id); rec != nil {
-			recs = append(recs, *rec)
+		for _, r := range leasesFor(key) {
+			if r.Device == id {
+				recs = append(recs, r)
+			}
 		}
 	}
 	if len(recs) == 0 {
@@ -611,7 +756,11 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 			note = " (minutes in the device.released event)"
 		}
 		if !o.JSON {
-			fmt.Printf("%s released (lease %s)%s\n", r.Device, r.ID, note)
+			how := "released"
+			if !startedRecord(r) {
+				how = "reservation cancelled"
+			}
+			fmt.Printf("%s %s (lease %s)%s\n", r.Device, how, r.ID, note)
 		}
 	}
 	if o.JSON && len(minutes) > 0 {
@@ -632,9 +781,18 @@ func parseLeaseDuration(flag, v string) (time.Duration, error) {
 		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: want a duration (8h, 90m, 1h30m) or seconds", flag, v)
 	}
 	if d < time.Second {
-		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: a lease window is at least 1s", flag, v)
+		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: at least 1s", flag, v)
 	}
 	return d.Round(time.Second), nil
+}
+
+// parseReservationLead reads hub start's --reservation-lead: "" is the
+// default, DefaultReservationLead.
+func parseReservationLead(v string) (time.Duration, error) {
+	if strings.TrimSpace(v) == "" {
+		return daemon.DefaultReservationLead, nil
+	}
+	return parseLeaseDuration("reservation-lead", v)
 }
 
 // parseLeaseMax reads hub start's --lease-max values: DURATION sets the

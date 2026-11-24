@@ -69,6 +69,7 @@ token of every request it is forwarded) and the **same peer token**.
 | `--share-device ID\|NAME` | none (repeatable) | Share this local device, by id or name. A hub shares only the devices named here, with `--share-tv` or in its [config.json](config.md)'s `hubDevices`; the rest stay private to this machine, and a hub that names none shares none. Never a TV: TVs join only through `--share-tv` or `hubDevices` |
 | `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner |
 | (the computer, `mac`) | never shared | The [computer device](../macos.md) is local only: neither `--share-device` nor `hubDevices` puts it in the pool. Local callers on the hub's socket lease it (`lease --device mac`, or a selector with `kind: computer` or `platform: macos`); peers and remote callers never see it |
+| `--reservation-lead DURATION` | 24h | How far ahead a reservation (`POST /v1/reservations`) may start (`24h`, `90m`, or seconds); `hub status` reports it as `reservationLeadSec` |
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it. A cloud device's lease is at most 150 minutes, its provider's session |
 | `--devicefarm` | off | Launch AWS Device Farm devices for the mesh's cloud leases ([Cloud devices](cloud.md#hub-mode-cloud-devices-for-every-client)), with this hub's AWS credentials: the standard chain, or the two flags below. At start the hub checks them with one account call and refuses to start when it fails |
 | `--devicefarm-credentials-file F` | none | An AWS shared credentials file: a regular file, mode 0600 or stricter |
@@ -90,8 +91,23 @@ arguments with tokens redacted.
 `--peer` has had its answer, or after 10 s. If every `--peer` refused it and
 mDNS found no other hub, it exits with the refusal's code (below).
 
-`hub stop` shuts the hub down cleanly: its leases end, its devices are
+`hub stop` shuts the hub down cleanly: its leases in progress end (reservations stay; see below), its devices are
 detached, and they leave every peer's listing as soon as the links close.
+
+### Reservations across a restart
+
+A hub keeps its reservations that have not started in
+`<home>/hub/scheduled-leases.json` (`<home>/hub/daemons/<daemon>/scheduled-leases.json`
+for a daemon other than `hub`, beside its `secrets/`), mode 0600, written
+through a temp file and a rename after every reservation, cancel, start and
+device delete that ends one. When the hub starts it reads them back under
+their own lease ids: one whose window is over is dropped (`lease.expired`
+is not published for it), one whose start passed while the hub was down
+starts at once and still ends at its own `expiresAt`, and the rest wait for
+their start. A reservation whose device is not listed now is kept. Leases
+that had started are not kept: `hub stop`, or a crash, ends them with their
+device sessions. A file that does not parse is moved to
+`scheduled-leases.json.bad` and the hub starts without it.
 
 `hub status [--target-hub…] [--json]` (REST `GET /v1/hub`) prints the hub's
 name, version and listener, and for each peer its address, link state
@@ -160,14 +176,22 @@ steps by bare id does not repeat the lookup for every step.
   or a known hub whose link is down, is listed under `unreachable`
   (`device list` prints it on stderr). `?scope=local` lists the entry hub
   only.
-- `POST /v1/leases` routes by its body's `device`, resolved as on the device
+- `POST /v1/leases` and `POST /v1/reservations` route by their body's
+  `device`, resolved as on the device
   routes. An id that neither the entry hub nor any peer lists is
   `DEVICE_NOT_FOUND` and no hub grants it (`PEER_UNAVAILABLE` when a peer did
   not answer). A `select` is tried on the
   entry hub first, then on the peers by RTT; ready devices on every hub come
   before any shut-down one is booted (`boot: true`). A hub whose devices'
   maximum window is shorter than the `ttlSec` asked is passed over; when no
-  hub grants it, the answer is that owner's `USAGE` naming the maximum.
+  hub grants it, the answer is that owner's `USAGE` naming the maximum. Only
+  `device` and `select.hub` (and a lease's `select.boot`) are rewritten on
+  the way: every other key reaches the owner as the client sent it, and the
+  owner's clock judges a reservation's `startAt` and `clientTime`. A
+  reservation's selector boots nothing and is never routed to a cloud hub. A
+  peer that predates reservations answers them "no route": by id that is
+  `USAGE` "hub <hub> does not take reservations"
+  (`reason: reservations-unsupported`), and a selector passes over that hub.
 - `GET /v1/events?device=<id>` streams from the device's hub (an
   unqualified id resolves as on the device routes); without
   `device` the stream merges every hub's events, each naming its device by

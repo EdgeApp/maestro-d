@@ -1821,12 +1821,12 @@ func TestLeases_GrantRefusesAnExpiredUnendedLease(t *testing.T) {
 	clock := &fakeClock{t: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 	tb := newLeaseTable()
 	tb.now = clock.now
-	old, e := tb.grant("d", "", "alice", time.Second, time.Hour, false)
+	old, e := tb.grant("d", "", "alice", time.Time{}, time.Second, time.Hour, false)
 	if e != nil {
 		t.Fatal(e)
 	}
 	clock.advance(2 * time.Second)
-	if _, e := tb.grant("d", "", "bob", time.Second, time.Hour, false); e == nil || e.Code != CodeDeviceInUse ||
+	if _, e := tb.grant("d", "", "bob", time.Time{}, time.Second, time.Hour, false); e == nil || e.Code != CodeDeviceInUse ||
 		!strings.Contains(e.Message, "being released") {
 		t.Fatalf("grant over an unended lease: %v", e)
 	}

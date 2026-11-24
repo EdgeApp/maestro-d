@@ -94,15 +94,17 @@ type hubOpts struct {
 	// configShare is the hubDevices of the config the hub starts with.
 	configShare []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
-	leaseMax      []string
-	remoteShell   bool
-	foreground    bool
-	advertise     string
-	peers         []string
-	noMDNS        bool
-	peerToken     string
-	peerTokenFile string
-	peerCA        string
+	leaseMax []string
+	// reservationLead is --reservation-lead as given ("": the default).
+	reservationLead string
+	remoteShell     bool
+	foreground      bool
+	advertise       string
+	peers           []string
+	noMDNS          bool
+	peerToken       string
+	peerTokenFile   string
+	peerCA          string
 	// purge: hub service uninstall --purge.
 	purge bool
 	// devicefarm: the hub launches AWS Device Farm devices for leases,
@@ -120,7 +122,11 @@ type leaseOpts struct {
 	holder   string
 	noAttach bool
 	all      bool
-	sel      daemon.LeaseSelector
+	// id is release's and claim's --lease; startAt is reserve's
+	// --start-at as given.
+	id      string
+	startAt string
+	sel     daemon.LeaseSelector
 	// idleRelease and appiumVersion tune a cloud lease's launch.
 	idleRelease   string
 	appiumVersion string
