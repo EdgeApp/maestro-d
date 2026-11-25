@@ -104,7 +104,7 @@ func TestOutcomeCode(t *testing.T) {
 		errors.New("plain"):         "",
 		&UnsupportedError{Msg: "x"}: codeUnsupported,
 		fmt.Errorf("wrapped: %w", &UnsupportedError{Msg: "x"}):                            codeUnsupported,
-		&netshape.ConfigError{Path: "/h/network.json", Err: errors.New("bad")}:            codeUsage,
+		&netshape.ConfigError{Path: "/h/config.json", Err: errors.New("bad")}:             codeUsage,
 		fmt.Errorf("wrapped: %w", &netshape.ConfigError{Path: "p", Err: errors.New("b")}): codeUsage,
 	} {
 		if got := outcomeCode(err); got != want {

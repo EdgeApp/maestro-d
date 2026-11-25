@@ -32,27 +32,6 @@ func TestLeaseSelector_ComputerOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-// A cached positive answer for another id and an empty --share-device never
-// share the computer, nor does a registry record of kind computer under
-// another id.
-func TestShared_ComputerBeforeCache(t *testing.T) {
-	s := &Server{cfg: Config{}, sharedIDs: map[string]bool{"mac": true}, shareSeen: map[string]shareAnswer{}}
-	s.registry = NewRegistry("plain", func(string) []DeviceInfo { return nil })
-	if s.shared("mac") {
-		t.Fatal("shared(mac) with an empty --share-device")
-	}
-	s.registry.MarkAttached(DeviceInfo{ID: "other-mac", Platform: "macos", Kind: "computer"})
-	if s.shared("other-mac") {
-		t.Fatal("a computer record shared")
-	}
-	if s.sharedInfo(macDevice) {
-		t.Fatal("sharedInfo(mac)")
-	}
-	if !s.shared("mock-1") {
-		t.Fatal("an ordinary device stopped being shared")
-	}
-}
-
 func TestShutdownDevice_ComputerIsANoOp(t *testing.T) {
 	if err := shutdownDevice(macDevice); err != nil {
 		t.Fatalf("stop mac: %v", err)

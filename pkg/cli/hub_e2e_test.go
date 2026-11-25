@@ -40,9 +40,29 @@ func copyTree(t *testing.T, src, dst string) {
 	}
 }
 
+func writeSharedMocks(t *testing.T, home string, ids ...string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	devices := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		devices = append(devices, map[string]string{"id": id})
+	}
+	data, err := json.Marshal(map[string]any{"hubDevices": devices})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestE2E_TwoHubs(t *testing.T) {
 	e := newE2E(t)
 	homeA, homeB, homeC := filepath.Join(e.cwd, "home-a"), filepath.Join(e.cwd, "home-b"), filepath.Join(e.cwd, "home-c")
+	writeSharedMocks(t, homeA, "mock-1", "mock-2")
+	writeSharedMocks(t, homeB, "mock-3")
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	// Each hub has its own daemon name: a long test home puts the unix
@@ -62,8 +82,8 @@ func TestE2E_TwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--share-device", "mock-1", "--share-device", "mock-2"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3",
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr,
 		"--advertise", "hub-b.example:7433", "--lease-max", "mock-3=90s"}, mesh...)...))
 	for _, arg := range b.StartArgs {
 		if strings.Contains(arg, "two-peer") || strings.Contains(arg, "two-tok") {

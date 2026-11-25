@@ -51,7 +51,7 @@ func cloudSel(extra ...func(*daemon.LeaseSelector)) *daemon.LeaseSelector {
 }
 
 func TestCloudLease_LaunchBindRelease(t *testing.T) {
-	h := newCloudHub(t, daemon.Config{ShareDevices: []string{"mock-1"}})
+	h := newCloudHub(t, daemon.Config{ShareConfig: []string{"mock-1"}})
 	ctx := context.Background()
 	events, _, unsub := h.s.Events().Subscribe("", 0)
 	defer unsub()
@@ -63,7 +63,7 @@ func TestCloudLease_LaunchBindRelease(t *testing.T) {
 	if !strings.HasPrefix(id, "df-") || res.Device == nil || !res.Device.Attached || res.Lease.MaxSec != 9000 || res.Lease.TTLSec != 9000 {
 		t.Fatalf("lease: %+v device %+v", res.Lease, res.Device)
 	}
-	// A remote caller sees it, though --share-device names another device,
+	// A remote caller sees it, though config.json names another device,
 	// and drives it under the lease.
 	h.remote.SetLease(id, res.Lease.ID)
 	if step, err := h.remote.Command(ctx, id, "tapOn", "Login", true); err != nil || !step.OK {
