@@ -107,7 +107,7 @@ type RenewRequest struct {
 }
 
 // LeaseMax is one --lease-max DEVICE=DURATION: the longest window a lease
-// on that device (by id or name, as for --share-device) may have.
+// on that device (by id or name) may have.
 type LeaseMax struct {
 	Device string
 	Max    time.Duration

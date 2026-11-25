@@ -9,19 +9,6 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
-// hub start passes --network-config to its detached child (and so to the
-// LaunchAgent hub service install writes) as an absolute path.
-func TestHubChildArgs_NetworkConfig(t *testing.T) {
-	args := strings.Join(hubChildArgs(&daemonOpts{NetworkConfig: "shapes.json"}), " ")
-	abs, _ := filepath.Abs("shapes.json")
-	if !strings.Contains(args, "--network-config "+abs) {
-		t.Fatalf("child args %q", args)
-	}
-	if strings.Contains(strings.Join(hubChildArgs(&daemonOpts{}), " "), "network-config") {
-		t.Fatal("an unset --network-config reached the child")
-	}
-}
-
 // hub start passes --config to its detached child as an absolute path.
 func TestHubChildArgs_Config(t *testing.T) {
 	args := strings.Join(hubChildArgs(&daemonOpts{DeviceConfig: "lab.json"}), " ")
@@ -35,8 +22,7 @@ func TestHubChildArgs_Config(t *testing.T) {
 }
 
 // A hub reads the share list from its config at start: config.json's
-// hubDevices, none from network.json, and a config it cannot use, or both
-// flags at once, stops the start.
+// hubDevices, none from network.json. An invalid config stops startup.
 func TestConfigShare(t *testing.T) {
 	t.Setenv(daemon.EnvHome, t.TempDir())
 	write := func(path, body string) {
@@ -53,7 +39,7 @@ func TestConfigShare(t *testing.T) {
 		t.Fatalf("network.json only: %v %v", share, err)
 	}
 	// A network.json shares nothing, so one the hub cannot use does not
-	// stop it: the shaping commands report it, as before.
+	// stop it.
 	write(filepath.Join(daemon.Home(), "network.json"), `{"devices":{"PHONE-A":{}}}`)
 	if err := os.Chmod(filepath.Join(daemon.Home(), "network.json"), 0o644); err != nil {
 		t.Fatal(err)
@@ -69,22 +55,6 @@ func TestConfigShare(t *testing.T) {
 	write(other, `{"hubDevices":[{"id":"OTHER"}]}`)
 	if share, err := configShare(&daemonOpts{DeviceConfig: other}); err != nil || strings.Join(share, ",") != "OTHER" {
 		t.Fatalf("--config: %v %v", share, err)
-	}
-	both := map[string]bool{"config": true, "network-config": true}
-	if _, err := configShare(&daemonOpts{DeviceConfig: other, NetworkConfig: other, explicit: both}); err == nil || !strings.Contains(err.Error(), "--config and --network-config") {
-		t.Fatalf("both flags: %v", err)
-	}
-	if _, err := configShare(&daemonOpts{DeviceConfig: other, NetworkConfig: other}); err == nil || !strings.Contains(err.Error(), "MAESTRO_D_CONFIG and MAESTRO_D_NETWORK_CONFIG") {
-		t.Fatalf("both variables: %v", err)
-	}
-	// A flag wins over the other's environment variable.
-	o := &daemonOpts{DeviceConfig: other, NetworkConfig: "env-network.json", explicit: map[string]bool{"config": true}}
-	if share, err := configShare(o); err != nil || strings.Join(share, ",") != "OTHER" || o.NetworkConfig != "" {
-		t.Fatalf("--config over MAESTRO_D_NETWORK_CONFIG: %v %v %q", share, err, o.NetworkConfig)
-	}
-	o = &daemonOpts{DeviceConfig: "env-config.json", NetworkConfig: filepath.Join(daemon.Home(), "missing.json"), explicit: map[string]bool{"network-config": true}}
-	if share, err := configShare(o); err != nil || len(share) != 0 || o.DeviceConfig != "" {
-		t.Fatalf("--network-config over MAESTRO_D_CONFIG: %v %v %q", share, err, o.DeviceConfig)
 	}
 	// A named config.json that does not exist is a mistake, not an empty
 	// config.

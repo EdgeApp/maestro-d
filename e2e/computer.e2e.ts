@@ -591,12 +591,21 @@ scenario('C14', async () => {
   }
   const homeA = home
   const homeB = path.join(scratch, 'hub-b-home')
-  const localHub = (hubHome: string, args: string[]) => cli(args, { MAESTRO_D_HOME: hubHome }, undefined, hubBin)
-  const hub = (name: string, port: number, peer: number) => ['start', '--name', name, '--listen', `127.0.0.1:${port}`, '--no-mdns',
-    '--token-file', path.join(tokens, 'token'), '--peer-token-file', path.join(tokens, 'peer'), '--peer', `127.0.0.1:${peer}`]
-  await localHub(homeA, hub('computerdevice-a', hubPortA, hubPortB))
-  await localHub(homeB, hub('computerdevice-b', hubPortB, hubPortA))
+  const configA = path.join(tokens, 'config.json')
+  const mock = 'mock-computer-control'
+  await writeFile(configA, JSON.stringify({ hubDevices: [{ id: 'mac' }, { id: mock }] }), { mode: 0o600 })
+  const localHub = (hubHome: string, args: string[]) => cli(args, {
+    MAESTRO_D_HOME: hubHome, MAESTRO_D_MOCK_DEVICES: hubHome === homeA ? mock : ''
+  }, undefined, hubBin)
+  const hub = (name: string, port: number) => ['start', '--name', name, '--listen', `127.0.0.1:${port}`, '--no-mdns',
+    '--token-file', path.join(tokens, 'token'), '--peer-token-file', path.join(tokens, 'peer')]
+  const a = await localHub(homeA, [...hub('computerdevice-a', hubPortA), '--config', configA])
+  assert.equal(a.code, 0, a.stdout)
+  let startedB = false
   try {
+    const b = await localHub(homeB, [...hub('computerdevice-b', hubPortB), '--peer', `127.0.0.1:${hubPortA}`])
+    assert.equal(b.code, 0, b.stdout)
+    startedB = true
     for (let i = 0; i < 20; i++) {
       const st = await localHub(homeA, ['status'])
       if (st.stdout.includes('computerdevice-b')) break
@@ -635,12 +644,12 @@ scenario('C14', async () => {
     }
     const list = await rest('GET', '/v1/devices')
     assert.equal(list.status, 200)
-    assert.ok(list.text.includes('@computerdevice-a') && !list.text.includes('"mac@'), 'hub B lists the computer, or not hub A at all')
+    assert.ok(list.text.includes(`${mock}@computerdevice-a`) && !list.text.includes('"mac@'), 'hub B lists the computer, or not hub A at all')
     const lease = await rest('POST', '/v1/leases', { device: 'mac@computerdevice-a' })
     assert.ok(lease.status >= 400 && lease.text.includes('DEVICE_NOT_FOUND'), 'hub B leased the computer')
   } finally {
+    if (startedB) await localHub(homeB, ['stop'])
     await localHub(homeA, ['stop'])
-    await localHub(homeB, ['stop'])
   }
 })
 

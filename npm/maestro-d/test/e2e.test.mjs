@@ -345,12 +345,12 @@ describe('traffic shaping', () => {
     })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const base = `http://127.0.0.1:${server.address().port}`
-    const cfg = path.join(process.env.MAESTRO_D_HOME, 'network.json')
+    const cfg = path.join(process.env.MAESTRO_D_HOME, 'config.json')
     try {
-      fs.writeFileSync(cfg, JSON.stringify({ devices: { 'mock-1': {
+      fs.writeFileSync(cfg, JSON.stringify({ hubDevices: [{ id: 'mock-1', trafficShaping: {
         setTrafficShape: { method: 'POST', url: `${base}/shape`, body: { mbit: '${mbit}', loss: '${lossPct}', dir: '${direction}' } },
         resetTrafficShape: { method: 'DELETE', url: `${base}/shape` },
-      } } }), { mode: 0o600 })
+      } }] }), { mode: 0o600 })
       const res = await dev.setTrafficShape({ mbit: 1.5, direction: 'upload' })
       assert.equal(res.ok, true)
       await dev.resetTrafficShape()
@@ -640,7 +640,9 @@ describe('leases', () => {
   const hubName = 'jsleases'
 
   before(() => {
-    const out = execFileSync(hubBin, ['start', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--share-device', 'mock-h1', '--share-device', 'mock-h2', '--share-device', 'mock-unlisted', '--json'], {
+    const hubDevices = ['mock-h1', 'mock-h2', 'mock-unlisted'].map(id => ({ id }))
+    fs.writeFileSync(path.join(process.env.MAESTRO_D_HOME, 'config.json'), JSON.stringify({ hubDevices }), { mode: 0o600 })
+    const out = execFileSync(hubBin, ['start', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--json'], {
       env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
     })
     addr = JSON.parse(out.toString()).daemon.httpAddr
