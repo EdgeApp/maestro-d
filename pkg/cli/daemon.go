@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
-	"github.com/devicelab-dev/maestro-runner/pkg/cli/hubcmd"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -46,6 +46,9 @@ func connectDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Clie
 func dialDaemon(ctx context.Context, o *daemonOpts, spawn bool) (*daemon.Client, error) {
 	if o.Target != "" {
 		return connectTarget(o)
+	}
+	if err := daemon.CheckLocalListen(o.HTTPAddr); err != nil {
+		return nil, err
 	}
 	opts := daemon.SpawnOptions{
 		NoSpawn:      !spawn || o.NoSpawn,
@@ -131,6 +134,15 @@ func attachIfNeeded(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 			common.Progress("warning: %s is attached with --app-id %s; ignoring --app-id %s (detach to change it)", id, info.AppID, o.Attach.AppID)
 		} else if len(o.AttachSet) > 0 && o.Verbose {
 			common.Progress("note: %s is already attached; attach flags (%s) ignored", id, strings.Join(o.AttachSet, ", "))
+		}
+		if o.testInstall && o.Attach.AppFile != "" && !o.Attach.NoAppInstall {
+			cfg := o.Attach
+			if err := uploadAttachFiles(ctx, c, o, id, &cfg); err != nil {
+				return nil, err
+			}
+			if _, err := c.InstallApp(ctx, id, daemon.InstallRequest{App: cfg.AppFile, Platform: info.Platform}); err != nil {
+				return nil, err
+			}
 		}
 		return info, nil
 	}
@@ -433,7 +445,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, devicefarmCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
-		installCommand, installAppCommand, uninstallCommand, packCommand, hubcmd.Command(HubDriverDeps), leaseCommand, reserveCommand, claimCommand, renewCommand, releaseCommand,
+		installCommand, installAppCommand, uninstallCommand, packCommand, hubAliasCommand, common.VersionCommand(), leaseCommand, reserveCommand, claimCommand, renewCommand, releaseCommand,
 		gcCommand,
 	}, oneShotCommands()...)
 }
@@ -444,6 +456,21 @@ func daemonCommands() []*cli.Command {
 // both work; the flags are documented in each command's Description.
 func withArgs(flags []dflag, fn func(context.Context, *daemonOpts, []string) error) cli.ActionFunc {
 	return common.Action(flags, parseDaemonArgs, fn, func(o *daemonOpts) bool { return o.JSON })
+}
+
+// localDaemonAction gives the migration hint for flags removed from start and serve.
+func localDaemonAction(flags []dflag, fn func(context.Context, *daemonOpts, []string) error) cli.ActionFunc {
+	run := withArgs(flags, fn)
+	return func(c *cli.Context) error {
+		for _, arg := range c.Args().Slice() {
+			key, _, _ := strings.Cut(arg, "=")
+			switch key {
+			case "--tls-cert", "--tls-key", "--pass-env":
+				return common.FinishErr(daemon.Errorf(daemon.CodeUsage, "%s was removed from maestro-d %s; use maestro-d-hub start", key, c.Command.Name), false)
+			}
+		}
+		return run(c)
+	}
 }
 
 var startFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), attachFlags)
@@ -460,7 +487,7 @@ API (--http), or to attach a device up front:
   maestro-d start --http 127.0.0.1:7433 --token secret
   maestro-d start --device 00008110-… --platform ios --team-id ABCDE12345`, startFlags),
 	SkipFlagParsing: true,
-	Action: withArgs(startFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
+	Action: localDaemonAction(startFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 		client, err := connectDaemon(ctx, o, true)
 		if err != nil {
 			return err
@@ -489,19 +516,10 @@ API (--http), or to attach a device up front:
 }
 
 var serveFlags = common.FlagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
-	common.StringFlag("tls-cert", "Serve HTTPS on --http with this PEM certificate (with --tls-key)", []string{"MAESTRO_D_TLS_CERT"},
-		func(o *daemonOpts, v string) { o.TLSCert = v }),
-	common.StringFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
-		func(o *daemonOpts, v string) { o.TLSKey = v }),
 	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id and an optional description, capabilities and trafficShaping calls, and its optional ai block (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
 	common.StringFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
-	{Name: "pass-env", Kind: common.Slice, Usage: "A variable of this process's environment that sessions may import when --http listens beyond loopback (repeatable); no other one is imported",
-		Apply: func(o *daemonOpts, v string) error {
-			o.PassEnv = append(o.PassEnv, v)
-			return nil
-		}},
 })
 
 var daemonServeCommand = &cli.Command{
@@ -510,7 +528,10 @@ var daemonServeCommand = &cli.Command{
 	ArgsUsage:       " ",
 	Description:     common.FlagHelp("", serveFlags),
 	SkipFlagParsing: true,
-	Action: withArgs(serveFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
+	Action: localDaemonAction(serveFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
+		if err := daemon.CheckLocalListen(o.HTTPAddr); err != nil {
+			return err
+		}
 		idle := time.Duration(daemon.DefaultIdleSecs) * time.Second
 		switch {
 		case o.IdleTimeout < 0:
@@ -530,13 +551,10 @@ var daemonServeCommand = &cli.Command{
 			return err
 		}
 		srv := daemon.New(daemon.Config{
-			KeepRunDir:    hubcmd.ServiceInstalled,
+
 			Name:          o.Name,
 			HTTPAddr:      o.HTTPAddr,
 			Token:         o.Token,
-			TLSCert:       o.TLSCert,
-			TLSKey:        o.TLSKey,
-			PassEnv:       o.PassEnv,
 			IdleTimeout:   idle,
 			ReportsDir:    daemon.ReportsDir(o.Name),
 			DeviceConfig:  o.DeviceConfig,

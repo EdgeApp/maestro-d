@@ -282,3 +282,26 @@ func TestRemoteProxy(t *testing.T) {
 	}
 	(*remoteProxy)(nil).close()
 }
+
+func TestCloudLedgerHubAndNamedHub(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	info := Info{Name: "hub", PID: os.Getpid(), RunDir: HubRunDir()}
+	if err := WriteInfo(&info); err != nil {
+		t.Fatal(err)
+	}
+	e := CloudEntry{Daemon: "hub", PID: info.PID, Hub: true}
+	if deadEntry(e) {
+		t.Fatal("live hub session marked orphaned")
+	}
+	e.Hub = false
+	if !deadEntry(e) {
+		t.Fatal("named daemon adopted singleton hub session")
+	}
+	info.RunDir = RunDir("hub")
+	if err := WriteInfo(&info); err != nil {
+		t.Fatal(err)
+	}
+	if deadEntry(e) {
+		t.Fatal("legacy named daemon session marked orphaned")
+	}
+}

@@ -19,6 +19,9 @@ type recordingHub struct {
 	ended                     bool
 }
 
+func (h *recordingHub) TCPCaller(addr string, outputs bool) Caller {
+	return Caller{Remote: true, Addr: addr, ClientOutputs: outputs}
+}
 func (h *recordingHub) Bind(*Server, Config, Deps) {}
 func (h *recordingHub) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /test-hub", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })

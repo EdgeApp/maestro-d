@@ -31,6 +31,9 @@ type daemonOpts struct {
 	NoSpawn bool
 	Verbose bool
 
+	// A top-level test installs its explicitly requested app even on an existing attachment.
+	testInstall bool
+
 	// gc
 	DryRun            bool
 	IncludeBuildCache bool
@@ -48,9 +51,6 @@ type daemonOpts struct {
 	// CAFile adds a trust root for a self-signed hub (--ca / MAESTRO_D_CA).
 	CAFile string
 
-	// serve: TLS files and the environment names sessions may import.
-	TLSCert, TLSKey string
-	PassEnv         []string
 	// DeviceConfig and NetworkConfig are serve's and hub start's --config
 	// and (older) --network-config.
 	DeviceConfig  string

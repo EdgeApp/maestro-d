@@ -347,7 +347,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | field | |
 | --- | --- |
 | `ready` | booted / online, so it can be attached |
-| `attached`, `attachedAt`, `appId`, `driver`, `reportDir` | this daemon's attachment |
+| `attached`, `attachedAt`, `appId`, `appVersion`, `appBuild`, `driver`, `reportDir` | this daemon's attachment; `appVersion` and `appBuild` are what the driver read from the installed app |
 | `busy` | a step is running on it right now |
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
@@ -1117,6 +1117,7 @@ set to the root's directory for the whole call, hooks included). The flow runs a
 `onFlowStart`/`onFlowComplete` hooks, the flow's own `env`, `runFlow`
 relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.
+The optional `defaultAppId` supplies the suite’s app ID to a child flow that omits both `appId` and `url`. The hub test runner submits each suite case separately with a `test` object carrying its invocation environment, step delay and artifact mode. It runs the same top-level executor as a local test, including hooks and skipped commands. Each case has its own result and can be retried.
 The response is one step result of type `runFlow` whose `subSteps` are the
 flow's steps.
 

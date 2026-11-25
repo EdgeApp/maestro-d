@@ -342,3 +342,150 @@ func TestSession_StepDelay(t *testing.T) {
 		t.Fatalf("StepDelay not applied between steps: %v", el)
 	}
 }
+
+type flowTimingDriver struct {
+	core.Driver
+	find, idle, typing int
+	observed           [3]int
+}
+
+func (d *flowTimingDriver) SetFindTimeout(ms int) { d.find = ms }
+func (d *flowTimingDriver) SetWaitForIdleTimeout(ms int) error {
+	d.idle = ms
+	return nil
+}
+func (d *flowTimingDriver) SetTypingFrequency(hz int) error {
+	d.typing = hz
+	return nil
+}
+
+func (d *flowTimingDriver) Execute(step flow.Step) *core.CommandResult {
+	if check, ok := step.(*flow.AssertVisibleStep); ok && check.Optional {
+		d.observed = [3]int{check.TimeoutMs, d.idle, d.typing}
+	}
+	return d.Driver.Execute(step)
+}
+
+func TestHubTestTimingAppliesToAttachedDriver(t *testing.T) {
+	d := &flowTimingDriver{Driver: mock.New(mock.Config{})}
+	s, err := NewSession(t.Context(), d, RunnerConfig{OutputDir: t.TempDir(), ConditionTimeout: 11, WaitForIdleTimeout: 12, TypingFrequency: 13}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	condition, idle, typing := 21, 22, 23
+	opts := TestFlowOptions{ConditionTimeout: &condition, WaitForIdleTimeout: &idle, TypingFrequency: &typing}
+	for _, tc := range []struct {
+		header string
+		during [3]int
+	}{
+		{"", [3]int{21, 22, 23}},
+		{"waitForIdleTimeout: 32\ntypingFrequency: 33\n---\n", [3]int{21, 32, 33}},
+	} {
+		f, err := flow.Parse([]byte(tc.header+"- runFlow:\n    when:\n      visible: Hello\n    commands:\n      - assertTrue: true\n"), "timing.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := s.RunTestFlow(t.Context(), *f, opts)
+		if !out.Success || d.observed != tc.during {
+			t.Fatalf("flow timing: got %v, want %v, outcome %+v", d.observed, tc.during, out)
+		}
+		if d.idle != 12 || d.typing != 13 || s.fr.script.conditionTimeoutMs != 11 {
+			t.Fatalf("session timing after flow: %d, %d, %d", d.idle, d.typing, s.fr.script.conditionTimeoutMs)
+		}
+	}
+}
+
+// findTimeoutDriver ignores a zero find timeout, as the CDP driver does.
+type findTimeoutDriver struct {
+	core.Driver
+	find int
+}
+
+func (d *findTimeoutDriver) SetFindTimeout(ms int) {
+	if ms > 0 {
+		d.find = ms
+	}
+}
+func (d *findTimeoutDriver) FindTimeout() int { return d.find }
+
+// A flow's commandTimeout ends with the flow, even on a session that never set
+// one and a driver that ignores zero.
+func TestHubTestRestoresDriverDefaultFindTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		session, want int
+	}{{0, 17000}, {11, 11}} {
+		driver := &findTimeoutDriver{Driver: mock.New(mock.Config{}), find: 17000}
+		s, err := NewSession(context.Background(), driver, RunnerConfig{OutputDir: t.TempDir()}, SessionConfig{CommandTimeout: tc.session})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := flow.Parse([]byte("commandTimeout: 21\n---\n- assertTrue: true\n"), "timeout.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := s.RunTestFlow(t.Context(), *f, TestFlowOptions{}); !out.Success || driver.find != tc.want {
+			t.Fatalf("session %d: find timeout %d after the flow; want %d (%+v)", tc.session, driver.find, tc.want, out)
+		}
+		s.Close()
+	}
+}
+
+func TestHubTestRestoresLeasedDriverAfterCancellation(t *testing.T) {
+	driver := &flowTimingDriver{Driver: mock.New(mock.Config{})}
+	s, err := NewSession(context.Background(), driver, RunnerConfig{
+		OutputDir: t.TempDir(), WaitForIdleTimeout: 12, TypingFrequency: 13,
+	}, SessionConfig{CommandTimeout: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f, err := flow.Parse([]byte("commandTimeout: 21\nwaitForIdleTimeout: 22\ntypingFrequency: 23\n---\n- assertTrue: true\n- assertTrue: true\n"), "paced.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	out := s.RunTestFlow(ctx, *f, TestFlowOptions{StepDelay: 5000})
+	if out.Success || time.Since(start) >= 4*time.Second {
+		t.Fatalf("step delay did not respond to cancellation: %+v", out)
+	}
+	if driver.find != 11 || driver.idle != 12 || driver.typing != 13 {
+		t.Fatalf("leased session timing after cancellation: %+v", driver)
+	}
+}
+
+type testConsoleDriver struct {
+	core.Driver
+	captures int
+}
+
+func (d *testConsoleDriver) ClearConsoleLogReport() {}
+func (d *testConsoleDriver) ConsoleLogReport() []report.ConsoleLog {
+	return []report.ConsoleLog{{Level: "exception", Message: "page error during flow"}}
+}
+func (d *testConsoleDriver) Screenshot() ([]byte, error) {
+	d.captures++
+	return d.Driver.Screenshot()
+}
+
+func TestHubTestReturnsConsoleFailureAndHonorsCaptureSetting(t *testing.T) {
+	driver := &testConsoleDriver{Driver: mock.New(mock.Config{})}
+	s, err := NewSession(context.Background(), driver, RunnerConfig{OutputDir: t.TempDir(), Artifacts: ArtifactAlways}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f, err := flow.Parse([]byte("failOnConsoleError: true\n---\n- assertTrue: true\n"), "web.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := s.RunTestFlow(context.Background(), *f, TestFlowOptions{Artifacts: ArtifactNever})
+	if out.Success || out.TestReport == nil || len(out.TestReport.ConsoleLogs) != 1 || out.TestReport.ConsoleLogs[0] != driver.ConsoleLogReport()[0] {
+		t.Fatalf("flow-level failure lost its console diagnostics: %+v", out)
+	}
+	if driver.captures != 0 || out.Artifacts != (report.CommandArtifacts{}) || s.fr.config.Artifacts != ArtifactAlways {
+		t.Fatalf("test capture policy leaked across the session: %d captures, %+v", driver.captures, out.Artifacts)
+	}
+}

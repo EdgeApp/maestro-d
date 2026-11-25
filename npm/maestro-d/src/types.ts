@@ -90,6 +90,7 @@ export type ErrorCode =
   | 'INTERNAL'
   | 'FORBIDDEN'
   | 'PEER_UNAVAILABLE'
+  | 'HUB_RUNNING'
   | 'HUB_NAME_TAKEN'
   | 'HUB_VERSION'
   | 'LEASE_REQUIRED'
@@ -238,6 +239,9 @@ export interface DeviceInfo {
   attached: boolean
   attachedAt?: string
   appId?: string
+  /** The attached app's version and build number, as the driver read them. */
+  appVersion?: string
+  appBuild?: string
   driver?: string
   reportDir?: string
   busy?: boolean

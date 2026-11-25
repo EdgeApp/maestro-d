@@ -36,6 +36,31 @@ func TestResultFromOutcome_Code(t *testing.T) {
 	}
 }
 
+// A Windows hub's report files reach the client with forward slashes, in the
+// step and in every nested command, while its own report keeps native paths.
+func TestResultFromOutcome_SlashArtifactPaths(t *testing.T) {
+	old := wireSeparator
+	wireSeparator = `\`
+	t.Cleanup(func() { wireSeparator = old })
+	native := report.CommandArtifacts{ScreenshotBefore: `assets\f\before.png`, ScreenshotAfter: `assets\f\after.png`, ViewHierarchy: `assets\f\h.xml`}
+	slashed := report.CommandArtifacts{ScreenshotBefore: "assets/f/before.png", ScreenshotAfter: "assets/f/after.png", ViewHierarchy: "assets/f/h.xml"}
+	subs := []report.Command{{ID: "a", Artifacts: native, SubCommands: []report.Command{{ID: "b", Artifacts: native}}}}
+	o := &executor.StepOutcome{Type: "runFlow", Artifacts: native, SubSteps: subs, Error: &report.Error{Message: "no"}}
+	r := ResultFromOutcome("d", "", o)
+	if r.Artifacts != slashed || r.SubSteps[0].Artifacts != slashed || r.SubSteps[0].SubCommands[0].Artifacts != slashed {
+		t.Fatalf("%+v", r)
+	}
+	if r.Error.Details["screenshot"] != slashed.ScreenshotAfter || r.Error.Details["hierarchy"] != slashed.ViewHierarchy {
+		t.Fatal(r.Error.Details)
+	}
+	if o.SubSteps[0].Artifacts != native || o.SubSteps[0].SubCommands[0].Artifacts != native || o.Artifacts != native {
+		t.Fatal("the hub's own report changed")
+	}
+	if wireCommands(nil) != nil {
+		t.Fatal("nil commands")
+	}
+}
+
 // An iOS device's airplane-mode steps answer UNSUPPORTED (exit 2, HTTP 501)
 // on every surface, without reaching the driver.
 func TestServer_IOSAirplaneModeIsUnsupported(t *testing.T) {

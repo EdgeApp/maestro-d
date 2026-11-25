@@ -70,12 +70,12 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	f := useFakeLaunchd(t)
 	t.Setenv("ANDROID_HOME", "/opt/android")
 	t.Setenv("MAESTRO_TEAM_ID", "TEAM123")
-	t.Setenv(daemon.EnvBin, "/opt/maestro-d/bin/maestro-d")
+	t.Setenv(daemon.EnvHubBin, "/opt/maestro-d/bin/maestro-d-hub")
 	o := hubFlags(t, "--name", "lab-a", "--listen", ":7433", "--share-device", "phone", "--share-tv", "Lab TV", "--token", "s3cret-client", "--peer-token", "s3cret-peer", "--no-mdns")
 	if err := runServiceInstall(context.Background(), o, nil); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(servicePlistPath("hub"))
+	data, err := os.ReadFile(servicePlistPath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,19 +97,19 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	args := strings.Join(p.ProgramArguments, " ")
 	home := os.Getenv(daemon.EnvHome)
 	secrets := filepath.Join(home, "hub", "secrets")
-	for _, want := range []string{"/opt/maestro-d/bin/maestro-d hub start --foreground --daemon hub --name lab-a --listen :7433",
+	for _, want := range []string{"/opt/maestro-d/bin/maestro-d-hub start --foreground --name lab-a --listen :7433",
 		"--no-mdns", "--share-device phone", "--share-tv Lab TV", "--token-file " + filepath.Join(secrets, "token"), "--peer-token-file " + filepath.Join(secrets, "peer-token")} {
 		if !strings.Contains(args, want) {
 			t.Errorf("ProgramArguments %q lack %q", args, want)
 		}
 	}
-	if p.Label != serviceLabel("hub") || !p.RunAtLoad || p.KeepAlive["SuccessfulExit"] != false || len(p.KeepAlive) != 1 {
+	if p.Label != serviceLabel() || !p.RunAtLoad || p.KeepAlive["SuccessfulExit"] != false || len(p.KeepAlive) != 1 {
 		t.Fatalf("plist: %+v", p)
 	}
 	if p.Env[daemon.EnvHome] != home || p.Env["ANDROID_HOME"] != "/opt/android" || p.Env["MAESTRO_TEAM_ID"] != "TEAM123" || p.Env["PATH"] == "" {
 		t.Fatalf("environment: %v", p.Env)
 	}
-	if p.Out != filepath.Join(home, "run", "hub", "daemon.log") || p.Err != p.Out {
+	if p.Out != filepath.Join(home, "hub", "run", "daemon.log") || p.Err != p.Out {
 		t.Fatalf("log paths: %s %s", p.Out, p.Err)
 	}
 	for name, want := range map[string]string{"token": "s3cret-client\n", "peer-token": "s3cret-peer\n"} {
@@ -119,14 +119,14 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 			t.Fatalf("%s: %v %v %q", name, st, err, got)
 		}
 	}
-	if len(f.calls) != 1 || f.calls[0] != "bootstrap gui/501 "+servicePlistPath("hub") {
+	if len(f.calls) != 1 || f.calls[0] != "bootstrap gui/501 "+servicePlistPath() {
 		t.Fatalf("launchctl: %v", f.calls)
 	}
 	// Installing again boots the old agent out first.
 	if err := runServiceInstall(context.Background(), hubFlags(t, "--token", "a", "--peer-token", "b"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls[1] != "bootout gui/501/"+serviceLabel("hub") || !strings.HasPrefix(f.calls[2], "bootstrap ") {
+	if f.calls[1] != "bootout gui/501/"+serviceLabel() || !strings.HasPrefix(f.calls[2], "bootstrap ") {
 		t.Fatalf("reinstall: %v", f.calls)
 	}
 
@@ -135,7 +135,7 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	if err := runHubStart(context.Background(), hubFlags(t), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.calls) != 1 || f.calls[0] != "kickstart gui/501/"+serviceLabel("hub") {
+	if len(f.calls) != 1 || f.calls[0] != "kickstart gui/501/"+serviceLabel() {
 		t.Fatalf("kickstart: %v", f.calls)
 	}
 	f.fail["kickstart"] = "boom"
@@ -159,13 +159,13 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	if err := runServiceUninstall(context.Background(), o, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(servicePlistPath("hub")); !os.IsNotExist(err) {
+	if _, err := os.Stat(servicePlistPath()); !os.IsNotExist(err) {
 		t.Fatal("plist left")
 	}
 	if _, err := os.Stat(filepath.Join(secrets, "token")); err != nil {
 		t.Fatal("secrets removed without --purge")
 	}
-	if f.calls[0] != "bootout gui/501/"+serviceLabel("hub") {
+	if f.calls[0] != "bootout gui/501/"+serviceLabel() {
 		t.Fatalf("bootout: %v", f.calls)
 	}
 	out = captureStdout(t, func() {
@@ -208,7 +208,7 @@ func TestHubService_RefusedOffMacOS(t *testing.T) {
 			t.Fatalf("linux: %v", err)
 		}
 	}
-	if ServiceInstalled("hub") {
+	if ServiceInstalled() {
 		t.Fatal("installed on linux")
 	}
 	if st, pid := launchdState("x\n\tstate = waiting\n"); st != "waiting" || pid != "" {
@@ -281,7 +281,7 @@ func TestHub_FlagsAndTokens(t *testing.T) {
 		t.Fatalf("CA: %v", err)
 	}
 	// A bad CA stops a foreground hub before it starts.
-	o = hubFlags(t, "--token", "t", "--peer-token", "p", "--peer-ca", notPEM, "--foreground", "--daemon", "never")
+	o = hubFlags(t, "--token", "t", "--peer-token", "p", "--peer-ca", notPEM, "--foreground")
 	if err := runHubStart(context.Background(), o, nil); err == nil {
 		t.Fatal("bad --peer-ca")
 	}
@@ -369,91 +369,45 @@ func TestServiceLabel_PerHomeAndDaemon(t *testing.T) {
 		t.Skip(err)
 	}
 	t.Setenv(daemon.EnvHome, filepath.Join(u, ".maestro-d"))
-	if got := serviceLabel("hub"); got != ServiceLabel {
+	if got := serviceLabel(); got != ServiceLabel {
 		t.Fatalf("default home and daemon: %s", got)
 	}
-	if got := serviceLabel("tvhub"); got != ServiceLabel+".tvhub" {
-		t.Fatalf("default home, daemon tvhub: %s", got)
-	}
-	// Daemon names that differ only in punctuation keep their own labels.
-	labels := map[string]bool{}
-	for _, name := range []string{"tv.hub", "tv_hub", "tv-hub"} {
-		labels[serviceLabel(name)] = true
-	}
-	if len(labels) != 3 {
-		t.Fatalf("daemon names collide: %v", labels)
-	}
-
 	t.Setenv(daemon.EnvHome, filepath.Join(u, ".maestro-d-tv.dev"))
-	other := serviceLabel("hub")
+	other := serviceLabel()
 	if !strings.HasPrefix(other, ServiceLabel+".maestro-d-tv-dev-") || len(other) != len(ServiceLabel+".maestro-d-tv-dev-")+8 {
 		t.Fatalf("other home: %s", other)
 	}
-	if got := serviceLabel("tvhub"); got != other+".tvhub" {
-		t.Fatalf("other home and daemon: %s", got)
-	}
 	// Two homes with one directory name are two labels.
 	t.Setenv(daemon.EnvHome, filepath.Join(t.TempDir(), "a", ".maestro-d"))
-	a := serviceLabel("hub")
+	a := serviceLabel()
 	t.Setenv(daemon.EnvHome, filepath.Join(t.TempDir(), "b", ".maestro-d"))
-	if b := serviceLabel("hub"); a == b || !strings.HasPrefix(a, ServiceLabel+".maestro-d-") {
+	if b := serviceLabel(); a == b || !strings.HasPrefix(a, ServiceLabel+".maestro-d-") {
 		t.Fatalf("homes collide: %s %s", a, b)
 	}
 }
 
-// Two hub services in one home keep their own plists and tokens, and
-// purging one leaves the other's.
-func TestHubService_TwoDaemonsInOneHome(t *testing.T) {
+func TestHubService_PerHomeSecrets(t *testing.T) {
 	useFakeLaunchd(t)
-	t.Setenv(daemon.EnvBin, "/opt/maestro-d/bin/maestro-d")
 	ctx := context.Background()
-	if err := runServiceInstall(ctx, hubFlags(t, "--token", "client-a", "--peer-token", "peer-a"), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := runServiceInstall(ctx, hubFlags(t, "--daemon", "tvhub", "--name", "tv", "--listen", ":7434", "--token", "client-b", "--peer-token", "peer-b"), nil); err != nil {
-		t.Fatal(err)
-	}
-	if servicePlistPath("hub") == servicePlistPath("tvhub") {
-		t.Fatal("one plist for two daemons")
-	}
-	for _, p := range []string{servicePlistPath("hub"), servicePlistPath("tvhub")} {
-		if _, err := os.Stat(p); err != nil {
+	homes := []string{t.TempDir(), t.TempDir()}
+	var paths []string
+	for i, home := range homes {
+		t.Setenv(daemon.EnvHome, home)
+		token := []string{"first", "second"}[i]
+		if err := runServiceInstall(ctx, hubFlags(t, "--token", token, "--peer-token", "peer"), nil); err != nil {
 			t.Fatal(err)
 		}
+		paths = append(paths, filepath.Join(serviceSecretsDir(), "token"))
 	}
-	read := func(name, file string) string {
-		data, err := os.ReadFile(filepath.Join(serviceSecretsDir(name), file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.TrimSpace(string(data))
-	}
-	// A daemon may be called "token": its secrets never collide with the
-	// default hub's files.
-	if err := runServiceInstall(ctx, hubFlags(t, "--daemon", "token", "--name", "tok", "--listen", ":7435", "--token", "client-c", "--peer-token", "peer-c"), nil); err != nil {
-		t.Fatal(err)
-	}
-	if read("token", "token") != "client-c" {
-		t.Fatal("daemon token's secrets")
-	}
-	if read("hub", "token") != "client-a" || read("tvhub", "token") != "client-b" || read("tvhub", "peer-token") != "peer-b" {
-		t.Fatalf("tokens mixed between daemons: %q %q %q", read("hub", "token"), read("tvhub", "token"), read("tvhub", "peer-token"))
-	}
-	o, _, err := parseDaemonArgs([]string{"--purge", "--daemon", "tvhub"}, hubServiceUninstallFlags, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	o, _, _ := parseDaemonArgs([]string{"--purge"}, hubServiceUninstallFlags, nil)
 	if err := runServiceUninstall(ctx, o, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(serviceSecretsDir("tvhub")); !os.IsNotExist(err) {
-		t.Fatal("tvhub's secrets left after --purge")
+	if data, err := os.ReadFile(paths[0]); err != nil || string(data) != "first\n" {
+		t.Fatalf("first home's token: %q %v", data, err)
 	}
-	if read("hub", "token") != "client-a" || read("hub", "peer-token") != "peer-a" {
-		t.Fatal("purging tvhub touched hub's tokens")
-	}
-	if _, err := os.Stat(servicePlistPath("hub")); err != nil {
-		t.Fatal("uninstalling tvhub removed hub's plist")
+	if _, err := os.Stat(paths[1]); !os.IsNotExist(err) {
+		t.Fatal("second home's secret remains")
 	}
 }
 

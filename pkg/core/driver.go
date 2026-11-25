@@ -260,6 +260,13 @@ type WebViewDetector interface {
 	DetectWebView() (*WebViewInfo, error)
 }
 
+// FindTimeoutReader is an optional interface for drivers whose SetFindTimeout
+// ignores zero, so the caller can restore their effective find timeout after
+// an override.
+type FindTimeoutReader interface {
+	FindTimeout() int
+}
+
 // TypingFrequencyConfigurer is an optional interface drivers can implement
 // to control typing speed. Currently only WDA (iOS) supports this.
 type TypingFrequencyConfigurer interface {

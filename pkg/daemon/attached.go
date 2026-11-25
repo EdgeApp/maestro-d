@@ -74,7 +74,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if s.deps.NewDriver == nil {
 		return nil, Errorf(CodeInternal, "attach: no driver factory configured")
 	}
-	if owner := FindDeviceOwner(id, s.cfg.Name); owner != nil {
+	if owner := s.cfg.FindDeviceOwner(id); owner != nil {
 		e := Errorf(CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", id, owner.Name, owner.Info.PID)
 		return nil, e.WithDetails("owner", owner.Name, "ownerPid", owner.Info.PID)
 	}
@@ -210,8 +210,8 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 
 	info := DeviceInfo{
 		ID: id, Platform: dinfo.Platform, Kind: dinfo.Kind, Name: dinfo.Name,
-		Attached: true, AttachedAt: nowRFC3339(), AppID: cfg.AppID, Driver: dinfo.DriverName, ReportDir: reportDir,
-		Ready: true,
+		Attached: true, AttachedAt: nowRFC3339(), AppID: cfg.AppID, AppVersion: dinfo.App.Version,
+		AppBuild: dinfo.App.Build, Driver: dinfo.DriverName, ReportDir: reportDir, Ready: true,
 	}
 	if info.Platform == "" {
 		info.Platform = strings.ToLower(cfg.Platform)

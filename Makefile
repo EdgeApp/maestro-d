@@ -1,8 +1,9 @@
-.PHONY: gen gen-check cover-changed build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
+.PHONY: gen gen-check cover-changed build size clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
 
 # Build variables
 # maestro-d is maestro-runner plus the daemon commands.
 BINARY_NAME=maestro-d
+COMMANDS=maestro-d maestro-d-hub
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_DATE?=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -11,7 +12,7 @@ LDFLAGS=-ldflags "-X github.com/devicelab-dev/maestro-runner/pkg/version.Version
 # Install directory. maestro-d keeps its own home rather than sharing
 # maestro-runner's, so the two can be installed side by side; the binary
 # resolves <home> as the parent of its bin/ directory.
-INSTALL_DIR=$(HOME)/.maestro-d
+INSTALL_DIR?=$(if $(MAESTRO_D_HOME),$(MAESTRO_D_HOME),$(HOME)/.maestro-d)
 
 # Go commands
 GOCMD=go
@@ -35,29 +36,37 @@ gen-check:
 	$(GOCMD) run ./pkg/daemon/gen -check
 
 build:
-	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) .
-	@mkdir -p $(INSTALL_DIR)/bin
-	@# A daemon is usually running from the installed path; overwriting that
-	@# file in place makes macOS SIGKILL the next exec (stale code-signature
-	@# cache), so replace the inode instead.
-	@rm -f $(INSTALL_DIR)/bin/$(BINARY_NAME) && cp $(BINARY_NAME) $(INSTALL_DIR)/bin/
-	@if [ -d drivers ]; then cp -r drivers $(INSTALL_DIR)/; fi
-	@echo "Installed to $(INSTALL_DIR)/bin/$(BINARY_NAME)"
+	$(GOBUILD) $(LDFLAGS) -o ./ ./cmd/...
+	@mkdir -p "$(INSTALL_DIR)/bin"
+	@set -e; for cmd in $(COMMANDS); do \
+		cp "$$cmd" "$(INSTALL_DIR)/bin/.$$cmd.new"; \
+		mv -f "$(INSTALL_DIR)/bin/.$$cmd.new" "$(INSTALL_DIR)/bin/$$cmd"; \
+	done
+	@if [ -d drivers ]; then cp -r drivers "$(INSTALL_DIR)/"; fi
+
+size: build
+	@ls -lh $(COMMANDS)
+
+define build-target
+	@set -e; for cmd in $(COMMANDS); do \
+		GOOS=$(1) GOARCH=$(2) $(GOBUILD) $(LDFLAGS) -o "$$cmd-$(1)-$(2)$(3)" "./cmd/$$cmd"; \
+	done
+endef
 
 build-linux:
-	GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME)-linux-amd64 .
+	$(call build-target,linux,amd64)
 
 build-darwin:
-	GOOS=darwin GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-amd64 .
-	GOOS=darwin GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME)-darwin-arm64 .
+	$(call build-target,darwin,amd64)
+	$(call build-target,darwin,arm64)
 
 build-windows:
-	GOOS=windows GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME)-windows-amd64.exe .
+	$(call build-target,windows,amd64,.exe)
 
 build-all: build-linux build-darwin build-windows
 
 install:
-	$(GOBUILD) $(LDFLAGS) -o $(GOPATH)/bin/$(BINARY_NAME) .
+	$(GOCMD) install -trimpath $(LDFLAGS) ./cmd/...
 
 clean:
 	$(GOCLEAN)
@@ -85,7 +94,7 @@ test-coverage-check:
 # with -cover through MAESTRO_D_E2E_COVERDIR). Fails below 90%.
 # The server and command tests drive one another through the package boundary.
 # Instrument this group together so those calls count in the package they exercise.
-COVER_SHARED_PKGS=./pkg/daemon/... ./pkg/hubd/... ./pkg/cli/... ./pkg/hub/... ./pkg/fsage/... ./pkg/version/...
+COVER_SHARED_PKGS=./cmd/... ./pkg/daemon/... ./pkg/hubd/... ./pkg/cli/... ./pkg/hub/... ./pkg/fsage/... ./pkg/version/...
 COVER_PKGS=$(COVER_SHARED_PKGS) ./pkg/aicheck/... ./pkg/core/... ./pkg/rfb/... ./pkg/driver/computer/... ./pkg/cloudprov/... ./pkg/devicefarm/... ./pkg/execbound/... ./pkg/simulator/... ./pkg/emulator/... ./pkg/executor/... ./pkg/driver/wda/... ./pkg/driver/devicelab_ios/... ./pkg/driver/xcodecache/... ./pkg/driver/browser/... ./pkg/uiautomator2/... ./pkg/maestro/... ./pkg/tracelog/... ./pkg/report/... ./pkg/capture/... ./pkg/driver/mock/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/device/... ./pkg/netshape/... ./pkg/flow/...
 cover-changed:
 	@rm -rf .cover && mkdir -p .cover/bin
@@ -165,7 +174,7 @@ dev-setup:
 
 # Run targets
 run:
-	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) .
+	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) ./cmd/maestro-d
 	./$(BINARY_NAME) $(ARGS)
 
 validate:

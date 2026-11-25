@@ -4686,3 +4686,15 @@ func TestRunBrowserScriptMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestFindTimeoutReportsEffectiveValue(t *testing.T) {
+	d := &Driver{findTimeoutMs: defaultFindTimeoutMs}
+	d.SetFindTimeout(0)
+	if d.FindTimeout() != defaultFindTimeoutMs {
+		t.Fatal(d.FindTimeout())
+	}
+	d.SetFindTimeout(4000)
+	if d.FindTimeout() != 4000 {
+		t.Fatal(d.FindTimeout())
+	}
+}
