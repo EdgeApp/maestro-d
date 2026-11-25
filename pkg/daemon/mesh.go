@@ -95,11 +95,48 @@ func (c *Client) DeviceList(ctx context.Context, platform string) (*DevicesResul
 
 // DeviceListQuery is DeviceList filtered by q.
 func (c *Client) DeviceListQuery(ctx context.Context, q DeviceQuery) (*DevicesResult, error) {
-	var out DevicesResult
-	if e := c.call(ctx, http.MethodGet, withQuery("/v1/devices", q.Values()), nil, &out); e != nil {
-		return nil, e
+	var leases []string
+	c.leaseMu.Lock()
+	for _, lease := range c.leases {
+		leases = append(leases, lease)
 	}
-	return &out, nil
+	c.leaseMu.Unlock()
+	if c.StoredLeases != nil {
+		leases = append(leases, c.StoredLeases()...)
+	}
+	slices.Sort(leases)
+	leases = slices.Compact(leases)
+	leases = slices.DeleteFunc(leases, func(s string) bool { return s == "" })
+	if len(leases) == 0 {
+		leases = []string{""}
+	}
+	path := withQuery("/v1/devices", q.Values())
+	seenDevices := map[string]bool{}
+	seenHubs := map[string]bool{}
+	merged := DevicesResult{Devices: []DeviceInfo{}}
+	for _, lease := range leases {
+		var page DevicesResult
+		if e := c.callWithLease(ctx, http.MethodGet, path, nil, &page, lease); e != nil {
+			return nil, e
+		}
+		if len(leases) == 1 {
+			return &page, nil
+		}
+		merged.Envelope = page.Envelope
+		for _, d := range page.Devices {
+			if !seenDevices[d.ID] {
+				seenDevices[d.ID] = true
+				merged.Devices = append(merged.Devices, d)
+			}
+		}
+		for _, peer := range page.Unreachable {
+			if !seenHubs[peer.Hub] {
+				seenHubs[peer.Hub] = true
+				merged.Unreachable = append(merged.Unreachable, peer)
+			}
+		}
+	}
+	return &merged, nil
 }
 
 // asError is err as an *Error (DAEMON_UNAVAILABLE when it is not one).

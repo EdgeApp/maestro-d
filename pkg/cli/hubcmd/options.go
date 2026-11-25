@@ -25,8 +25,6 @@ type dflag = common.Flag[daemonOpts]
 type hubOpts struct {
 	name      string
 	tokenFile string
-	// configShare is the hubDevices of the config the hub starts with.
-	configShare []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
 	leaseMax []string
 	// reservationLead is --reservation-lead as given ("": the default).

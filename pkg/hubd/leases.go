@@ -58,10 +58,8 @@ type leaseEntry struct {
 	// (at once for a lease taken now, by the sweeper for a reservation).
 	starts, expires time.Time
 	started         atomic.Bool
-	// sharedAtGrant records that a reservation's device was in the hub's
-	// shared pool when it was reserved: while the device is not listed (and
-	// sharing cannot be checked), only such a reservation is shown to a
-	// remote caller.
+	// A holder may continue using a device shared when its lease or reservation
+	// was granted, even after the operator removes it from config.json.
 	sharedAtGrant atomic.Bool
 	booted        bool
 	// avd is the bootKey of the AVD an emulator lease's device runs
@@ -468,17 +466,6 @@ func (t *leaseTable) isPending(id string) bool {
 	return e != nil && e.pending()
 }
 
-// pendingFor returns the reservation id holds on device, when id names
-// one that has not started.
-func (t *leaseTable) pendingFor(id, device string) *leaseEntry {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if e := t.byID[id]; e != nil && e.pending() && e.device == device {
-		return e
-	}
-	return nil
-}
-
 // notStartedErr is LEASE_NOT_STARTED for a request under reservation e.
 func notStartedErr(e *leaseEntry) *daemon.Error {
 	starts := e.starts.UTC().Format(time.RFC3339)
@@ -827,27 +814,17 @@ func shareMatches(entry string, d daemon.DeviceInfo) bool {
 
 // sharedInfo reports whether this hub exposes the device to remote callers.
 func (s *Server) sharedInfo(d daemon.DeviceInfo) bool {
-	if daemon.IsComputer(d) {
-		return false
-	}
-	if d.Provider != "" {
-		return true // the hub launched this cloud device for a lease
-	}
-	for _, id := range s.cfg.ShareConfig {
-		if daemon.ConfigNames(id, d) {
-			return true
-		}
-	}
-	return false
+	return publiclyShared(s.DeviceConfig(), d)
 }
 
 // shareList describes what a hub shares, for its log and refusals: "" when
 // it names nothing.
 func (s *Server) shareList() string {
-	if len(s.cfg.ShareConfig) == 0 {
+	ids := s.DeviceConfig().Shared
+	if len(ids) == 0 {
 		return ""
 	}
-	return "config.json " + strings.Join(s.cfg.ShareConfig, ", ")
+	return "config.json " + strings.Join(ids, ", ")
 }
 
 // tvInfo reports whether id is an Apple TV on this host, and its name: from
@@ -885,8 +862,7 @@ type shareAnswer struct {
 // them to a remote caller, look the device up once, not per request and
 // per event: a lookup runs live discovery (adb, emulator, simctl).
 func (s *Server) shared(id string) bool {
-	// The computer device is never in the pool. Checked first: the empty
-	// share-all answer below and the positive cache would share it.
+	// Exclude computer sessions before consulting configured shares or cached IDs.
 	if id == daemon.ComputerID {
 		return false
 	}
@@ -896,6 +872,7 @@ func (s *Server) shared(id string) bool {
 	if tv, ok := s.tvInfo(id); ok {
 		return s.sharedInfo(tv)
 	}
+	s.DeviceConfig() // refresh before consulting either cached share answer
 	stable := !daemon.IsEmulatorSerial(id)
 	now := s.leases.now()
 	s.shareMu.Lock()
@@ -942,6 +919,21 @@ func (s *Server) OnEvent(ev daemon.Event) {
 	}
 }
 
+// heldBy recognizes only the exact credential for a device shared at grant.
+func (s *Server) heldBy(r *http.Request, id string) bool {
+	return s.leases.holds(r.Header.Get(daemon.HeaderLease), id)
+}
+
+func (t *leaseTable) holds(credential, device string) bool {
+	if credential == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e := t.byID[credential]
+	return e != nil && e.device == device && e.sharedAtGrant.Load() && (e.liveAt(t.now()) || e.pending())
+}
+
 // sharedWith reports whether the request's caller may see device id: a
 // remote caller sees only the shared pool.
 func (s *Server) sharedWith(r *http.Request, id string) bool {
@@ -970,6 +962,8 @@ func (s *Server) remoteEvent(ev daemon.Event) (daemon.Event, bool) {
 	switch {
 	case ev.Device == "":
 		return ev, ev.Type == "daemon.shutdown"
+	case ev.Type == "device.unshared":
+		return daemon.Event{Type: ev.Type, Device: ev.Device, Seq: ev.Seq, Time: ev.Time}, ev.PreviouslyShared
 	case !s.shared(ev.Device):
 		return ev, false
 	case ev.Type == "device.attached":
@@ -985,7 +979,7 @@ func (s *Server) Visible(r *http.Request, devs []daemon.DeviceInfo) []daemon.Dev
 	out := make([]daemon.DeviceInfo, 0, len(devs))
 	remote := daemon.CallerFrom(r.Context()).Remote
 	for _, d := range devs {
-		if remote && !s.sharedInfo(d) {
+		if remote && !s.sharedInfo(d) && !s.heldBy(r, d.ID) {
 			continue
 		}
 		out = append(out, d)
@@ -1031,16 +1025,7 @@ func (s *Server) Gate(mode daemon.LeaseMode, h http.HandlerFunc) http.HandlerFun
 			id = target.ID
 		}
 		s.startDue()
-		if !s.sharedWith(r, id) {
-			// A reservation that has not started answers LEASE_NOT_STARTED
-			// even while its device is unlisted (unplugged, or shared by a
-			// name nothing resolves now): the holder keeps it.
-			if header := r.Header.Get(daemon.HeaderLease); mode != daemon.LeaseOpen && header != "" {
-				if p := s.leases.pendingFor(header, id); p != nil && (!daemon.CallerFrom(r.Context()).Remote || s.unlistedShared(header)) {
-					daemon.WriteError(w, notStartedErr(p))
-					return
-				}
-			}
+		if !s.sharedWith(r, id) && !s.heldBy(r, id) {
 			// A device that went away with its lease (a cloud device's
 			// idle release, the session cap) answers a request under that
 			// lease LEASE_EXPIRED, so clients forget the lease. A device
@@ -1568,6 +1553,7 @@ func (s *Server) leaseDeviceLocked(d daemon.DeviceInfo, holder string, ttlSec in
 		}
 		return nil, ge
 	}
+	e.sharedAtGrant.Store(s.sharedInfo(d))
 	return e, nil
 }
 
@@ -1789,7 +1775,7 @@ func (s *Server) selectorMatches(r *http.Request, sel daemon.LeaseSelector) ([]d
 	}
 	var matches []daemon.DeviceInfo
 	for _, d := range s.Visible(r, s.Registry().List(strings.ToLower(sel.Platform))) {
-		if d.Provider != "" {
+		if d.Provider != "" || (daemon.CallerFrom(r.Context()).Remote && !s.sharedInfo(d)) {
 			continue
 		}
 		if sel.Matches(d) {
@@ -1834,7 +1820,7 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 	if daemon.CallerFrom(r.Context()).Remote {
 		shared := leases[:0]
 		for _, l := range leases {
-			if s.shared(l.Device) || s.unlistedShared(l.ID) {
+			if s.shared(l.Device) || s.heldBy(r, l.Device) {
 				shared = append(shared, l)
 			}
 		}
@@ -1851,25 +1837,10 @@ func (s *Server) visibleLease(r *http.Request, id string) *leaseEntry {
 	if e == nil {
 		return nil
 	}
-	if s.sharedWith(r, e.device) {
-		return e
-	}
-	// A reservation whose device is not listed now (unplugged, or shared by
-	// a name nothing resolves while it is gone) stays its holder's to read
-	// and cancel, as dev() keeps answering LEASE_NOT_STARTED for it, when
-	// the device was shared at its grant.
-	if s.unlistedShared(id) {
+	if s.sharedWith(r, e.device) || s.leases.holds(id, e.device) {
 		return e
 	}
 	return nil
-}
-
-// unlistedShared reports whether id is a reservation that has not started,
-// on a device not listed now that was in the shared pool when it was
-// reserved: a remote caller may still see it.
-func (s *Server) unlistedShared(id string) bool {
-	e := s.leases.lookup(id)
-	return e != nil && e.pending() && e.sharedAtGrant.Load() && !s.known(e.device)
 }
 
 func (s *Server) leaseGone(w http.ResponseWriter, id string) {
@@ -2288,6 +2259,7 @@ func (s *Server) runLeaseSweeper(ctx context.Context) {
 		case <-s.Done():
 			return
 		case <-t.C:
+			s.DeviceConfig() // also observe edits while only event subscribers are connected
 			s.sweepLeases()
 		}
 	}
@@ -2318,7 +2290,7 @@ func (s *Server) CheckBoot(r *http.Request, req daemon.BootRequest) *daemon.Erro
 	// A boot without a platform takes the one Boot infers, so a bare AVD
 	// name is android; a simulator's, or one naming both, is not.
 	platform := strings.ToLower(req.Platform)
-	if platform == "" && len(s.cfg.ShareConfig) > 0 {
+	if platform == "" && len(s.DeviceConfig().Shared) > 0 {
 		platform, _ = s.Registry().InferBootPlatform(req.Name)
 	}
 	if s.sharedInfo(daemon.DeviceInfo{ID: req.Name, Name: strings.TrimPrefix(req.Name, daemon.AVDPrefix), Platform: platform}) || s.shared(req.Name) {
