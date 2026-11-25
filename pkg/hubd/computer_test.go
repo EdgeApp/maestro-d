@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -15,7 +16,7 @@ var macDevice = daemon.DeviceInfo{ID: "mac", Platform: "macos", Kind: "computer"
 
 func TestLeases_ComputerLocalOnly(t *testing.T) {
 	ctx := context.Background()
-	for _, cfg := range []daemon.Config{{}, {ShareConfig: []string{"mac", "Demo Mac", "mock-1"}}} {
+	for _, cfg := range []daemon.Config{{}, {DeviceConfig: daemontest.DeviceConfig(t, "mac", "Demo Mac", "mock-1")}} {
 		env := newHubEnv(t, cfg)
 		env.mu.Lock()
 		env.phones = append(env.phones, macDevice)
@@ -27,7 +28,7 @@ func TestLeases_ComputerLocalOnly(t *testing.T) {
 		}
 		for _, d := range devs {
 			if d.ID == "mac" {
-				t.Fatalf("%v: remote listing has the computer", cfg.ShareConfig)
+				t.Fatalf("%v: remote listing has the computer", cfg.DeviceConfig)
 			}
 		}
 		_, err = env.remote.Device(ctx, "mac")

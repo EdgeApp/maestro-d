@@ -3,6 +3,7 @@ package hubd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -148,10 +149,10 @@ func newHubEnv(t *testing.T, cfg daemon.Config) *hubEnv {
 	}
 	env.s = &fixture{Server: &Server{}}
 	cfg.Hub, cfg.Token, cfg.HubName = env.s.Server, "t", "hubtest"
-	if cfg.ShareConfig == nil {
+	if cfg.DeviceConfig == "" {
 		// A hub shares only what it names: by default these tests share
 		// every device and AVD they list but Pixel_Private and the TV.
-		cfg.ShareConfig = hubEnvShared
+		daemontest.WriteDevices(t, daemon.DeviceConfigPath(""), hubEnvShared...)
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = ":7433"
@@ -1058,7 +1059,7 @@ func TestLeases_ListingsCarryLeaseState(t *testing.T) {
 }
 
 func TestLeases_ShareDevice(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"SIM-UP", "mock-2", "mock-9"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "SIM-UP", "mock-2", "mock-9")})
 	ctx := context.Background()
 	devs, _ := env.remote.Devices(ctx, "")
 	var ids []string
@@ -1112,7 +1113,7 @@ func TestLeases_ShareDevice(t *testing.T) {
 // leaves them out, and reading, renewing or releasing one is LEASE_EXPIRED,
 // as for an unknown lease, and leaves it alone. The unix socket sees them.
 func TestLeases_ShareDeviceHidesUnsharedLeases(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-2"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-2")})
 	ctx := context.Background()
 	private := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1"}).Lease
 	shared := env.lease(env.local, daemon.LeaseRequest{Device: "mock-2"}).Lease
@@ -1349,7 +1350,7 @@ func TestLeases_ByIDAfterAShutdownTeardownIsNotFound(t *testing.T) {
 // An emulator serial is reused by whichever AVD boots on its port next, so
 // a shared AVD's serial stays shared only while that AVD runs on it.
 func TestLeases_ShareDeviceEmulatorSerialReused(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Shared"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Pixel_Shared")})
 	ctx := context.Background()
 	env.mu.Lock()
 	env.emuAVD = "Pixel_Shared"
@@ -1380,7 +1381,7 @@ func TestLeases_ShareDeviceEmulatorSerialReused(t *testing.T) {
 // looks the serial up once: not per request and per event. Its stop
 // forgets the answer, and so does the time.
 func TestLeases_ShareDeviceLooksASerialUpOnce(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Shared", "SIM-UP"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Pixel_Shared", "SIM-UP")})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	env.mu.Lock()
@@ -1456,7 +1457,7 @@ func TestLeases_ShareDeviceLooksASerialUpOnce(t *testing.T) {
 // A remote caller's event stream carries only the shared pool's events,
 // without the host's report directory; the unix socket's carries all.
 func TestLeases_ShareDeviceEvents(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-2"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-2")})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := env.remote.Events(ctx, "mock-1", 0, func(daemon.Event) bool { return false })
@@ -1574,7 +1575,7 @@ func TestLeases_DeleteByNameNeedsTheLease(t *testing.T) {
 
 // A remote caller cannot delete an unshared device by its name either.
 func TestLeases_DeleteByNameOfAnUnsharedDevice(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-1"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-1")})
 	if err := recordCreated(daemon.CreatedRecord{Platform: "ios", ID: "SIM-UP", Name: "Shared Phone"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1587,7 +1588,7 @@ func TestLeases_HubRunSweepsAndListensEverywhere(t *testing.T) {
 	t.Setenv(daemon.EnvHome, t.TempDir())
 	var n int32
 	pr, pw := io.Pipe()
-	s := daemon.New(daemon.Config{Name: "hubrun", Hub: &Server{}, HubName: "named", ShareConfig: []string{"mock-1", "mock-2"}, HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
+	s := daemon.New(daemon.Config{Name: "hubrun", Hub: &Server{}, HubName: "named", DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2"), HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
 		ReportsDir: filepath.Join(t.TempDir(), "r")}, testDeps(&n, 0))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2620,10 +2621,10 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 		return env
 	}
 
-	for _, cfg := range []daemon.Config{{}, {ShareConfig: []string{"Lab TV", "mock-1"}}} {
+	for _, cfg := range []daemon.Config{{}, {DeviceConfig: daemontest.DeviceConfig(t, "Lab TV", "mock-1")}} {
 		env := withTV(cfg)
 		if got := remoteIDs(env); strings.Contains(got, "TV-1") || !strings.Contains(got, "mock-1") {
-			t.Fatalf("%+v: remote listing %s", cfg.ShareConfig, got)
+			t.Fatalf("%+v: remote listing %s", cfg.DeviceConfig, got)
 		}
 		if all, _ := env.local.Devices(ctx, ""); len(all) != 5 {
 			t.Fatalf("local listing: %d", len(all))
@@ -2647,7 +2648,7 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 	}
 
 	// Listed in config.json: shared, and every other device stays shared.
-	named := withTV(daemon.Config{ShareConfig: append(slices.Clone(hubEnvShared), "TV-1")})
+	named := withTV(daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, append(slices.Clone(hubEnvShared), "TV-1")...)})
 	if got := remoteIDs(named); got != "SIM-DOWN,SIM-UP,TV-1,mock-1,mock-2" {
 		t.Fatalf("named TV: remote listing %s", got)
 	}
@@ -2662,7 +2663,7 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 // answer comes from Deps.TVInfo, not the registry.
 func TestLeases_SharedTVNoDiscoveryPerRequest(t *testing.T) {
 	ctx := context.Background()
-	env := newHubEnv(t, daemon.Config{ShareConfig: append(slices.Clone(hubEnvShared), "TV-1")})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, append(slices.Clone(hubEnvShared), "TV-1")...)})
 	env.mu.Lock()
 	env.tv, env.tvKnown = true, true
 	env.mu.Unlock()
@@ -2763,3 +2764,105 @@ func TestLeases_GateFlushesAStream(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestLeases_HandEditKeepsTheHolder(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	ctx := context.Background()
+	id := "mock-1"
+	grant := env.lease(env.remote, daemon.LeaseRequest{Device: id, Attach: &daemon.AttachConfig{Platform: "mock"}}).Lease
+	if !env.s.shared(id) || !env.s.sharedIDs[id] {
+		t.Fatal("missing initial positive answer")
+	}
+	daemontest.WriteDevices(t, env.s.config.path, "mock-2")
+	env.s.config.snapshot(time.Now(), true)
+	if env.s.shared(id) {
+		t.Fatal("removed id stayed positive")
+	}
+	if _, err := env.remote.Command(ctx, id, "tapOn", "x", true); err != nil {
+		t.Fatal(err)
+	}
+	other := daemon.NewHTTPClient(env.remote.BaseURL(), "t", nil)
+	_, err := other.Device(ctx, id)
+	wantErrCode(t, err, daemon.CodeDeviceNotFound)
+	_, err = other.AcquireLease(ctx, daemon.LeaseRequest{Device: id})
+	wantErrCode(t, err, daemon.CodeDeviceNotFound)
+	if _, err = env.remote.ReleaseLease(ctx, grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	env.remote.SetLease(id, grant.ID)
+	_, err = env.remote.Device(ctx, id)
+	wantErrCode(t, err, daemon.CodeDeviceNotFound)
+}
+
+func TestLeases_HandEditKeepsSharedReservation(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	ctx := context.Background()
+	lease := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "mock-1", StartAt: env.at(time.Minute), TTLSec: 60})
+	daemontest.WriteDevices(t, env.s.config.path, "mock-2")
+	env.s.config.snapshot(time.Now(), true)
+	env.remote.SetLease(lease.Device, lease.ID)
+	_, err := env.remote.Command(ctx, lease.Device, "tapOn", "x", true)
+	wantErrCode(t, err, daemon.CodeLeaseNotStarted)
+	env.clock.advance(time.Minute)
+	if _, err := env.remote.Attach(ctx, lease.Device, daemon.AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.remote.Command(ctx, lease.Device, "tapOn", "x", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLeases_ShareTransitionEvents(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "SIM-UP")})
+	if !env.s.shared("mock-1") {
+		t.Fatal("initial share")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, env.remote.BaseURL()+"/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	stream, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatal(stream.Status)
+	}
+	data := []byte(`{"hubDevices":[{"id":"SIM-UP","description":"Lab"},{"id":"mock-2"},{"id":"offline"}]}`)
+	if err := os.WriteFile(env.s.config.path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.s.config.snapshot(time.Now(), true); err != nil {
+		t.Fatal(err)
+	}
+	env.s.Events().Publish(daemon.Event{Type: "step", Device: "mock-1", Message: "private"})
+	env.s.Events().Publish(daemon.Event{Type: "step", Device: "mock-2", Message: "end"})
+	events := map[string]int{}
+	scan := bufio.NewScanner(stream.Body)
+	for scan.Scan() {
+		payload, ok := strings.CutPrefix(scan.Text(), "data: ")
+		if !ok {
+			continue
+		}
+		var ev daemon.Event
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Device == "mock-1" && (ev.Type != "device.unshared" || ev.Message != "" || strings.Contains(payload, "PreviouslyShared")) {
+			t.Fatalf("remote event %s", payload)
+		}
+		if ev.Message == "end" {
+			break
+		}
+		events[ev.Device+"/"+ev.Type]++
+	}
+	if err := scan.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"mock-1/device.unshared", "SIM-UP/device.updated", "mock-2/device.shared", "offline/device.shared"} {
+		if events[key] != 1 {
+			t.Fatalf("events %v", events)
+		}
+	}
+}
