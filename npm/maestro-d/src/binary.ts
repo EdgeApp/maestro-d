@@ -42,7 +42,7 @@ function isExecutable(p: string): boolean {
 }
 
 /** The bundled platform package's binary, or undefined when not installed. */
-export function bundledBinary(): string | undefined {
+export function bundledBinary(name = 'maestro-d'): string | undefined {
   const pkg = PACKAGE_BY_TARGET[target()]
   if (!pkg) return undefined
   // Resolve the package's manifest rather than a main entry (it has none).
@@ -64,7 +64,7 @@ export function bundledBinary(): string | undefined {
     try {
       const resolver = createRequire(path.join(from, 'noop.js'))
       const manifest = resolver.resolve(`${pkg}/package.json`)
-      const bin = path.join(path.dirname(manifest), 'bin', 'maestro-d')
+      const bin = path.join(path.dirname(manifest), 'bin', name)
       if (isExecutable(bin)) return bin
     } catch {
       // not here
@@ -74,11 +74,11 @@ export function bundledBinary(): string | undefined {
 }
 
 /** First `maestro-d` on $PATH, or undefined. */
-export function pathBinary(): string | undefined {
+export function pathBinary(name = 'maestro-d'): string | undefined {
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
   for (const dir of dirs) {
-    const p = path.join(dir, 'maestro-d')
-    if (isExecutable(p)) return p
+    const p = path.join(dir, name)
+    if (isExecutable(p) && (!process.argv[1] || realPath(p) !== realPath(process.argv[1]))) return p
   }
   return undefined
 }
@@ -88,25 +88,33 @@ export function pathBinary(): string | undefined {
  * actionable message when none can be found.
  */
 export function binaryPath(explicit?: string): string {
-  const env = process.env[ENV_BIN]
-  const chosen = explicit || env
+  return resolveBinary('maestro-d', ENV_BIN, explicit)
+}
+
+/** Absolute path of the hub executable distributed beside the client. */
+export function hubBinary(explicit?: string): string {
+  return resolveBinary('maestro-d-hub', 'MAESTRO_D_HUB_BIN', explicit)
+}
+
+function resolveBinary(name: string, envName: string, explicit?: string): string {
+  const chosen = explicit || process.env[envName]
   if (chosen) {
     if (!isExecutable(chosen)) {
-      throw MaestroError.of('DAEMON_UNAVAILABLE', `${explicit ? 'bin' : ENV_BIN} ${chosen} is not an executable file`)
+      throw MaestroError.of('DAEMON_UNAVAILABLE', `${explicit ? 'bin' : envName} ${chosen} is not an executable file`)
     }
     return chosen
   }
-  const bundled = bundledBinary()
+  const bundled = bundledBinary(name)
   if (bundled) return bundled
-  const onPath = pathBinary()
+  const onPath = pathBinary(name)
   if (onPath) return onPath
   const pkg = PACKAGE_BY_TARGET[target()]
   throw MaestroError.of(
     'DAEMON_UNAVAILABLE',
     pkg
-      ? `maestro-d binary not found: install ${pkg} (it is an optional dependency of maestro-d; ` +
-          `installs with --no-optional skip it), put maestro-d on PATH, or set ${ENV_BIN}`
-      : `maestro-d has no prebuilt binary for ${target()}; build it from source ` +
-          `(go build -o maestro-d .) and set ${ENV_BIN} or put it on PATH`,
+      ? `${name} binary not found: install ${pkg} (it is an optional dependency of maestro-d; ` +
+          `installs with --no-optional skip it), put ${name} on PATH, or set ${envName}`
+      : `${name} has no prebuilt binary for ${target()}; build it from source ` +
+          `(go build -o ${name} ./cmd/${name}) and set ${envName} or put it on PATH`,
   )
 }

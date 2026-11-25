@@ -1067,6 +1067,7 @@ set to the root's directory for the whole call, hooks included). The flow runs a
 `onFlowStart`/`onFlowComplete` hooks, the flow's own `env`, `runFlow`
 relative to `cwd` or the file's directory — inside the device's session,
 so the session's variables are visible to it and `output.*` it sets stay.
+The optional `defaultAppId` supplies the suite’s app ID to a child flow that omits both `appId` and `url`. The hub test runner submits each suite case separately so every case has its own result and can be retried.
 The response is one step result of type `runFlow` whose `subSteps` are the
 flow's steps.
 

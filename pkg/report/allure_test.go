@@ -493,7 +493,7 @@ func TestAllureCopyAttachments(t *testing.T) {
 		}},
 	}
 
-	copyAllureAttachments(reportDir, allureDir, flows)
+	CopyAllureAttachments(reportDir, allureDir, flows)
 
 	// Check file was copied
 	copied, err := os.ReadFile(filepath.Join(allureDir, "cmd-000-after.png"))
@@ -944,7 +944,7 @@ func TestAllureCopyAttachmentsWithSubcommands(t *testing.T) {
 		}},
 	}
 
-	copyAllureAttachments(reportDir, allureDir, flows)
+	CopyAllureAttachments(reportDir, allureDir, flows)
 
 	// Both files should be copied flat
 	if _, err := os.Stat(filepath.Join(allureDir, "cmd-000-before.png")); err != nil {

@@ -9,7 +9,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
-	"github.com/devicelab-dev/maestro-runner/pkg/cli/hubcmd"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
@@ -35,7 +35,7 @@ var gcCommand = &cli.Command{
 		"MAESTRO_D_HOME (default ~/.maestro-d), without starting a daemon.\n\n" + common.FlagHelp("", gcFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(gcFlags, func(_ context.Context, o *daemonOpts, _ []string) error {
-		res := daemon.Sweep(daemon.Home(), daemon.SweepOptions{DryRun: o.DryRun, KeepRunDir: hubcmd.ServiceInstalled})
+		res := daemon.Sweep(daemon.Home(), daemon.SweepOptions{DryRun: o.DryRun})
 		if o.IncludeBuildCache {
 			for _, dir := range gcBuildCacheDirs {
 				for _, p := range xcodecache.PruneBuildCache(filepath.Join(config.GetCacheDir(), dir), "", xcodecache.DefaultMaxAge, o.DryRun) {
