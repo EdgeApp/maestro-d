@@ -113,7 +113,7 @@ func TestTrafficShape_ErrorCodes(t *testing.T) {
 		code string
 	}{
 		{fmt.Errorf("%w for phone-1 on this host", netshape.ErrNotConfigured), codeUnsupported},
-		{&netshape.ConfigError{Path: "/h/network.json", Err: errors.New("mode 0644")}, codeUsage},
+		{&netshape.ConfigError{Path: "/h/config.json", Err: errors.New("mode 0644")}, codeUsage},
 		{&netshape.FetchError{Command: "setTrafficShape", Method: "POST", URL: "http://s/", Status: 500, Excerpt: "boom"}, ""},
 	} {
 		sh := &stubShaper{err: c.err}

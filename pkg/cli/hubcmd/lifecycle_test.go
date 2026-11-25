@@ -14,10 +14,10 @@ import (
 func TestHubStart_Helpers(t *testing.T) {
 	t.Setenv(daemon.EnvHome, t.TempDir())
 	o := &daemonOpts{Name: "hub", HTTPAddr: ":7433", TLSCert: "c.pem", TLSKey: "k.pem", PassEnv: []string{"A"},
-		hub: hubOpts{name: "lab-a", share: []string{"x", "y"}, remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
+		hub: hubOpts{name: "lab-a", remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
 			advertise: "10.0.0.1:7433", peerCA: "ca.pem", peerToken: "p3er"}}
 	args := strings.Join(hubChildArgs(o), " ")
-	for _, want := range []string{"start --foreground --name lab-a --listen :7433", "--share-device x --share-device y",
+	for _, want := range []string{"start --foreground --name lab-a --listen :7433",
 		"--allow-remote-shell", "--pass-env A", "--tls-cert /", "--peer hub-b:7433", "--no-mdns", "--advertise 10.0.0.1:7433", "--peer-ca /"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("child args %q lack %q", args, want)
