@@ -36,6 +36,7 @@ const (
 type Registry struct {
 	mu      sync.Mutex
 	name    string
+	runDir  string
 	records map[string]*DeviceInfo
 	sim     *simulator.Manager
 	emu     *emulator.Manager
@@ -56,6 +57,7 @@ type Registry struct {
 func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry {
 	r := &Registry{
 		name:    name,
+		runDir:  RunDir(name),
 		records: map[string]*DeviceInfo{},
 		sim:     simulator.NewManager(),
 		emu:     emulator.NewManager(),
@@ -193,11 +195,11 @@ func (r *Registry) persistLocked() {
 	if r.name == "" {
 		return
 	}
-	if err := os.MkdirAll(RunDir(r.name), 0o700); err != nil {
+	if err := os.MkdirAll(r.runDir, 0o700); err != nil {
 		logger.Warn("devices.json: %v", err)
 		return
 	}
-	if err := atomicWriteJSON(DevicesPath(r.name), r.snapshotLocked()); err != nil {
+	if err := atomicWriteJSON(filepath.Join(r.runDir, devicesFile), r.snapshotLocked()); err != nil {
 		logger.Warn("devices.json: %v", err)
 	}
 }
@@ -547,7 +549,7 @@ func StopOrphans(ctx context.Context, opts OrphanOptions) (*OrphanResult, error)
 		}
 		for _, dev := range d.Devices {
 			// The ledger pass below owns cloud devices.
-			if dev.BootedBy != BootedByDaemon || dev.Provider != "" {
+			if dev.BootedBy != BootedByDaemon || dev.Provider != "" || FindDeviceOwner(dev.ID, d.Name) != nil {
 				continue
 			}
 			if err := shutdownDevice(dev); err != nil {

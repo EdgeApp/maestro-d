@@ -17,7 +17,7 @@ func TestHubStart_Helpers(t *testing.T) {
 		hub: hubOpts{name: "lab-a", share: []string{"x", "y"}, remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
 			advertise: "10.0.0.1:7433", peerCA: "ca.pem", peerToken: "p3er"}}
 	args := strings.Join(hubChildArgs(o), " ")
-	for _, want := range []string{"hub start --foreground --daemon hub --name lab-a --listen :7433", "--share-device x --share-device y",
+	for _, want := range []string{"start --foreground --name lab-a --listen :7433", "--share-device x --share-device y",
 		"--allow-remote-shell", "--pass-env A", "--tls-cert /", "--peer hub-b:7433", "--no-mdns", "--advertise 10.0.0.1:7433", "--peer-ca /"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("child args %q lack %q", args, want)
@@ -48,11 +48,6 @@ func TestHubStart_Helpers(t *testing.T) {
 	}
 	if _, err := hubToken(&daemonOpts{}); err == nil {
 		t.Fatal("no token")
-	}
-	o = &daemonOpts{explicit: map[string]bool{}}
-	hubName(o)
-	if o.Name != DefaultHubDaemon {
-		t.Fatal(o.Name)
 	}
 	if err := runHubStart(context.Background(), &daemonOpts{Token: "t", TLSCert: "c", explicit: map[string]bool{}}, nil); err == nil {
 		t.Fatal("--tls-cert without --tls-key")

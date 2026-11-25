@@ -25,8 +25,8 @@ func TestE2E_HubStream(t *testing.T) {
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-9"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-1"}
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", "ss-hub-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", "ss-hub-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "hs-tok", "--peer-token", "hs-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -39,8 +39,8 @@ func TestE2E_HubStream(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "ss-hub-b", "--name", "hub-b", "--share-device", "mock-1"}, mesh...)...))
-	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "ss-hub-a", "--name", "hub-a", "--peer", b.HTTPAddr}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--share-device", "mock-1"}, mesh...)...))
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--peer", b.HTTPAddr}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + a.HTTPAddr, "MAESTRO_D_TOKEN=hs-tok"}
 	out := filepath.Join(e.cwd, "hub-stream.mp4")
 
@@ -61,7 +61,7 @@ func TestE2E_HubStream(t *testing.T) {
 		t.Fatalf("stream through the mesh: exit %d\n%s", r.code, r.stderr)
 	}
 	videoOf(t, out, 30)
-	data := readFile(t, filepath.Join(homeA, "run", "ss-hub-a", "daemon.log"))
+	data := readFile(t, filepath.Join(homeA, "hub", "run", "daemon.log"))
 	if !strings.Contains(data, "bulk link to hub-b for GET /v1/devices/mock-1@hub-b/stream") {
 		t.Fatalf("hub a's log has no bulk link for the stream:\n%s", data)
 	}

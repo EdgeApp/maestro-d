@@ -25,12 +25,15 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/fsage"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
 // Config configures a daemon process.
 type Config struct {
-	Name string
+	// HubProcess selects the singleton hub runtime instead of a named daemon.
+	HubProcess bool
+	Name       string
 	// KeepRunDir names run directories the housekeeping sweep never removes
 	// whole (a daemon with an installed launchd service); nil keeps none.
 	KeepRunDir func(name string) bool
@@ -154,7 +157,7 @@ func New(cfg Config, deps Deps) *Server {
 		cfg.Name = DefaultName
 	}
 	if cfg.ReportsDir == "" {
-		cfg.ReportsDir = ReportsDir(cfg.Name)
+		cfg.ReportsDir = filepath.Join(cfg.RunDir(), reportsDirName)
 	}
 	if cfg.BlobsDir == "" {
 		cfg.BlobsDir = DefaultBlobRoot()
@@ -176,6 +179,7 @@ func New(cfg Config, deps Deps) *Server {
 		attaching:      map[string]chan struct{}{},
 		done:           make(chan struct{}),
 	}
+	s.registry.runDir = cfg.RunDir()
 	s.registry.deps = deps
 	if deps.BootDevice != nil {
 		s.registry.boot = deps.BootDevice
@@ -215,8 +219,7 @@ func (s *Server) listenerHandler(tcp bool) http.Handler {
 	return s.routes(tcp)
 }
 
-// checkListen refuses a TCP listener that would let anyone in: a hub, or a
-// --http address beyond loopback, needs a token; TLS needs both files.
+// checkListen validates the client daemon and hub listener policies before binding.
 func (s *Server) checkListen() *Error {
 	if s.cfg.HTTPAddr == "" {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
@@ -224,7 +227,13 @@ func (s *Server) checkListen() *Error {
 		}
 		return nil
 	}
-	if s.cfg.Token == "" && (s.cfg.Hub != nil || !isLoopbackListen(s.cfg.HTTPAddr)) {
+	if s.cfg.Hub == nil {
+		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
+			return Errorf(CodeUsage, "--tls-cert and --tls-key were removed from maestro-d serve; use maestro-d-hub start")
+		}
+		return CheckLocalListen(s.cfg.HTTPAddr)
+	}
+	if s.cfg.Token == "" {
 		return Errorf(CodeUsage, "listening on %s, beyond loopback, needs --token (MAESTRO_D_TOKEN)", s.cfg.HTTPAddr)
 	}
 	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
@@ -251,22 +260,31 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
-	if err := os.MkdirAll(RunDir(s.cfg.Name), 0o700); err != nil {
+	if err := os.MkdirAll(s.cfg.RunDir(), 0o700); err != nil {
 		return err
 	}
 	// The run-dir lock, held until Run returns, is what makes this the one
 	// daemon of its name: daemon.json alone is not, since a hub writes it
 	// only once its mesh has started, seconds after it binds the socket.
 	// A second start in that window must not remove the socket.
-	lock, err := lockRunDir(LockPath(s.cfg.Name))
-	if errors.Is(err, errRunLocked) {
+	var lock *os.File
+	var err error
+	if s.cfg.HubProcess {
+		lock, err = fsage.TryHubLock(Home())
+	} else {
+		lock, err = fsage.TryLockFile(LockPath(s.cfg.Name))
+	}
+	if errors.Is(err, fsage.ErrLocked) {
+		if s.cfg.HubProcess {
+			return Errorf(CodeHubRunning, "a hub is already running in %s", Home())
+		}
 		return Errorf(CodeDaemonUnavailable, "daemon %q is already running or starting (another process holds %s)", s.cfg.Name, LockPath(s.cfg.Name))
 	}
 	if err != nil {
 		return err
 	}
-	defer unlockRunDir(lock)
-	if live, _ := LiveInfo(s.cfg.Name); live != nil {
+	defer fsage.UnlockFile(lock)
+	if live, _ := readInfoAt(s.cfg.RunDir()); !s.cfg.HubProcess && live != nil && PIDAlive(live.PID) {
 		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
 	}
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
@@ -279,6 +297,15 @@ func (s *Server) Run(ctx context.Context) error {
 	defer stopHousekeeping()
 	go s.housekeep(hkCtx)
 	sockPath := SocketPath(s.cfg.Name)
+	if s.cfg.HubProcess {
+		sockPath, err = hubSocketPath()
+		if err != nil {
+			return err
+		}
+		if dir := filepath.Dir(sockPath); dir != s.cfg.RunDir() {
+			defer os.Remove(dir)
+		}
+	}
 	_ = os.Remove(sockPath)
 	unixLn, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -291,10 +318,10 @@ func (s *Server) Run(ctx context.Context) error {
 	httpAddr := ""
 	if s.cfg.HTTPAddr != "" {
 		addr := s.cfg.HTTPAddr
-		// `serve --http :port` means loopback; a hub's --listen :port binds
-		// every interface.
-		if strings.HasPrefix(addr, ":") && s.cfg.Hub == nil {
-			addr = "127.0.0.1" + addr
+		if s.cfg.Hub == nil {
+			if host, port, err := net.SplitHostPort(addr); err == nil && strings.EqualFold(host, "localhost") {
+				addr = net.JoinHostPort("127.0.0.1", port)
+			}
 		}
 		tcpLn, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -319,7 +346,7 @@ func (s *Server) Run(ctx context.Context) error {
 		HTTPAddr:    httpAddr,
 		StartedAt:   s.startedAt.Format(time.RFC3339),
 		StartArgs:   s.cfg.StartArgs,
-		RunDir:      RunDir(s.cfg.Name),
+		RunDir:      s.cfg.RunDir(),
 		ReportsDir:  s.cfg.ReportsDir,
 		IdleTimeout: int(s.cfg.IdleTimeout / time.Second),
 		TLS:         tlsConfig != nil,
@@ -438,7 +465,9 @@ func (s *Server) Shutdown(reason string) {
 			s.detachAll()
 			s.releaseAllRemote("daemon-exit")
 			s.registry.ShutdownOwned()
-			RemoveRunFiles(s.cfg.Name)
+			_ = os.Remove(s.info.SocketPath)
+			_ = os.Remove(filepath.Join(s.cfg.RunDir(), infoFile))
+			_ = os.Remove(filepath.Join(s.cfg.RunDir(), devicesFile))
 			// Close listeners after cleanup so a `stop` caller can still
 			// read its response; give in-flight responses a moment.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -579,7 +608,7 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 		w.Header().Set("X-Maestro-Api-Version", APIVersion)
 		clientOutputs := r.Header.Get(HeaderClientOutputs) != ""
 		if tcp {
-			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr, ClientOutputs: clientOutputs}))
+			r = r.WithContext(withCaller(r.Context(), s.tcpCaller(r.RemoteAddr, clientOutputs)))
 		} else if clientOutputs {
 			r = r.WithContext(withCaller(r.Context(), Caller{ClientOutputs: true}))
 		}
@@ -679,7 +708,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	devs := s.visible(r, s.registry.List(q.Platform))
 	if s.cfg.Hub == nil {
-		annotateAvailable(devs, OtherOwners(s.cfg.Name))
+		annotateAvailable(devs, s.cfg.OtherOwners())
 	}
 	SetLocations(devs, s.callerMachine(r))
 	s.decorateCloud(devs)
@@ -792,19 +821,15 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, e)
 		return
 	}
-	if CallerFrom(r.Context()).Remote {
-		if e := CheckRemoteAttach(&cfg); e != nil {
-			s.LogForbidden(r, e)
-			WriteError(w, e)
-			return
-		}
-	}
 	attach := s.AttachDevice
 	if hub := s.cfg.Hub; hub != nil {
 		attach = hub.Attach
 	}
 	device, e := attach(r.Context(), id, &cfg)
 	if e != nil {
+		if e.Code == CodeForbidden {
+			s.LogForbidden(r, e)
+		}
 		WriteError(w, e)
 		return
 	}
@@ -1276,6 +1301,9 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
+	if req.Bundle != nil {
+		logger.Info("Running flow bundle %q on %s", req.Bundle.Root, a.id)
+	}
 	out := a.session.RunFlow(ctx, *f)
 	res := ResultFromOutcome(a.id, a.reportDir, out)
 	s.cloudResult(&res)

@@ -52,7 +52,7 @@ func attachRemote(t *testing.T, env *callerEnv) string {
 }
 
 func TestBundle_FlowRunsInsideTheBundle(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	m := bundleOf(t, env, "main.yaml", map[string]string{
@@ -98,7 +98,7 @@ func TestBundle_FlowRunsInsideTheBundle(t *testing.T) {
 }
 
 func TestBundle_StepListRootBelowCommonDir(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	attachRemote(t, env)
 	m := bundleOf(t, env, "flows/steps.yaml", map[string]string{
@@ -137,7 +137,7 @@ func TestBundle_StepListRootBelowCommonDir(t *testing.T) {
 }
 
 func TestBundle_PolicyStillApplies(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	attachRemote(t, env)
 	shell := bundleOf(t, env, "runShell.yaml", map[string]string{"runShell.yaml": "- runShell: echo x\n"})
@@ -157,7 +157,7 @@ func TestBundle_PolicyStillApplies(t *testing.T) {
 }
 
 func TestBundle_ManifestValidation(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	good := strings.Repeat("a", 64)
@@ -216,7 +216,7 @@ func TestBundle_ManifestValidation(t *testing.T) {
 }
 
 func TestBundle_RefsInOneShots(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	m := bundleOf(t, env, "sub/open.yaml", map[string]string{

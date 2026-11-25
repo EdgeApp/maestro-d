@@ -5,7 +5,7 @@
 #   curl -fsSL …/install.sh | bash -s -- --version 2.0.0   # a release other than the latest
 #   curl -fsSL …/install.sh | bash -s -- uninstall
 #
-# maestro-d goes into ~/.maestro-d (bin/maestro-d and drivers/, the home the
+# maestro-d goes into ~/.maestro-d (bin/maestro-d, bin/maestro-d-hub and drivers/, the home the
 # binary resolves from its own path, the same one `make build` installs to),
 # and a maestro-d link goes into the first of /usr/local/bin and
 # /opt/homebrew/bin that is writable, else ~/.local/bin. No sudo. An upgrade
@@ -14,8 +14,8 @@
 #
 # Options: --version <x.y.z>  a release other than the latest
 #          --prefix <dir>     install somewhere other than ~/.maestro-d
-#          --bin-dir <dir>    put the maestro-d link there
-#          uninstall          remove the program and its link, keep cache/
+#          --bin-dir <dir>    put the client and hub links there
+#          uninstall          remove the programs and their links, keep cache/
 #
 # MAESTRO_D_REPO picks another repository (default EdgeApp/maestro-d), and
 # MAESTRO_D_RELEASE_URL a directory holding SHA256SUMS and the tarballs.
@@ -51,9 +51,11 @@ pick_bindir() {
 
 if [[ $uninstall == 1 ]]; then
   for d in "$bindir" /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin"; do
-    [[ -n $d && -L $d/maestro-d && $(readlink "$d/maestro-d") == "$prefix/bin/maestro-d" ]] || continue
-    rm -f "$d/maestro-d"
-    echo "Removed $d/maestro-d"
+    for cmd in maestro-d maestro-d-hub; do
+      [[ -n $d && -L $d/$cmd && $(readlink "$d/$cmd") == "$prefix/bin/$cmd" ]] || continue
+      rm -f "$d/$cmd"
+      echo "Removed $d/$cmd"
+    done
   done
   rm -rf "$prefix/bin" "$prefix/drivers" "$prefix/LICENSE"
   echo "Removed maestro-d from $prefix (kept its cache/ and run files; delete $prefix to remove them too)"
@@ -102,14 +104,16 @@ fi
 
 tar -xzf "$work/$tarball" -C "$work"
 src=$work/${tarball%.tar.gz}
-[[ -x $src/bin/maestro-d && -d $src/drivers ]] || fail "$tarball is not a maestro-d build"
+[[ -x $src/bin/maestro-d && -x $src/bin/maestro-d-hub && -d $src/drivers ]] || fail "$tarball is not a maestro-d build"
 
-# Replace bin/maestro-d by a rename, never by writing over it: a daemon
+# Replace each executable by rename: a daemon
 # running the old binary keeps its file, and macOS kills a process whose
 # signed executable changes under it. drivers/ is swapped the same way.
 mkdir -p "$prefix/bin"
-cp "$src/bin/maestro-d" "$prefix/bin/.maestro-d.new"
-mv -f "$prefix/bin/.maestro-d.new" "$prefix/bin/maestro-d"
+for cmd in maestro-d maestro-d-hub; do
+  cp "$src/bin/$cmd" "$prefix/bin/.$cmd.new"
+  mv -f "$prefix/bin/.$cmd.new" "$prefix/bin/$cmd"
+done
 rm -rf "$prefix/.drivers.new" "$prefix/.drivers.old"
 cp -R "$src/drivers" "$prefix/.drivers.new"
 if [[ -d $prefix/drivers ]]; then mv "$prefix/drivers" "$prefix/.drivers.old"; fi
@@ -119,10 +123,12 @@ cp "$src/LICENSE" "$prefix/LICENSE"
 
 link_dir=$(pick_bindir)
 mkdir -p "$link_dir"
-ln -sfn "$prefix/bin/maestro-d" "$link_dir/maestro-d"
+for cmd in maestro-d maestro-d-hub; do
+  ln -sfn "$prefix/bin/$cmd" "$link_dir/$cmd"
+done
 
 echo "Installed $("$prefix/bin/maestro-d" --version | head -1) in $prefix"
-echo "Linked $link_dir/maestro-d"
+echo "Linked maestro-d and maestro-d-hub in $link_dir"
 case ":$PATH:" in
   *":$link_dir:"*) ;;
   *) echo "Add $link_dir to your PATH:  export PATH=\"$link_dir:\$PATH\"" ;;

@@ -36,7 +36,8 @@ const (
 	CodeCommandFailed Code = "COMMAND_FAILED"
 	// CodeUsage: unknown command, bad flags, unparsable step/YAML, unknown
 	// device, bad request body. Exit 2 / HTTP 400.
-	CodeUsage Code = "USAGE"
+	CodeUsage      Code = "USAGE"
+	CodeHubRunning Code = "HUB_RUNNING"
 	// CodeDaemonUnavailable: could not connect to or spawn the daemon, API
 	// version mismatch, daemon shutting down. Exit 3 / HTTP 503.
 	CodeDaemonUnavailable Code = "DAEMON_UNAVAILABLE"
@@ -100,7 +101,7 @@ const (
 
 // Codes lists every code, for tables and tests.
 var Codes = []Code{
-	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeCommandFailed, CodeUsage, CodeHubRunning, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
 	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted, CodeCaptureUnavailable, CodeUnsupported,
@@ -113,7 +114,7 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
+	case CodeUsage, CodeHubRunning, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
@@ -134,6 +135,8 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK
 	case CodeCommandFailed:
 		return http.StatusUnprocessableEntity
+	case CodeHubRunning:
+		return http.StatusConflict
 	case CodeUsage:
 		return http.StatusBadRequest
 	case CodeDaemonUnavailable, CodePeerUnavailable, CodeCaptureUnavailable:

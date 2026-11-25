@@ -81,7 +81,7 @@ npm/**/node_modules/
 # maestro-d build outputs (the binary at the repo root and the npm
 # packages assembled by npm/build-maestro-d-npm.sh).
 /maestro-d
-maestro-d-*
+/maestro-d-*
 npm/dist-maestro-d/
 
 # Python helper bytecode

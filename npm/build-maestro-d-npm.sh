@@ -8,7 +8,7 @@
 # separate release pipeline to consume. Output:
 #
 #   npm/platforms/maestro-d-<os>-<arch>/   one package per target with
-#       bin/maestro-d, drivers/ and LICENSE — the layout the binary
+#       bin/maestro-d, bin/maestro-d-hub, drivers/ and LICENSE — the layout the binary
 #       resolves its home from (<home>/bin/maestro-d → <home>/drivers)
 #   npm/maestro-d/                         version stamped into
 #       package.json and its optionalDependencies, dist/ built
@@ -70,7 +70,7 @@ for target in $TARGETS; do
     echo "Building $pkg"
     mkdir -p "$dest/bin"
     (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$go_os" GOARCH="$go_arch" \
-        go build -trimpath -ldflags "$LDFLAGS" -o "$dest/bin/maestro-d" .)
+        go build -trimpath -ldflags "$LDFLAGS" -o "$dest/bin/" ./cmd/maestro-d ./cmd/maestro-d-hub)
 
     # The binary finds drivers at <home>/drivers, and its home is the parent
     # of its bin/ directory — the package itself.
@@ -82,7 +82,7 @@ for target in $TARGETS; do
 {
   "name": "$pkg",
   "version": "$VERSION",
-  "description": "maestro-d binary for ${node_os} ${node_arch}. Installed automatically as an optional dependency of maestro-d.",
+  "description": "maestro-d client and hub binaries for ${node_os} ${node_arch}. Installed automatically as an optional dependency of maestro-d.",
   "homepage": "https://github.com/EdgeApp/maestro-d",
   "repository": {
     "type": "git",

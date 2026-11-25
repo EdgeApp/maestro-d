@@ -16,9 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloud"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
 	appiumdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/appium"
 	cdpdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/browser/cdp"
@@ -72,6 +74,9 @@ Examples:
   # Custom output directory
   maestro-runner test --output ./my-reports --flatten flows/`,
 	Flags: []cli.Flag{
+		&cli.StringFlag{Name: "target-hub", Usage: "Run the flows on a leased device on a hub (--target-hub[=HOST[:PORT]])", EnvVars: []string{"MAESTRO_D_HUB"}},
+		&cli.StringFlag{Name: "token", Usage: "Bearer token for the target hub", EnvVars: []string{"MAESTRO_D_TOKEN"}},
+		&cli.StringFlag{Name: "ca", Usage: "Trust this PEM certificate for the target hub", EnvVars: []string{"MAESTRO_D_CA"}},
 		// Configuration
 		&cli.StringFlag{
 			Name:  "config",
@@ -815,6 +820,19 @@ func runTest(c *cli.Context) error {
 		}
 	}
 
+	if target := getString("target-hub"); target != "" {
+		ctx, cancel := common.SignalContext()
+		defer cancel()
+		opts := daemonOpts{Target: target, Token: getString("token"), CAFile: getString("ca"), Verbose: cfg.Verbose}
+		opts.Attach.Platform, opts.Attach.AppID, opts.Attach.AppFile = cfg.Platform, cfg.AppID, cfg.AppFile
+		opts.Attach.Env, opts.Attach.TeamID = cfg.Env, cfg.TeamID
+		err := runHubTest(ctx, cfg, opts)
+		var remoteErr *daemon.Error
+		if errors.As(err, &remoteErr) {
+			return common.FinishErr(remoteErr, false)
+		}
+		return err
+	}
 	return executeTest(cfg)
 }
 
