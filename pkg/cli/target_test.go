@@ -209,12 +209,3 @@ func TestFlagSet_ListsAFlagOnce(t *testing.T) {
 		}
 	}
 }
-
-func TestServeFlags_TLSAndPassEnv(t *testing.T) {
-	clearTargetEnv(t)
-	o, _ := parseFor(t, serveFlags, "--http", "0.0.0.0:7433", "--token", "t", "--tls-cert", "c.pem", "--tls-key", "k.pem",
-		"--pass-env", "A", "--pass-env", "B")
-	if o.TLSCert != "c.pem" || o.TLSKey != "k.pem" || strings.Join(o.PassEnv, ",") != "A,B" || o.HTTPAddr != "0.0.0.0:7433" {
-		t.Fatalf("%+v", o)
-	}
-}

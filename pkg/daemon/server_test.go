@@ -81,6 +81,45 @@ func codeOf(t *testing.T, err error) Code {
 	return de.Code
 }
 
+// The attachment publishes the app version and build the driver read, so a
+// hub test's client report matches a local run's; detach clears them.
+func TestServer_AttachReportsAppVersionAndBuild(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	var cleanups int32
+	deps := testDeps(&cleanups, 0)
+	base := deps.NewDriver
+	deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
+		d, info, cleanup, err := base(ctx, id, cfg)
+		info.App.Version, info.App.Build = "4.2.0", "420"
+		return d, info, cleanup, err
+	}
+	s := New(Config{Name: "test-app-version", ReportsDir: filepath.Join(t.TempDir(), "reports")}, deps)
+	s.info = Info{Name: s.cfg.Name, PID: os.Getpid(), APIVersion: APIVersion, Version: "test"}
+	hs := httptest.NewServer(s.Handler())
+	t.Cleanup(hs.Close)
+	c := NewHTTPClient(hs.URL, "", nil)
+	ctx := context.Background()
+	attached, err := c.Attach(ctx, "mock-1", AttachConfig{Platform: "mock", AppID: "com.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := c.Device(ctx, "mock-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range []*DeviceInfo{attached, listed} {
+		if info.AppID != "com.example" || info.AppVersion != "4.2.0" || info.AppBuild != "420" || info.Driver != "mock" {
+			t.Fatalf("%+v", info)
+		}
+	}
+	if err := c.Detach(ctx, "mock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if listed, err = c.Device(ctx, "mock-1"); err != nil || listed.AppVersion != "" || listed.AppBuild != "" {
+		t.Fatalf("%v %+v", err, listed)
+	}
+}
+
 func TestServer_StatusAndDevices(t *testing.T) {
 	env := newTestEnv(t, 0)
 	ctx := context.Background()
@@ -527,7 +566,7 @@ func TestCodes_Table(t *testing.T) {
 		{CodeDeviceNotFound, 4, 404}, {CodeDeviceNotAttached, 2, 404}, {CodeInterrupted, 130, 499}, {CodeInternal, 4, 500},
 		{CodeForbidden, 2, 403}, {CodePeerUnavailable, 3, 503}, {CodeHubNameTaken, 5, 409}, {CodeHubVersion, 5, 409},
 		{CodeLeaseRequired, 5, 409}, {CodeLeaseExpired, 5, 409}, {CodeLeaseNotStarted, 5, 409}, {CodeCaptureUnavailable, 4, 503},
-		{CodeUnsupported, 2, 501},
+		{CodeUnsupported, 2, 501}, {CodeHubRunning, 2, 409},
 	}
 	if len(cases)-1 != len(Codes) {
 		t.Fatalf("the table covers %d codes, Codes has %d", len(cases)-1, len(Codes))

@@ -36,6 +36,7 @@ const (
 type Registry struct {
 	mu      sync.Mutex
 	name    string
+	runDir  string
 	records map[string]*DeviceInfo
 	sim     *simulator.Manager
 	emu     *emulator.Manager
@@ -56,6 +57,7 @@ type Registry struct {
 func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry {
 	r := &Registry{
 		name:    name,
+		runDir:  RunDir(name),
 		records: map[string]*DeviceInfo{},
 		sim:     simulator.NewManager(),
 		emu:     emulator.NewManager(),
@@ -108,6 +110,8 @@ func (r *Registry) List(platform string) []DeviceInfo {
 			d.Attached = rec.Attached
 			d.AttachedAt = rec.AttachedAt
 			d.AppID = rec.AppID
+			d.AppVersion = rec.AppVersion
+			d.AppBuild = rec.AppBuild
 			d.Driver = rec.Driver
 			d.ReportDir = rec.ReportDir
 			d.Busy = rec.Busy
@@ -193,11 +197,11 @@ func (r *Registry) persistLocked() {
 	if r.name == "" {
 		return
 	}
-	if err := os.MkdirAll(RunDir(r.name), 0o700); err != nil {
+	if err := os.MkdirAll(r.runDir, 0o700); err != nil {
 		logger.Warn("devices.json: %v", err)
 		return
 	}
-	if err := atomicWriteJSON(DevicesPath(r.name), r.snapshotLocked()); err != nil {
+	if err := atomicWriteJSON(filepath.Join(r.runDir, devicesFile), r.snapshotLocked()); err != nil {
 		logger.Warn("devices.json: %v", err)
 	}
 }
@@ -223,6 +227,8 @@ func (r *Registry) MarkAttached(info DeviceInfo) {
 	rec.Attached = true
 	rec.AttachedAt = nowRFC3339()
 	rec.AppID = info.AppID
+	rec.AppVersion = info.AppVersion
+	rec.AppBuild = info.AppBuild
 	rec.Driver = info.Driver
 	rec.ReportDir = info.ReportDir
 	rec.Busy = false
@@ -241,6 +247,8 @@ func (r *Registry) MarkDetached(id string) {
 	rec.Attached = false
 	rec.AttachedAt = ""
 	rec.AppID = ""
+	rec.AppVersion = ""
+	rec.AppBuild = ""
 	rec.Driver = ""
 	rec.Busy = false
 	if rec.BootedBy != BootedByDaemon {
@@ -547,7 +555,7 @@ func StopOrphans(ctx context.Context, opts OrphanOptions) (*OrphanResult, error)
 		}
 		for _, dev := range d.Devices {
 			// The ledger pass below owns cloud devices.
-			if dev.BootedBy != BootedByDaemon || dev.Provider != "" {
+			if dev.BootedBy != BootedByDaemon || dev.Provider != "" || FindDeviceOwner(dev.ID, d.Name) != nil {
 				continue
 			}
 			if err := shutdownDevice(dev); err != nil {

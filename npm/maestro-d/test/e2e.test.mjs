@@ -19,6 +19,7 @@ const repoRoot = path.resolve(here, '..', '..', '..')
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-js-'))
 const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
+const hubBin = process.env.MAESTRO_D_TEST_HUB_BIN ?? path.join(path.dirname(bin), 'maestro-d-hub')
 process.env.MAESTRO_D_HOME = path.join(tmp, 'home')
 process.env.MAESTRO_D_BIN = bin
 delete process.env.MAESTRO_DEVICE
@@ -38,7 +39,10 @@ let dev
 
 before(async () => {
   if (!process.env.MAESTRO_D_TEST_BIN) {
-    execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+    execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
+  }
+  if (!fs.existsSync(hubBin)) {
+    execFileSync('go', ['build', '-o', hubBin, './cmd/maestro-d-hub'], { cwd: repoRoot, stdio: 'inherit' })
   }
   daemon = await MaestroD.connect({ name: 'jstest', idleTimeout: 120 })
   dev = await daemon.attach(MOCK)
@@ -636,14 +640,54 @@ describe('leases', () => {
   const hubName = 'jsleases'
 
   before(() => {
-    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--share-device', 'mock-h1', '--share-device', 'mock-h2', '--share-device', 'mock-unlisted', '--json'], {
+    const out = execFileSync(hubBin, ['start', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--share-device', 'mock-h1', '--share-device', 'mock-h2', '--share-device', 'mock-unlisted', '--json'], {
       env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
     })
     addr = JSON.parse(out.toString()).daemon.httpAddr
   })
 
   after(() => {
-    execFileSync(bin, ['hub', 'stop', '--daemon', hubName])
+    execFileSync(hubBin, ['stop'])
+  })
+
+  test('local hub handle uses the recorded socket', async () => {
+    const local = await MaestroD.connect({ hubSocket: true })
+    assert.equal((await local.hubStatus()).name, hubName)
+    await local.close()
+  })
+
+  test('local hub socket drives a command and a file-backed flow on a peer', async (t) => {
+    function start(name, devices, peer) {
+      const home = path.join(tmp, name)
+      fs.mkdirSync(home, { mode: 0o700 })
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ hubDevices: devices.map(id => ({ id })) }), { mode: 0o600 })
+      const env = { ...process.env, MAESTRO_D_HOME: home, MAESTRO_D_HUB_WEB_PORT: '0', MAESTRO_D_MOCK_DEVICES: devices.join(',') }
+      const result = execFileSync(hubBin, ['start', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
+        '--token', token, '--peer-token', 'socket-peer', ...(peer ? ['--peer', peer] : []), '--json'], { env })
+      t.after(() => execFileSync(hubBin, ['stop'], { env }))
+      return { home, address: JSON.parse(result).daemon.httpAddr }
+    }
+    const owner = start('socket-owner', ['mock-socket'])
+    const gateway = start('socket-gateway', [], owner.address)
+    const savedHome = process.env.MAESTRO_D_HOME
+    let local
+    try {
+      process.env.MAESTRO_D_HOME = gateway.home
+      local = await MaestroD.connect({ hubSocket: true })
+      const id = 'mock-socket@socket-owner'
+      for (const deadline = Date.now() + 15000; !(await local.devices()).some(d => d.id === id); ) {
+        assert.ok(Date.now() < deadline, 'peer did not advertise its device')
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      const dev = await local.lease({ device: id, attach: { platform: 'mock' } })
+      assert.equal((await dev.tapOn('Peer')).ok, true)
+      const file = path.join(tmp, 'peer-flow.yaml')
+      fs.writeFileSync(file, 'appId: com.example\n---\n- tapOn: Peer\n')
+      assert.equal((await dev.flow({ file })).ok, true)
+    } finally {
+      await local?.close()
+      process.env.MAESTRO_D_HOME = savedHome
+    }
   })
 
   const connectHub = () => MaestroD.connect({ hub: addr, token })

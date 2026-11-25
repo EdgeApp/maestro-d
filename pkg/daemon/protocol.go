@@ -36,7 +36,8 @@ const (
 	CodeCommandFailed Code = "COMMAND_FAILED"
 	// CodeUsage: unknown command, bad flags, unparsable step/YAML, unknown
 	// device, bad request body. Exit 2 / HTTP 400.
-	CodeUsage Code = "USAGE"
+	CodeUsage      Code = "USAGE"
+	CodeHubRunning Code = "HUB_RUNNING"
 	// CodeDaemonUnavailable: could not connect to or spawn the daemon, API
 	// version mismatch, daemon shutting down. Exit 3 / HTTP 503.
 	CodeDaemonUnavailable Code = "DAEMON_UNAVAILABLE"
@@ -100,7 +101,7 @@ const (
 
 // Codes lists every code, for tables and tests.
 var Codes = []Code{
-	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeCommandFailed, CodeUsage, CodeHubRunning, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
 	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted, CodeCaptureUnavailable, CodeUnsupported,
@@ -113,7 +114,7 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
+	case CodeUsage, CodeHubRunning, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
@@ -134,6 +135,8 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK
 	case CodeCommandFailed:
 		return http.StatusUnprocessableEntity
+	case CodeHubRunning:
+		return http.StatusConflict
 	case CodeUsage:
 		return http.StatusBadRequest
 	case CodeDaemonUnavailable, CodePeerUnavailable, CodeCaptureUnavailable:
@@ -289,19 +292,20 @@ func FailureEnvelope(e *Error) Envelope {
 // `error` still populated so callers can see what went wrong.
 type StepResult struct {
 	Envelope
-	Device     string                  `json:"device"`
-	Step       string                  `json:"step"`
-	Type       string                  `json:"type"`
-	Index      int                     `json:"index"`
-	DurationMs int64                   `json:"durationMs"`
-	Message    string                  `json:"message,omitempty"`
-	Skipped    bool                    `json:"skipped,omitempty"`
-	Optional   bool                    `json:"optional,omitempty"`
-	Element    *core.ElementInfo       `json:"element,omitempty"`
-	Data       any                     `json:"data,omitempty"`
-	Artifacts  report.CommandArtifacts `json:"artifacts"`
-	SubSteps   []report.Command        `json:"subSteps,omitempty"`
-	ReportDir  string                  `json:"reportDir,omitempty"`
+	Device     string                   `json:"device"`
+	Step       string                   `json:"step"`
+	Type       string                   `json:"type"`
+	Index      int                      `json:"index"`
+	DurationMs int64                    `json:"durationMs"`
+	Message    string                   `json:"message,omitempty"`
+	Skipped    bool                     `json:"skipped,omitempty"`
+	Optional   bool                     `json:"optional,omitempty"`
+	Element    *core.ElementInfo        `json:"element,omitempty"`
+	Data       any                      `json:"data,omitempty"`
+	Artifacts  report.CommandArtifacts  `json:"artifacts"`
+	SubSteps   []report.Command         `json:"subSteps,omitempty"`
+	TestReport *executor.TestFlowReport `json:"testReport,omitempty"`
+	ReportDir  string                   `json:"reportDir,omitempty"`
 	// Outputs name the files a remote call's output fields wrote, as
 	// paths under the report directory (outputs/<path>), fetched with
 	// GET …/artifacts/{path}. Absent for local calls.
@@ -311,8 +315,40 @@ type StepResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// wireSeparator is the host's path separator; tests set it to exercise a
+// Windows hub.
+var wireSeparator = string(filepath.Separator)
+
+// wireArtifacts names report files with forward slashes on every host, so a
+// Windows hub's references pass the client's artifact path checks.
+func wireArtifacts(a report.CommandArtifacts) report.CommandArtifacts {
+	if wireSeparator == "/" {
+		return a
+	}
+	for _, p := range []*string{&a.ScreenshotBefore, &a.ScreenshotAfter, &a.ViewHierarchy} {
+		*p = strings.ReplaceAll(*p, wireSeparator, "/")
+	}
+	return a
+}
+
+// wireCommands copies the report's command tree with wire artifact paths,
+// leaving the hub's own report untouched.
+func wireCommands(cs []report.Command) []report.Command {
+	if cs == nil || wireSeparator == "/" {
+		return cs
+	}
+	out := make([]report.Command, len(cs))
+	for i, c := range cs {
+		c.Artifacts = wireArtifacts(c.Artifacts)
+		c.SubCommands = wireCommands(c.SubCommands)
+		out[i] = c
+	}
+	return out
+}
+
 // ResultFromOutcome converts an executor outcome into the wire result.
 func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepResult {
+	artifacts := wireArtifacts(o.Artifacts)
 	r := StepResult{
 		Device:     device,
 		Step:       o.Description,
@@ -324,8 +360,9 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		Optional:   o.Optional,
 		Element:    o.Element,
 		Data:       o.Data,
-		Artifacts:  o.Artifacts,
-		SubSteps:   o.SubSteps,
+		Artifacts:  artifacts,
+		SubSteps:   wireCommands(o.SubSteps),
+		TestReport: o.TestReport,
 		ReportDir:  reportDir,
 		Outputs:    o.Outputs,
 	}
@@ -357,11 +394,11 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		if o.Error.Suggestion != "" {
 			details["suggestion"] = o.Error.Suggestion
 		}
-		if o.Artifacts.ScreenshotAfter != "" {
-			details["screenshot"] = o.Artifacts.ScreenshotAfter
+		if artifacts.ScreenshotAfter != "" {
+			details["screenshot"] = artifacts.ScreenshotAfter
 		}
-		if o.Artifacts.ViewHierarchy != "" {
-			details["hierarchy"] = o.Artifacts.ViewHierarchy
+		if artifacts.ViewHierarchy != "" {
+			details["hierarchy"] = artifacts.ViewHierarchy
 		}
 		if reportDir != "" {
 			details["reportDir"] = reportDir
@@ -462,9 +499,12 @@ type DeviceInfo struct {
 	BootedAt string `json:"bootedAt,omitempty"`
 	// Attached is true while the daemon holds a driver for the device.
 	Attached bool `json:"attached"`
-	// AttachedAt / AppID / Driver / ReportDir describe the attachment.
+	// AttachedAt / AppID / AppVersion / AppBuild / Driver / ReportDir
+	// describe the attachment.
 	AttachedAt string `json:"attachedAt,omitempty"`
 	AppID      string `json:"appId,omitempty"`
+	AppVersion string `json:"appVersion,omitempty"`
+	AppBuild   string `json:"appBuild,omitempty"`
 	Driver     string `json:"driver,omitempty"`
 	ReportDir  string `json:"reportDir,omitempty"`
 	// Busy is true while a step is in flight.
@@ -632,10 +672,13 @@ type StepsRequest struct {
 
 // FlowRequest is the body of POST /v1/devices/{dev}/flows.
 type FlowRequest struct {
-	File string            `json:"file,omitempty"`
-	YAML string            `json:"yaml,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
-	Cwd  string            `json:"cwd,omitempty"`
+	Test *executor.TestFlowOptions `json:"test,omitempty"`
+	// DefaultAppID is inherited from a suite when its child has no app ID or URL.
+	DefaultAppID string            `json:"defaultAppId,omitempty"`
+	File         string            `json:"file,omitempty"`
+	YAML         string            `json:"yaml,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Cwd          string            `json:"cwd,omitempty"`
 	// Bundle, used instead of File or YAML, is an uploaded flow bundle;
 	// its root file runs as the flow.
 	Bundle *BundleManifest `json:"bundle,omitempty"`
