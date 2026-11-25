@@ -51,7 +51,7 @@ func cloudSel(extra ...func(*daemon.LeaseSelector)) *daemon.LeaseSelector {
 }
 
 func TestCloudLease_LaunchBindRelease(t *testing.T) {
-	h := newCloudHub(t, daemon.Config{ShareConfig: []string{"mock-1"}})
+	h := newCloudHub(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-1")})
 	ctx := context.Background()
 	events, _, unsub := h.s.Events().Subscribe("", 0)
 	defer unsub()

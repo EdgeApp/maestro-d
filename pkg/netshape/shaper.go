@@ -23,7 +23,8 @@ const excerptMax = 2048
 // Shaper sends one device's calls, reading the config on every call so an
 // edit needs no restart.
 type Shaper struct {
-	ConfigPath string // path to the host device config
+	Config     func() *Config // hub snapshot, otherwise read ConfigPath
+	ConfigPath string         // path to the host device config
 	DeviceID   string
 	// Alias, when set, names another entry whose calls the device uses
 	// when its own entry has none (a running emulator's avd:<name>).
@@ -65,9 +66,15 @@ func (e *FetchError) Unwrap() error { return e.Err }
 // ErrNotConfigured when neither has them, a *ConfigError when the file cannot be
 // used.
 func (s *Shaper) Device() (Device, error) {
-	cfg, err := LoadConfig(s.ConfigPath)
-	if err != nil {
-		return Device{}, err
+	var cfg *Config
+	if s.Config != nil {
+		cfg = s.Config()
+	} else {
+		var err error
+		cfg, err = LoadConfig(s.ConfigPath)
+		if err != nil {
+			return Device{}, err
+		}
 	}
 	d, ok := cfg.Lookup(s.DeviceID)
 	if (!ok || !d.Shapeable()) && s.Alias != "" {
