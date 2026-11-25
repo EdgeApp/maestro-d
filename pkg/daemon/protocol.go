@@ -731,8 +731,10 @@ type Info struct {
 
 // Event is one entry on the /v1/events stream.
 type Event struct {
-	Seq  int64  `json:"seq"`
-	Time string `json:"time"`
+	// PreviouslyShared records public visibility at an unshare transition.
+	PreviouslyShared bool   `json:"-"`
+	Seq              int64  `json:"seq"`
+	Time             string `json:"time"`
 	// Type: step | nestedStep | device.attached | device.detached |
 	// device.booted | device.stopped | device.capture | daemon.shutdown |
 	// lease.granted | lease.released | lease.expired. device.capture's

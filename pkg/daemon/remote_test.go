@@ -204,7 +204,9 @@ func TestRemote_CreateRefusals(t *testing.T) {
 
 	// A hub refuses every cloud create with the lease hint, before its
 	// share list is looked at.
-	hub := newRemoteEnv(t, func(c *Config) { c.Hub, c.HubName, c.ShareConfig = NewTestHub(), "h", []string{"mock-1"} })
+	hub := newRemoteEnv(t, func(c *Config) {
+		c.Hub, c.HubName, c.DeviceConfig = NewTestHub(), "h", daemontest.DeviceConfig(t, "mock-1")
+	})
 	for _, caller := range []Caller{{}, {Remote: true, Addr: "10.0.0.9:1"}} {
 		r := httptest.NewRequest("POST", "/v1/devices", strings.NewReader(`{"create":{"cloud":{"platform":"android"}}}`))
 		r = r.WithContext(withCaller(r.Context(), caller))

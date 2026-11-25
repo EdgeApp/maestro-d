@@ -46,6 +46,8 @@ type Client struct {
 	// X-Maestro-Lease (a hub's leased devices).
 	leaseMu sync.Mutex
 	leases  map[string]string
+	// StoredLeases returns credentials recorded for this client’s target.
+	StoredLeases func() []string
 	// OtherLease, when set, names another lease the client holds on device
 	// besides failed ("" for none): a request refused LEASE_NOT_STARTED or
 	// LEASE_EXPIRED under failed is sent once more with it.
@@ -429,9 +431,16 @@ func unwrapURLError(err error) error {
 // response is decoded into out too (results carry their own envelope) and
 // returned as an *Error built from the envelope.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) *Error {
+	return c.callWithLease(ctx, method, path, body, out, "")
+}
+
+func (c *Client) callWithLease(ctx context.Context, method, path string, body, out any, lease string) *Error {
 	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return WrapErr(CodeUsage, err)
+	}
+	if lease != "" {
+		req.Header.Set(HeaderLease, lease)
 	}
 	resp, e := c.do(req)
 	if e != nil {
