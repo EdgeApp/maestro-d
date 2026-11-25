@@ -243,6 +243,13 @@ func leaseKey(c *daemon.Client, o *daemonOpts) string {
 // ones the hub reports expired.
 func wireLeases(c *daemon.Client, o *daemonOpts) {
 	key := leaseKey(c, o)
+	c.StoredLeases = func() []string {
+		var ids []string
+		for _, r := range leasesFor(key) {
+			ids = append(ids, r.ID)
+		}
+		return ids
+	}
 	recs := leasesFor(key)
 	now := time.Now()
 	for _, r := range recs {
