@@ -10,6 +10,6 @@ const (
 	ComputerKind     = "computer"
 )
 
-func isComputer(d DeviceInfo) bool {
+func IsComputer(d DeviceInfo) bool {
 	return strings.EqualFold(d.Kind, ComputerKind) || strings.EqualFold(d.Platform, ComputerPlatform)
 }

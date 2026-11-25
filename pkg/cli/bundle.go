@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -447,7 +448,7 @@ func uploadBundle(ctx context.Context, c *daemon.Client, device string, b *FlowB
 		if withManifest {
 			what = "blobs, manifest included"
 		}
-		progress("Bundle %s (%s, %d files): uploaded %d %s, %d already on the target", b.SHA256[:12], b.Manifest.Root, len(b.Manifest.Files), sent, what, have)
+		common.Progress("Bundle %s (%s, %d files): uploaded %d %s, %d already on the target", b.SHA256[:12], b.Manifest.Root, len(b.Manifest.Files), sent, what, have)
 	}
 	return nil
 }
@@ -459,7 +460,7 @@ func fetchBundleOutputs(ctx context.Context, c *daemon.Client, device, dir strin
 	for _, entry := range outputs {
 		rel, ok := strings.CutPrefix(entry, "outputs/")
 		if !ok || executor.ValidBundlePath(rel) != nil {
-			progress("Skipped output %s: not a path inside the bundle", entry)
+			common.Progress("Skipped output %s: not a path inside the bundle", entry)
 			continue
 		}
 		target := filepath.Join(dir, filepath.FromSlash(rel))
@@ -467,7 +468,7 @@ func fetchBundleOutputs(ctx context.Context, c *daemon.Client, device, dir strin
 			return err
 		}
 		if !quiet {
-			progress("Fetched %s → %s", entry, target)
+			common.Progress("Fetched %s → %s", entry, target)
 		}
 	}
 	return nil

@@ -147,7 +147,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if cleanup == nil {
 		cleanup = func() {}
 	}
-	if leaseFrom(ctx) != nil && ctx.Err() != nil {
+	if leaseEnded(ctx) != nil && ctx.Err() != nil {
 		// The lease (or its client) ended while a driver start that cannot
 		// be cancelled ran: the driver is discarded, never attached.
 		logger.Info("attach %s: cancelled while the driver started; discarding it", id)
@@ -317,6 +317,18 @@ type reportUse struct {
 	created map[string]bool
 }
 
+// ActiveReportDirs returns the report directories still held by sessions or
+// their detach cleanups. The returned slice is independent of future changes.
+func (s *Server) ActiveReportDirs() []string {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	dirs := make([]string, 0, len(s.reportUsers))
+	for dir := range s.reportUsers {
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
 // addReportUser counts one more session using reportDir. The first one
 // notes which session-input directories do not exist yet, so the daemon
 // later removes only those it made.
@@ -447,7 +459,7 @@ func keys(m map[string]any) []string {
 func (s *Server) mapAttachBlobs(cfg *AttachConfig, dir string) *Error {
 	mapRef := func(field, ref string) (string, *Error) {
 		if _, _, err := executor.ParseBlobRef(ref); err != nil {
-			return "", forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
+			return "", Forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
 		}
 		local, err := s.blobs.Materialize(ref, dir)
 		if err != nil {

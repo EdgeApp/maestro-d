@@ -23,6 +23,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -190,18 +191,18 @@ func uploadPath(ctx context.Context, c *daemon.Client, device, path string, quie
 	}
 	if !quiet {
 		if uploaded {
-			progress("Uploaded %s (%d bytes, sha256 %s)", u.Name, u.Size, u.SHA256[:12])
+			common.Progress("Uploaded %s (%d bytes, sha256 %s)", u.Name, u.Size, u.SHA256[:12])
 		} else {
-			progress("%s is already on the target (HEAD 200, sha256 %s): not uploaded", u.Name, u.SHA256[:12])
+			common.Progress("%s is already on the target (HEAD 200, sha256 %s): not uploaded", u.Name, u.SHA256[:12])
 		}
 	}
 	return u, nil
 }
 
 var packFlags = []dflag{
-	boolFlag("json", "Print the units (or the bundle) as JSON", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
-	boolFlag("flow", "Pack each PATH as a flow with its dependency closure, into one bundle", nil, func(o *daemonOpts, v bool) { o.pack.flow = v }),
-	strFlag("base", "With --flow: place the first flow as if it sat in DIR (its references resolve there)", nil, func(o *daemonOpts, v string) { o.pack.base = v }),
+	common.BoolFlag("json", "Print the units (or the bundle) as JSON", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
+	common.BoolFlag("flow", "Pack each PATH as a flow with its dependency closure, into one bundle", nil, func(o *daemonOpts, v bool) { o.pack.flow = v }),
+	common.StringFlag("base", "With --flow: place the first flow as if it sat in DIR (its references resolve there)", nil, func(o *daemonOpts, v string) { o.pack.base = v }),
 	envFlag,
 	includeFlag,
 }
@@ -210,7 +211,7 @@ var packCommand = &cli.Command{
 	Name:      "pack",
 	Usage:     "Hash local files, or a flow and everything it uses, into the units a client uploads to a hub",
 	ArgsUsage: "PATH…",
-	Description: flagsDoc(`Each file is one unit; a directory (an iOS .app) is zipped first, with
+	Description: common.FlagHelp(`Each file is one unit; a directory (an iOS .app) is zipped first, with
 sorted entries and fixed timestamps, so the same tree always gives the same
 sha256. A targeted client (--target-hub, or the JavaScript library on a hub)
 packs this way, uploads what the daemon lacks, and names each file
@@ -248,7 +249,7 @@ flows this way.
 			units = append(units, u)
 		}
 		if o.JSON {
-			printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "units": units})
+			common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "units": units})
 			return nil
 		}
 		for _, u := range units {
@@ -269,7 +270,7 @@ func printBundle(o *daemonOpts, args []string) error {
 		return err
 	}
 	if o.JSON {
-		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "bundle": b})
+		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "bundle": b})
 		return nil
 	}
 	fmt.Printf("bundle %s  root %s  dir %s\n", b.SHA256, b.Manifest.Root, b.Dir)

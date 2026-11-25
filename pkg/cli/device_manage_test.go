@@ -51,10 +51,10 @@ func parseFor(t *testing.T, flags []dflag, args ...string) (*daemonOpts, []strin
 	if err != nil {
 		t.Fatalf("parse %v: %v", args, err)
 	}
-	if len(p.step) > 0 {
-		t.Fatalf("unknown flags %+v", p.step)
+	if len(p.Step) > 0 {
+		t.Fatalf("unknown flags %+v", p.Step)
 	}
-	return o, p.positional
+	return o, p.Positional
 }
 
 func TestDeviceCreateFlags(t *testing.T) {

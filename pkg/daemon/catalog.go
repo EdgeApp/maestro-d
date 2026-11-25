@@ -254,9 +254,9 @@ func (r *Registry) createAVD(spec CreateSpec) (DeviceInfo, *Error) {
 		State: "Shutdown", CreatedBy: CreatedByMaestroD}, nil
 }
 
-// resolveManaged finds a simulator or emulator by id, by avd:<name>, or by
+// ResolveManaged finds a simulator or emulator by id, by avd:<name>, or by
 // name.
-func (r *Registry) resolveManaged(id string) (DeviceInfo, *Error) {
+func (r *Registry) ResolveManaged(id string) (DeviceInfo, *Error) {
 	list := r.List("")
 	for _, d := range list {
 		if d.ID == id || d.ID == AVDPrefix+id {
@@ -290,7 +290,7 @@ func (r *Registry) resolveManaged(id string) (DeviceInfo, *Error) {
 // down, which stands even when the delete then fails; info is the device
 // whenever stopped is set.
 func (r *Registry) Delete(id string, force bool, detach func(id string)) (info DeviceInfo, stopped bool, _ *Error) {
-	info, e := r.resolveManaged(id)
+	info, e := r.ResolveManaged(id)
 	if e != nil {
 		return DeviceInfo{}, false, e
 	}
@@ -320,7 +320,11 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (info D
 	running := !strings.HasPrefix(info.ID, AVDPrefix) && info.State != "Shutdown"
 	if running {
 		logger.Info("device delete: shutting down %s first", info.ID)
-		if err := shutdownForDelete(info); err != nil {
+		stop := r.deps.ShutdownDevice
+		if stop == nil {
+			stop = shutdownForDelete
+		}
+		if err := stop(info); err != nil {
 			return DeviceInfo{}, false, WrapErr(CodeDeviceError, err)
 		}
 	}
@@ -347,13 +351,13 @@ func (r *Registry) Delete(id string, force bool, detach func(id string)) (info D
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	q, e := ParseDeviceQuery(r.URL.Query())
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	res := CatalogResult{Envelope: Envelope{OK: true}}
 	if len(q.Location) == 0 || slices.Contains(q.Location, LocationLocal) || slices.Contains(q.Location, LocationMesh) {
 		if res, e = s.registry.Catalog(q.Platform, q.Available); e != nil {
-			writeError(w, e)
+			WriteError(w, e)
 			return
 		}
 	}
@@ -361,11 +365,11 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		s.idle.Hold()
 		defer s.idle.Release()
 		if res.Cloud, e = s.cloudCatalog(r.Context(), q); e != nil {
-			writeError(w, e)
+			WriteError(w, e)
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, res)
+	WriteJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request, req BootRequest) {
@@ -373,30 +377,30 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request, req 
 	defer s.idle.Release()
 	info, e := s.registry.Create(r.Context(), req)
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	s.events.Publish(Event{Type: "device.created", Device: info.ID, Message: info.Name})
 	if info.Ready {
 		s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: info.Name})
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }
 
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id string, force bool) {
-	info, stopped, e := s.registry.Delete(id, force, s.detachForStop)
+	info, stopped, e := s.registry.Delete(id, force, s.DetachForStop)
 	if e != nil {
 		if stopped {
 			// It shut the device down before the delete failed: its
 			// lease ends as a stop's does, and the teardown does not stop
 			// it again.
-			s.endStoppedLease(r.Context(), endStopped, id, info.ID)
+			s.deviceStopped(r.Context(), false, id, info.ID)
 			s.events.Publish(Event{Type: "device.stopped", Device: info.ID})
 		}
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
-	s.endStoppedLease(r.Context(), endDeleted, id, info.ID)
+	s.deviceStopped(r.Context(), true, id, info.ID)
 	s.events.Publish(Event{Type: "device.deleted", Device: info.ID, Message: info.Name})
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }

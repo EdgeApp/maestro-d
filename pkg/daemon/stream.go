@@ -111,24 +111,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	fps, err := capture.ParseFPS(q.Get("fps"))
 	if err != nil {
-		writeError(w, Errorf(CodeUsage, "%v", err).WithDetails("field", "fps"))
+		WriteError(w, Errorf(CodeUsage, "%v", err).WithDetails("field", "fps"))
 		return
 	}
 	audio := false
 	if v := q.Get("audio"); v != "" {
 		if audio, err = strconv.ParseBool(v); err != nil {
-			writeError(w, Errorf(CodeUsage, "audio must be true or false, got %q", v).WithDetails("field", "audio"))
+			WriteError(w, Errorf(CodeUsage, "audio must be true or false, got %q", v).WithDetails("field", "audio"))
 			return
 		}
 	}
 	sess, e := a.captureOf()
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	sub, err := sess.Subscribe(capture.Options{FPS: fps, Audio: audio})
 	if err != nil {
-		writeError(w, unavailableErr(err, capture.ReasonCaptureLost))
+		WriteError(w, unavailableErr(err, capture.ReasonCaptureLost))
 		return
 	}
 	defer sub.Close()
@@ -144,7 +144,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case p, ok := <-sub.Packets():
 			if !ok {
-				writeError(w, unavailableErr(sub.Err(), capture.ReasonCaptureLost))
+				WriteError(w, unavailableErr(sub.Err(), capture.ReasonCaptureLost))
 				return
 			}
 			chunks, err := mux.Push(p)
@@ -153,13 +153,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			head = append(head, chunks...)
 		case <-first.C:
-			writeError(w, unavailableErr(&capture.Unavailable{Reason: capture.ReasonNoFrames,
+			WriteError(w, unavailableErr(&capture.Unavailable{Reason: capture.ReasonNoFrames,
 				Message: fmt.Sprintf("no frames from the screen capture of %s within %v", a.id, streamFirstFrameWait)}, ""))
 			return
 		case <-ctx.Done():
 			return
 		case <-base.Done():
-			writeError(w, Errorf(CodeDeviceNotAttached, "device %s was detached", a.id))
+			WriteError(w, Errorf(CodeDeviceNotAttached, "device %s was detached", a.id))
 			return
 		}
 	}

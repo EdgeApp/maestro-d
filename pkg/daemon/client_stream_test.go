@@ -42,7 +42,7 @@ func TestClient_Stream(t *testing.T) {
 			return
 		case "expired":
 			w.Header().Set(HeaderErrorCode, string(CodeLeaseExpired))
-			writeError(w, Errorf(CodeLeaseExpired, "lease L1 ended"))
+			WriteError(w, Errorf(CodeLeaseExpired, "lease L1 ended"))
 			return
 		case "slow":
 			select {
