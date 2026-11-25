@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -321,7 +322,7 @@ func TestReservations_DeleteEndsStopKeeps(t *testing.T) {
 }
 
 func TestReservations_UnlistedAndUnshared(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-1", "PHONE-A"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "PHONE-A")})
 	ctx := context.Background()
 	env.mu.Lock()
 	env.phones = []daemon.DeviceInfo{{ID: "PHONE-A", Platform: "android", Kind: "device", Name: "Lab Phone", Ready: true}}

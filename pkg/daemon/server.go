@@ -49,9 +49,6 @@ type Config struct {
 	Hub Hub
 	// HubName names a hub (default: the short host name).
 	HubName string
-	// ShareConfig, on a hub, is its config.json's hubDevices, read when it
-	// starts: it shares each of them, TVs included.
-	ShareConfig []string
 	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
@@ -267,6 +264,16 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
 	}
+	// A hub's reservations are back before its listeners serve: a request
+	// in between would see them missing, and a reservation taken then would
+	// be written over the file they are read from.
+	if s.cfg.Hub != nil {
+		sweepCtx, stopSweep := context.WithCancel(ctx)
+		defer stopSweep()
+		if err := s.cfg.Hub.Start(sweepCtx); err != nil {
+			return err
+		}
+	}
 	// The housekeeping sweep (old blobs, idle reports, dead daemons' run
 	// dirs, orphaned Chrome profiles) runs now and hourly while this
 	// daemon runs.
@@ -344,14 +351,6 @@ func (s *Server) Run(ctx context.Context) error {
 	s.registry.mu.Lock()
 	s.registry.persistLocked()
 	s.registry.mu.Unlock()
-	// A hub's reservations are back before its listeners serve: a request
-	// in between would see them missing, and a reservation taken then would
-	// be written over the file they are read from.
-	if s.cfg.Hub != nil {
-		sweepCtx, stopSweep := context.WithCancel(ctx)
-		defer stopSweep()
-		s.cfg.Hub.Start(sweepCtx)
-	}
 
 	errCh := make(chan error, len(s.servers))
 	for i, srv := range s.servers {

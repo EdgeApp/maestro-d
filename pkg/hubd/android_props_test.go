@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -125,13 +126,13 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 		cfg       daemon.Config
 		phone, tv bool
 	}{
-		{"hub naming nothing", daemon.Config{Hub: &Server{}}, false, false},
+		{"hub naming nothing", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t)}, false, false},
 
-		{"config.json phone", daemon.Config{Hub: &Server{}, ShareConfig: []string{"PHONE-A"}}, true, false},
-		{"config.json TV", daemon.Config{Hub: &Server{}, ShareConfig: []string{"TV-1"}}, false, true},
-		{"names alone do not share", daemon.Config{Hub: &Server{}, ShareConfig: []string{"Lab Pixel", "Lab TV"}}, false, false},
+		{"config.json phone", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t, "PHONE-A")}, true, false},
+		{"config.json TV", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t, "TV-1")}, false, true},
+		{"names alone do not share", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t, "Lab Pixel", "Lab TV")}, false, false},
 	} {
-		s := &Server{cfg: c.cfg}
+		s := &Server{config: newConfigCache(daemon.DeviceConfigPath(c.cfg.DeviceConfig), nil)}
 		if got := s.sharedInfo(phone); got != c.phone {
 			t.Errorf("%s: phone shared %v", c.name, got)
 		}
@@ -139,7 +140,7 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 			t.Errorf("%s: TV shared %v", c.name, got)
 		}
 	}
-	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareConfig: []string{"a", "t", "c"}}}
+	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "a", "t", "c"), nil)}
 	if got := s.shareList(); got != "config.json a, t, c" {
 		t.Errorf("shareList = %q", got)
 	}
@@ -148,7 +149,7 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 // A hub that names nothing lists nothing to a remote caller, refuses its
 // lease and its create, and still lists everything to a local one.
 func TestLeases_HubNamingNothingSharesNothing(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t)})
 	ctx := context.Background()
 	if devs, err := env.remote.Devices(ctx, ""); err != nil || len(devs) != 0 {
 		t.Fatalf("remote listing: %+v %v", devs, err)
@@ -166,7 +167,7 @@ func TestLeases_HubNamingNothingSharesNothing(t *testing.T) {
 
 // config.json's hubDevices put a device in the pool.
 func TestLeases_ShareConfigShares(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-2"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "mock-2")})
 	ctx := context.Background()
 	devs, err := env.remote.Devices(ctx, "")
 	if err != nil || len(devs) != 1 || devs[0].ID != "mock-2" {
@@ -181,7 +182,7 @@ func TestLeases_ShareConfigShares(t *testing.T) {
 // an android boot or create by its bare name. An entry is an id: a device's name
 // shares nothing.
 func TestSharedInfo_ConfigAVDEntry(t *testing.T) {
-	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareConfig: []string{"avd:ci-pixel", "Lab Pixel"}}}
+	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "avd:ci-pixel", "Lab Pixel"), nil)}
 	for _, c := range []struct {
 		d    daemon.DeviceInfo
 		want bool
@@ -205,7 +206,7 @@ func TestSharedInfo_ConfigAVDEntry(t *testing.T) {
 // An AVD shared through hubDevices stays leasable by a remote caller once
 // it runs under its serial.
 func TestLeases_ShareConfigAVDRunning(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Lab"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Pixel_Lab")})
 	ctx := context.Background()
 	env.mu.Lock()
 	env.emuAVD = "Pixel_Lab"
@@ -222,7 +223,7 @@ func TestLeases_ShareConfigAVDRunning(t *testing.T) {
 // A remote iOS boot or create under a bare name is refused even when an
 // avd:<name> entry names that AVD.
 func TestLeases_ShareConfigAVDEntryIsNoSimulator(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Lab"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Lab")})
 	ctx := context.Background()
 	_, err := env.remote.CreateDevice(ctx, daemon.BootRequest{Platform: "ios", Name: "Lab", Create: &daemon.CreateSpec{Type: "iPhone 16"}})
 	wantErrCode(t, err, daemon.CodeForbidden)
@@ -235,7 +236,7 @@ func TestLeases_ShareConfigAVDEntryIsNoSimulator(t *testing.T) {
 // A remote boot of a listed AVD by its bare name, with no platform, is
 // android as a local boot infers it, so avd:<name> lets it through.
 func TestLeases_ShareConfigAVDBareNameBoot(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Lab"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Lab")})
 	env.mu.Lock()
 	env.downAVD = "Lab"
 	env.mu.Unlock()
@@ -243,7 +244,8 @@ func TestLeases_ShareConfigAVDBareNameBoot(t *testing.T) {
 	if _, err := env.remote.StartDevice(context.Background(), req); err != nil {
 		t.Fatalf("bare AVD name: %v", err)
 	}
-	env.s.cfg.ShareConfig = []string{"avd:Other"}
+	daemontest.WriteDevices(t, env.s.cfg.DeviceConfig, "avd:Other")
+	env.s.config.snapshot(time.Now(), true)
 	if _, err := env.remote.StartDevice(context.Background(), req); codeOf(t, err) != daemon.CodeDeviceNotFound {
 		t.Fatalf("unshared AVD: %v", err)
 	}
@@ -255,7 +257,7 @@ func TestLeases_ShareConfigAVDBareNameBoot(t *testing.T) {
 // it detaches: the attach keeps the AVD's name on the record, not the
 // driver's.
 func TestLeases_ShareConfigAVDInStatus(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Lab"}})
+	env := newHubEnv(t, daemon.Config{DeviceConfig: daemontest.DeviceConfig(t, "avd:Pixel_Lab")})
 	ctx := context.Background()
 	env.mu.Lock()
 	env.emuAVD = "Pixel_Lab"
