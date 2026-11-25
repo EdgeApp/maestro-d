@@ -1,10 +1,12 @@
 package daemon
 
-// maestro-d: a host's device config (pkg/netshape: config.json, else
-// network.json) — each device's traffic-shaping calls and description —
+// maestro-d: a host's device config (pkg/netshape: config.json) — each device's traffic-shaping calls and description —
 // wired into sessions and device listings and answers.
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -12,32 +14,21 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
-// DeviceConfigSource is where a daemon reads its device config: config
-// (--config), else networkConfig (--network-config), else
-// <home>/config.json, falling back to <home>/network.json when config.json
-// does not exist.
-func DeviceConfigSource(config, networkConfig string) netshape.Source {
-	return netshape.Source{Config: config, Legacy: networkConfig, Home: Home()}
-}
-
-// deviceConfig is this daemon's DeviceConfigSource.
-func (s *Server) deviceConfig() netshape.Source {
-	return DeviceConfigSource(s.cfg.DeviceConfig, s.cfg.NetworkConfig)
-}
-
-// logDeviceConfig logs, at start, the device config file this daemon
-// reads, and warns about each other one that the resolution order leaves
-// unread.
-func (s *Server) logDeviceConfig() {
-	src := s.deviceConfig()
-	path, legacy := src.Resolve()
-	format := netshape.ConfigFileName
-	if legacy {
-		format = netshape.FileName + ", the older format"
+// DeviceConfigPath resolves an explicit config or the default in this home.
+func DeviceConfigPath(config string) string {
+	if config != "" {
+		return config
 	}
-	logger.Info("device config: %s (%s)", path, format)
-	for _, p := range src.Unread() {
-		logger.Warn("device config: %s is not read; only %s is", p, path)
+	return filepath.Join(Home(), netshape.ConfigFileName)
+}
+
+func (s *Server) logDeviceConfig() {
+	path := DeviceConfigPath(s.cfg.DeviceConfig)
+	logger.Info("device config: %s", path)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(filepath.Join(Home(), "network.json")); err == nil {
+			logger.Warn("network.json is no longer read (4.0); move its devices into config.json (docs/daemon/config.md)")
+		}
 	}
 }
 
@@ -46,7 +37,7 @@ func (s *Server) logDeviceConfig() {
 // runs is looked up once, here at attach, so a set and its reset use the
 // same entry and no shaping call runs discovery.
 func (s *Server) trafficShaper(id string) *netshape.Shaper {
-	return &netshape.Shaper{Source: s.deviceConfig(), DeviceID: id, Alias: s.avdAlias(id), Log: logger.Info}
+	return &netshape.Shaper{ConfigPath: DeviceConfigPath(s.cfg.DeviceConfig), DeviceID: id, Alias: s.avdAlias(id), Log: logger.Info}
 }
 
 // avdAlias is the avd:<name> entry of the AVD that emulator serial id
@@ -76,7 +67,7 @@ func avdEntryID(d DeviceInfo) string {
 // or, for a running emulator, its avd:<name>. A boot or create by a bare
 // name (no kind yet) is taken to be the AVD of that name only when it asks
 // for android: without a platform a bare name may boot a simulator. Names
-// do not match, as they do for --share-device: an entry is an id.
+// alone do not identify entries.
 func ConfigNames(entry string, d DeviceInfo) bool {
 	if entry == d.ID {
 		return true
@@ -113,7 +104,8 @@ func (s *Server) ApplyDeviceConfig(devs []DeviceInfo) {
 	if len(devs) == 0 {
 		return
 	}
-	cfg, path, err := s.deviceConfig().Load()
+	path := DeviceConfigPath(s.cfg.DeviceConfig)
+	cfg, err := netshape.LoadConfig(path)
 	if err != nil {
 		warnShapingOnce(path, err.Error())
 		return
