@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -81,7 +82,7 @@ type hubEnv struct {
 
 // hubEnvShared is what a hubEnv shares unless a test names its own list.
 var hubEnvShared = []string{"mock-1", "mock-2", "mock-9", "SIM-UP", "SIM-DOWN", "emulator-5554", "PHONE-A", "PHONE-B",
-	"Pixel", "Pixel_9", "Lab Pixel", "Pixel_Shared"}
+	"avd:Pixel", "avd:Pixel_9", "avd:Lab Pixel", "avd:Pixel_Shared"}
 
 func newHubEnv(t *testing.T, cfg daemon.Config) *hubEnv {
 	t.Helper()
@@ -147,10 +148,10 @@ func newHubEnv(t *testing.T, cfg daemon.Config) *hubEnv {
 	}
 	env.s = &fixture{Server: &Server{}}
 	cfg.Hub, cfg.Token, cfg.HubName = env.s.Server, "t", "hubtest"
-	if cfg.ShareDevices == nil && cfg.ShareConfig == nil {
+	if cfg.ShareConfig == nil {
 		// A hub shares only what it names: by default these tests share
 		// every device and AVD they list but Pixel_Private and the TV.
-		cfg.ShareDevices = hubEnvShared
+		cfg.ShareConfig = hubEnvShared
 	}
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = ":7433"
@@ -1057,7 +1058,7 @@ func TestLeases_ListingsCarryLeaseState(t *testing.T) {
 }
 
 func TestLeases_ShareDevice(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"shared phone", "mock-2", "mock-9"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"SIM-UP", "mock-2", "mock-9"}})
 	ctx := context.Background()
 	devs, _ := env.remote.Devices(ctx, "")
 	var ids []string
@@ -1085,7 +1086,7 @@ func TestLeases_ShareDevice(t *testing.T) {
 	_, err = env.remote.AcquireLease(ctx, daemon.LeaseRequest{Select: &daemon.LeaseSelector{Name: "Mock One"}})
 	wantErrCode(t, err, daemon.CodeDeviceNotFound)
 	// Shared ones by id and by name; an unlisted id is not found even when
-	// --share-device names it.
+	// config.json names it.
 	env.lease(env.remote, daemon.LeaseRequest{Device: "mock-2"})
 	env.lease(env.remote, daemon.LeaseRequest{Device: "SIM-UP"})
 	_, err = env.remote.AcquireLease(ctx, daemon.LeaseRequest{Device: "mock-9"})
@@ -1111,7 +1112,7 @@ func TestLeases_ShareDevice(t *testing.T) {
 // leaves them out, and reading, renewing or releasing one is LEASE_EXPIRED,
 // as for an unknown lease, and leaves it alone. The unix socket sees them.
 func TestLeases_ShareDeviceHidesUnsharedLeases(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"mock-2"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-2"}})
 	ctx := context.Background()
 	private := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1"}).Lease
 	shared := env.lease(env.local, daemon.LeaseRequest{Device: "mock-2"}).Lease
@@ -1348,7 +1349,7 @@ func TestLeases_ByIDAfterAShutdownTeardownIsNotFound(t *testing.T) {
 // An emulator serial is reused by whichever AVD boots on its port next, so
 // a shared AVD's serial stays shared only while that AVD runs on it.
 func TestLeases_ShareDeviceEmulatorSerialReused(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"Pixel_Shared"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Shared"}})
 	ctx := context.Background()
 	env.mu.Lock()
 	env.emuAVD = "Pixel_Shared"
@@ -1379,7 +1380,7 @@ func TestLeases_ShareDeviceEmulatorSerialReused(t *testing.T) {
 // looks the serial up once: not per request and per event. Its stop
 // forgets the answer, and so does the time.
 func TestLeases_ShareDeviceLooksASerialUpOnce(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"Pixel_Shared", "SIM-UP"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"avd:Pixel_Shared", "SIM-UP"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	env.mu.Lock()
@@ -1455,7 +1456,7 @@ func TestLeases_ShareDeviceLooksASerialUpOnce(t *testing.T) {
 // A remote caller's event stream carries only the shared pool's events,
 // without the host's report directory; the unix socket's carries all.
 func TestLeases_ShareDeviceEvents(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"mock-2"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-2"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := env.remote.Events(ctx, "mock-1", 0, func(daemon.Event) bool { return false })
@@ -1573,7 +1574,7 @@ func TestLeases_DeleteByNameNeedsTheLease(t *testing.T) {
 
 // A remote caller cannot delete an unshared device by its name either.
 func TestLeases_DeleteByNameOfAnUnsharedDevice(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{"mock-1"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{"mock-1"}})
 	if err := recordCreated(daemon.CreatedRecord{Platform: "ios", ID: "SIM-UP", Name: "Shared Phone"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1586,7 +1587,7 @@ func TestLeases_HubRunSweepsAndListensEverywhere(t *testing.T) {
 	t.Setenv(daemon.EnvHome, t.TempDir())
 	var n int32
 	pr, pw := io.Pipe()
-	s := daemon.New(daemon.Config{Name: "hubrun", Hub: &Server{}, HubName: "named", ShareDevices: []string{"mock-1", "mock-2"}, HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
+	s := daemon.New(daemon.Config{Name: "hubrun", Hub: &Server{}, HubName: "named", ShareConfig: []string{"mock-1", "mock-2"}, HTTPAddr: "127.0.0.1:0", Token: "t", Ready: pw,
 		ReportsDir: filepath.Join(t.TempDir(), "r")}, testDeps(&n, 0))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2595,7 +2596,7 @@ func TestLeaseSelector_TVsOnlyWhenAsked(t *testing.T) {
 	}
 }
 
-// A hub shares a TV only when --share-tv names it: a TV pairs with several
+// A hub shares a TV only when config.json names it: a TV pairs with several
 // Macs, and naming it on one hub keeps one owner for it. Unnamed, no route
 // reaches it; named, the rest of the pool is unchanged.
 func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
@@ -2619,10 +2620,10 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 		return env
 	}
 
-	for _, cfg := range []daemon.Config{{}, {ShareDevices: []string{"Lab TV", "mock-1"}}} {
+	for _, cfg := range []daemon.Config{{}, {ShareConfig: []string{"Lab TV", "mock-1"}}} {
 		env := withTV(cfg)
 		if got := remoteIDs(env); strings.Contains(got, "TV-1") || !strings.Contains(got, "mock-1") {
-			t.Fatalf("%+v: remote listing %s", cfg.ShareDevices, got)
+			t.Fatalf("%+v: remote listing %s", cfg.ShareConfig, got)
 		}
 		if all, _ := env.local.Devices(ctx, ""); len(all) != 5 {
 			t.Fatalf("local listing: %d", len(all))
@@ -2645,8 +2646,8 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 		}
 	}
 
-	// Named by --share-tv: shared, and every other device stays shared.
-	named := withTV(daemon.Config{ShareTVs: []string{"Lab TV"}})
+	// Listed in config.json: shared, and every other device stays shared.
+	named := withTV(daemon.Config{ShareConfig: append(slices.Clone(hubEnvShared), "TV-1")})
 	if got := remoteIDs(named); got != "SIM-DOWN,SIM-UP,TV-1,mock-1,mock-2" {
 		t.Fatalf("named TV: remote listing %s", got)
 	}
@@ -2661,7 +2662,7 @@ func TestLeases_TVSharedOnlyWhenNamed(t *testing.T) {
 // answer comes from Deps.TVInfo, not the registry.
 func TestLeases_SharedTVNoDiscoveryPerRequest(t *testing.T) {
 	ctx := context.Background()
-	env := newHubEnv(t, daemon.Config{ShareTVs: []string{"Lab TV"}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: append(slices.Clone(hubEnvShared), "TV-1")})
 	env.mu.Lock()
 	env.tv, env.tvKnown = true, true
 	env.mu.Unlock()

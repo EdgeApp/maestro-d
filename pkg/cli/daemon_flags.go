@@ -51,10 +51,8 @@ type daemonOpts struct {
 	// CAFile adds a trust root for a self-signed hub (--ca / MAESTRO_D_CA).
 	CAFile string
 
-	// DeviceConfig and NetworkConfig are serve's and hub start's --config
-	// and (older) --network-config.
-	DeviceConfig  string
-	NetworkConfig string
+	// DeviceConfig is the path passed to serve --config.
+	DeviceConfig string
 
 	// explicit records the table flags given on the command line (not
 	// from the environment).

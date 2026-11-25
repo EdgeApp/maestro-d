@@ -10,12 +10,12 @@ import (
 )
 
 // The computer is local only: a remote caller never sees it, leases it or
-// attaches it, whatever --share-device says; the unix socket does all three.
+// attaches it, whatever the config lists; the unix socket does all three.
 var macDevice = daemon.DeviceInfo{ID: "mac", Platform: "macos", Kind: "computer", Name: "Demo Mac", OSVersion: "26.6.1", State: "ready", Ready: true}
 
 func TestLeases_ComputerLocalOnly(t *testing.T) {
 	ctx := context.Background()
-	for _, cfg := range []daemon.Config{{}, {ShareDevices: []string{"mac", "Demo Mac", "mock-1"}}} {
+	for _, cfg := range []daemon.Config{{}, {ShareConfig: []string{"mac", "Demo Mac", "mock-1"}}} {
 		env := newHubEnv(t, cfg)
 		env.mu.Lock()
 		env.phones = append(env.phones, macDevice)
@@ -27,7 +27,7 @@ func TestLeases_ComputerLocalOnly(t *testing.T) {
 		}
 		for _, d := range devs {
 			if d.ID == "mac" {
-				t.Fatalf("%v: remote listing has the computer", cfg.ShareDevices)
+				t.Fatalf("%v: remote listing has the computer", cfg.ShareConfig)
 			}
 		}
 		_, err = env.remote.Device(ctx, "mac")
