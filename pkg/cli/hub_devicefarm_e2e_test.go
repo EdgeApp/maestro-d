@@ -37,6 +37,8 @@ func startDFHubs(t *testing.T, extraB ...string) *dfHubs {
 	aws := dfEnv(t, e, h.fake, false)
 	creds := filepath.Join(t.TempDir(), "aws-credentials")
 	writeCreds(t, creds)
+	writeSharedMocks(t, filepath.Join(e.cwd, "home-a"), "mock-a")
+	writeSharedMocks(t, filepath.Join(e.cwd, "home-b"), "mock-b")
 	h.envA = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-a"), "MAESTRO_D_MOCK_DEVICES=mock-a", "MAESTRO_D_TEST_MACHINE=machine-a")
 	h.envB = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-b"), "MAESTRO_D_MOCK_DEVICES=mock-b", "MAESTRO_D_TEST_MACHINE=machine-b",
 		"AWS_SHARED_CREDENTIALS_FILE="+creds)
@@ -55,8 +57,8 @@ func startDFHubs(t *testing.T, extraB ...string) *dfHubs {
 		}
 		return out.Daemon
 	}
-	h.a = started(e.runEnv(h.envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--share-device", "mock-a"}, mesh...)...))
-	h.b = started(e.runEnv(h.envB, append(append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm", "--share-device", "mock-b"}, extraB...), mesh...)...))
+	h.a = started(e.runEnv(h.envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
+	h.b = started(e.runEnv(h.envB, append(append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm"}, extraB...), mesh...)...))
 	h.client = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c"), "MAESTRO_D_TEST_MACHINE=machine-a",
 		"MAESTRO_D_HUB="+h.a.HTTPAddr, "MAESTRO_D_TOKEN=df-tok")
 	// Wait for the link: hub status through a names b, linked.
@@ -192,7 +194,7 @@ func TestE2E_HubDeviceFarmLease(t *testing.T) {
 func TestE2E_HubDeviceFarmLeaseEnd(t *testing.T) {
 	// b shares a list, as hubs usually do: a released cloud device is then
 	// not even in its pool.
-	h := startDFHubs(t, "--share-device", "mock-b")
+	h := startDFHubs(t)
 	e := h.e
 	// The lease's window runs out: the device goes with it.
 	res := dfLease(t, h, "--platform", "android", "--name", "Google Pixel 8", "--ttl", "3s", "--no-attach")

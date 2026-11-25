@@ -19,6 +19,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -count=1 -v ./pkg/fsage
+      - run: go test -count=1 -v -run TestConcurrentDeviceWrites ./pkg/netshape
 
   check:
     name: Check

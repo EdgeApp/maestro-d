@@ -48,19 +48,16 @@ func (ss *shaperServer) calls() []string {
 	return append([]string(nil), ss.reqs...)
 }
 
-// writeNetworkConfig configures mock-1 (only) against the shaper server.
-func writeNetworkConfig(t *testing.T, path, base string) {
+// writeShapingConfig configures mock-1 (only) against the shaper server.
+func writeShapingConfig(t *testing.T, path, base string) {
 	t.Helper()
-	cfg := map[string]any{"devices": map[string]any{"mock-1": map[string]any{
+	cfg := map[string]any{"mock-1": map[string]any{
 		"setTrafficShape": map[string]any{"method": "POST", "url": base + "/shape/${deviceId}",
 			"body":            map[string]any{"mbit": "${mbit}", "lossPct": "${lossPct}", "latencyMs": "${latencyMs}", "jitterMs": "${jitterMs}", "direction": "${direction}"},
 			"directionValues": map[string]string{"download": "down", "upload": "up"}},
 		"resetTrafficShape": map[string]any{"method": "DELETE", "url": base + "/shape/${deviceId}"},
-	}}}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}}
+	data := hubDevicesJSON(t, cfg)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +87,7 @@ func TestServer_SessionEndResetsTheShape(t *testing.T) {
 	t.Run("detach", func(t *testing.T) {
 		env := newTestEnv(t, 0)
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		env.attach("mock-1")
 		shape(t, env.c)
 		if err := env.c.Detach(ctx, "mock-1"); err != nil {
@@ -103,7 +100,7 @@ func TestServer_SessionEndResetsTheShape(t *testing.T) {
 	t.Run("a session that reset last sends nothing more", func(t *testing.T) {
 		env := newTestEnv(t, 0)
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		env.attach("mock-1")
 		shape(t, env.c)
 		if _, err := env.c.Command(ctx, "mock-1", "resetTrafficShape", nil, true); err != nil {
@@ -119,7 +116,7 @@ func TestServer_SessionEndResetsTheShape(t *testing.T) {
 	t.Run("an unshaped session sends nothing", func(t *testing.T) {
 		env := newTestEnv(t, 0)
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		env.attach("mock-1")
 		if err := env.c.Detach(ctx, "mock-1"); err != nil {
 			t.Fatal(err)
@@ -131,7 +128,7 @@ func TestServer_SessionEndResetsTheShape(t *testing.T) {
 	t.Run("daemon stop", func(t *testing.T) {
 		env := newTestEnv(t, 0)
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		env.attach("mock-1")
 		shape(t, env.c)
 		env.s.close()
@@ -142,7 +139,7 @@ func TestServer_SessionEndResetsTheShape(t *testing.T) {
 	hub := func(t *testing.T) (*hubEnv, *shaperServer) {
 		env := newHubEnv(t, daemon.Config{})
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		return env, ss
 	}
 	t.Run("lease release", func(t *testing.T) {
@@ -241,7 +238,7 @@ func TestServer_SessionEndTurnsAirplaneModeOff(t *testing.T) {
 	t.Run("detach", func(t *testing.T) {
 		env := newTestEnv(t, 0)
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		d := record(env.s)
 		env.attach("mock-1")
 		if _, err := env.c.Command(ctx, "mock-1", "setAirplaneMode", "enabled", true); err != nil {
@@ -271,7 +268,7 @@ func TestServer_SessionEndTurnsAirplaneModeOff(t *testing.T) {
 	t.Run("hub shutdown", func(t *testing.T) {
 		env := newHubEnv(t, daemon.Config{})
 		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(daemon.Home(), "network.json"), ss.URL)
+		writeShapingConfig(t, filepath.Join(daemon.Home(), "config.json"), ss.URL)
 		d := record(env.s)
 		env.lease(env.remote, daemon.LeaseRequest{Device: "mock-1", Attach: &daemon.AttachConfig{Platform: "mock"}})
 		if _, err := env.remote.Command(ctx, "mock-1", "setAirplaneMode", "enabled", true); err != nil {
