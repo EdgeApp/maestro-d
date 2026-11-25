@@ -1035,7 +1035,7 @@ func (s *Server) Visible(r *http.Request, devs []daemon.DeviceInfo) []daemon.Dev
 // annotate sets lease, maxSec, available, owner, machine and addresses
 // on a hub's device entries.
 func (s *Server) annotate(devs []daemon.DeviceInfo) {
-	owners := daemon.OtherOwners(s.cfg.Name)
+	owners := s.cfg.OtherOwners()
 	machine, addrs := s.HostIdentity()
 	for i := range devs {
 		d := &devs[i]
@@ -1386,7 +1386,7 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := daemon.CallerFrom(r.Context())
 	if req.Attach != nil && caller.Remote {
-		if e := daemon.CheckRemoteAttach(req.Attach); e != nil {
+		if e := checkRemoteAttach(req.Attach); e != nil {
 			s.LogForbidden(r, e)
 			daemon.WriteError(w, e)
 			return
@@ -1475,6 +1475,11 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 // new lease), and then detaches whatever the attach left attached. So a
 // late attach never touches a later holder's session.
 func (s *Server) Attach(ctx context.Context, id string, cfg *daemon.AttachConfig) (*daemon.DeviceInfo, *daemon.Error) {
+	if daemon.CallerFrom(ctx).Remote {
+		if err := checkRemoteAttach(cfg); err != nil {
+			return nil, err
+		}
+	}
 	e := leaseFrom(ctx)
 	if e == nil {
 		return s.AttachDevice(ctx, id, cfg)
@@ -1588,7 +1593,7 @@ func (s *Server) leaseDeviceLocked(d daemon.DeviceInfo, holder string, ttlSec in
 	if ending {
 		return nil, beingReleasedErr(device)
 	}
-	if owner := daemon.FindDeviceOwner(device, s.cfg.Name); owner != nil {
+	if owner := s.cfg.FindDeviceOwner(device); owner != nil {
 		e := daemon.Errorf(daemon.CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", device, owner.Name, owner.Info.PID)
 		return nil, e.WithDetails("owner", owner.Name, "ownerPid", owner.Info.PID)
 	}
@@ -1845,7 +1850,7 @@ func (s *Server) disownBoot(info daemon.DeviceInfo) {
 		logger.Info("lease: %s, booted for a selector lease, went to another lease; that lease shuts it down", info.ID)
 		return
 	}
-	if daemon.FindDeviceOwner(info.ID, s.cfg.Name) != nil {
+	if s.cfg.FindDeviceOwner(info.ID) != nil {
 		return
 	}
 	if err := s.Registry().Stop(info.ID, false); err != nil {

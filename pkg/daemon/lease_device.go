@@ -23,13 +23,9 @@ func annotateAvailable(devs []DeviceInfo, owners map[string]string) {
 
 // OtherOwners maps each device another live daemon has attached to that
 // daemon's name.
-func OtherOwners(self string) map[string]string {
+func (cfg Config) OtherOwners() map[string]string {
 	out := map[string]string{}
-	daemons, _ := ListDaemons()
-	for _, d := range daemons {
-		if d.Name == self || !d.Alive {
-			continue
-		}
+	for _, d := range otherProcesses(cfg.RunDir()) {
 		for _, dev := range d.Devices {
 			if dev.Attached {
 				out[dev.ID] = d.Name

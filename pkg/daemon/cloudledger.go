@@ -21,7 +21,9 @@ import (
 type CloudEntry struct {
 	// Daemon and PID are the daemon that created the session.
 	Daemon string `json:"daemon"`
-	PID    int    `json:"pid"`
+	// Hub selects the singleton registry. Older records belong to named daemons.
+	Hub bool `json:"hub,omitempty"`
+	PID int  `json:"pid"`
 	// ID is the device id the daemon gave it.
 	ID       string `json:"id"`
 	Provider string `json:"provider"`
@@ -122,6 +124,10 @@ func removeLedgerEntry(ref string) error {
 // deadEntry reports whether e belongs to a daemon that is no longer
 // running: no live daemon of that name, or a live one with another pid.
 func deadEntry(e CloudEntry) bool {
-	info, err := LiveInfo(e.Daemon)
-	return err != nil || info == nil || info.PID != e.PID
+	dir := RunDir(e.Daemon)
+	if e.Hub {
+		dir = HubRunDir()
+	}
+	info, err := readInfoAt(dir)
+	return err != nil || info.PID != e.PID || !PIDAlive(e.PID)
 }

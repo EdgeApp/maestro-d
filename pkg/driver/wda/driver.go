@@ -53,6 +53,8 @@ type Driver struct {
 	alertAction string
 
 	// Timeouts (0 = use defaults)
+	idleSettingsMu      sync.Mutex
+	quiescenceEnabled   bool
 	findTimeout         int // ms, for required elements
 	optionalFindTimeout int // ms, for optional elements
 
@@ -269,16 +271,22 @@ func (d *Driver) SetAppFile(path string) {
 // Negative values and 0 disable quiescence. Values 1-200 are a no-op (keep session default).
 // Values > 200 enable quiescence — minimum effective value is 200ms.
 func (d *Driver) SetWaitForIdleTimeout(ms int) error {
+	d.idleSettingsMu.Lock()
+	defer d.idleSettingsMu.Unlock()
 	if ms > 200 {
-		return d.client.UpdateSettings(map[string]interface{}{
+		if err := d.client.UpdateSettings(map[string]interface{}{
 			"shouldWaitForQuiescence": true,
 			"waitForIdleTimeout":      ms,
-		})
+		}); err != nil {
+			return err
+		}
+		d.quiescenceEnabled = true
+	} else if ms <= 0 || d.quiescenceEnabled {
+		if err := d.client.DisableQuiescence(); err != nil {
+			return err
+		}
+		d.quiescenceEnabled = false
 	}
-	if ms <= 0 {
-		return d.client.DisableQuiescence()
-	}
-	// ms 1-200 (default range): keep quiescence disabled (session default)
 	return nil
 }
 

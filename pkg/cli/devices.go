@@ -61,6 +61,11 @@ type DeviceEntry struct {
 func runDevices(c *cli.Context) error {
 	platform := strings.ToLower(globalString(c, "platform"))
 	entries := collectDevices(platform, c.Bool("all"))
+	if platform == "" || platform == "mock" {
+		for _, d := range mockDevices() {
+			entries = append(entries, DeviceEntry{ID: d.ID, Name: d.Name, Platform: d.Platform, Kind: d.Kind, State: d.State, Ready: d.Ready})
+		}
+	}
 
 	if c.Bool("json") {
 		enc := json.NewEncoder(os.Stdout)

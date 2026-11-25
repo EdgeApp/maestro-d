@@ -125,7 +125,7 @@ func New(driver core.Driver, cfg RunnerConfig) *Runner {
 // Run executes all flows and generates reports.
 func (r *Runner) Run(ctx context.Context, flows []flow.Flow) (*RunResult, error) {
 	// Expand suites into individual test case flows
-	expandedFlows := expandSuites(flows)
+	expandedFlows := ExpandSuites(flows)
 
 	// Build report skeleton
 	builderCfg := report.BuilderConfig{
@@ -297,10 +297,10 @@ func (r *Runner) buildRunResult(flowResults []FlowResult) *RunResult {
 	return result
 }
 
-// expandSuites expands suite files into individual test case flows.
+// ExpandSuites expands suite files into individual test case flows.
 // A suite is a flow that only contains runFlow steps - each runFlow becomes a separate flow.
 // Non-suite flows pass through unchanged.
-func expandSuites(flows []flow.Flow) []flow.Flow {
+func ExpandSuites(flows []flow.Flow) []flow.Flow {
 	var expanded []flow.Flow
 
 	for _, f := range flows {

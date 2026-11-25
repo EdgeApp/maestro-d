@@ -1728,6 +1728,12 @@ func TestSetWaitForIdleTimeoutEnable(t *testing.T) {
 	if v, ok := settingsReceived["waitForIdleTimeout"]; !ok || v != float64(5000) {
 		t.Errorf("Expected waitForIdleTimeout=5000, got %v", v)
 	}
+	if err := driver.SetWaitForIdleTimeout(200); err != nil {
+		t.Fatal(err)
+	}
+	if settingsReceived["shouldWaitForQuiescence"] != false {
+		t.Fatalf("restoring the default wait after a flow kept quiescence enabled: %v", settingsReceived)
+	}
 }
 
 // TestSetWaitForIdleTimeoutDisable tests that SetWaitForIdleTimeout(0) disables quiescence.

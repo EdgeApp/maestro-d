@@ -1,6 +1,6 @@
 package hubcmd
 
-// hub_service.go: `maestro-d hub service install|uninstall|status`, the
+// hub_service.go: `maestro-d-hub service install|uninstall|status`, the
 // hub as a per-user launchd LaunchAgent on macOS
 // (~/Library/LaunchAgents/app.edge.maestro-d.hub.plist). It is an agent,
 // not a system daemon, because simulators and WebDriverAgent need the
@@ -35,21 +35,13 @@ import (
 // the default home (~/.maestro-d).
 const ServiceLabel = "app.edge.maestro-d.hub"
 
-// serviceLabel is the launchd label of the hub service for the daemon name
-// in this home. Another home or daemon name gets its own label, so two hubs
-// on one machine are two services, and `hub start` for one never kickstarts
-// the other. A home's part is its directory name plus a short hash of its
-// full path, so two homes with one directory name still differ; a daemon
-// name is already limited to characters launchd labels take.
-func serviceLabel(name string) string {
+// Alternate homes get a distinct launchd label even when their basenames match.
+func serviceLabel() string {
 	label := ServiceLabel
 	home := filepath.Clean(daemon.Home())
 	if u, err := os.UserHomeDir(); err != nil || home != filepath.Join(u, ".maestro-d") {
 		sum := sha256.Sum256([]byte(home))
 		label += "." + labelPart(filepath.Base(home)) + "-" + hex.EncodeToString(sum[:4])
-	}
-	if name != "" && name != DefaultHubDaemon {
-		label += "." + name
 	}
 	return label
 }
@@ -80,12 +72,12 @@ var (
 	waitForHub = func(ctx context.Context, name string, timeout time.Duration) (*daemon.Client, error) {
 		deadline := time.Now().Add(timeout)
 		for {
-			if c, _ := daemon.Dial(name); c != nil && c.Ping(2*time.Second) == nil {
+			if c, _ := daemon.DialHub(); c != nil && c.Ping(2*time.Second) == nil {
 				return c, nil
 			}
 			if time.Now().After(deadline) {
 				return nil, daemon.Errorf(daemon.CodeDaemonUnavailable, "hub %q did not start within %v; see %s", name, timeout,
-					filepath.Join(daemon.RunDir(name), "daemon.log"))
+					filepath.Join(daemon.HubRunDir(), "daemon.log"))
 			}
 			select {
 			case <-ctx.Done():
@@ -100,45 +92,54 @@ var (
 // set: launchd starts the agent with a bare environment.
 var servicePassEnv = []string{"PATH", daemon.EnvHome, "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "MAESTRO_TEAM_ID"}
 
-func servicePlistPath(name string) string {
-	return filepath.Join(launchAgentsDir(), serviceLabel(name)+".plist")
+func servicePlistPath() string {
+	return filepath.Join(launchAgentsDir(), serviceLabel()+".plist")
 }
 
-// serviceSecretsDir holds the tokens of the hub service for daemon name:
-// <home>/hub/secrets for the default daemon, <home>/hub/daemons/<name>/secrets
-// for another. The paths never nest, so two services in one home never share,
-// shadow or delete each other's files, whatever their names.
-func serviceSecretsDir(name string) string {
-	if name == "" || name == DefaultHubDaemon {
-		return filepath.Join(daemon.Home(), "hub", "secrets")
-	}
-	return filepath.Join(daemon.Home(), "hub", "daemons", name, "secrets")
+// serviceSecretsDir holds the singleton service credentials.
+func serviceSecretsDir() string {
+	return filepath.Join(daemon.Home(), "hub", "secrets")
 }
 
-func serviceTarget(name string) string {
-	return fmt.Sprintf("gui/%d/%s", serviceUID(), serviceLabel(name))
+func serviceTarget() string {
+	return fmt.Sprintf("gui/%d/%s", serviceUID(), serviceLabel())
 }
 
-// ServiceInstalled reports whether the hub daemon name runs as a launchd
+// ServiceInstalled reports whether the hub runs as a launchd
 // service in this home.
-func ServiceInstalled(name string) bool {
+func ServiceInstalled() bool {
 	if serviceGOOS != "darwin" {
 		return false
 	}
-	_, err := os.Stat(servicePlistPath(name))
+	_, err := os.Stat(servicePlistPath())
 	return err == nil
 }
 
-func serviceUnsupported() error {
-	return daemon.Errorf(daemon.CodeUsage, "the hub service is a macOS LaunchAgent; on %s run `maestro-d hub start --foreground` under your supervisor (docs/daemon/hub.md shows a systemd unit)", serviceGOOS)
+func warnLegacyService() {
+	data, err := os.ReadFile(servicePlistPath())
+	if err != nil {
+		return
+	}
+	var agent struct{ ProgramArguments []string }
+	if _, err := plist.Unmarshal(data, &agent); err != nil {
+		return
+	}
+	a := agent.ProgramArguments
+	if len(a) >= 3 && filepath.Base(a[0]) == "maestro-d" && a[1] == "hub" && a[2] == "start" {
+		common.Progress("legacy LaunchAgent runs maestro-d hub start; update it with maestro-d-hub service install")
+	}
 }
 
-var hubServiceUninstallFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
-	common.BoolFlag("purge", "Also delete the tokens install wrote under <home>/hub/secrets (<home>/hub/daemons/<daemon>/secrets for a daemon other than hub)", nil,
+func serviceUnsupported() error {
+	return daemon.Errorf(daemon.CodeUsage, "the hub service is a macOS LaunchAgent; on %s run `maestro-d-hub start --foreground` under your supervisor (docs/daemon/hub.md shows a systemd unit)", serviceGOOS)
+}
+
+var hubServiceUninstallFlags = common.FlagSet(outputFlags, []dflag{
+	common.BoolFlag("purge", "Also delete the tokens install wrote under <home>/hub/secrets", nil,
 		func(o *daemonOpts, v bool) { o.hub.purge = v }),
 })
 
-var hubServiceStatusFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags)
+var hubServiceStatusFlags = common.FlagSet(outputFlags)
 
 func serviceCommand(withArgs actionFactory) *cli.Command {
 	return &cli.Command{
@@ -156,7 +157,7 @@ MAESTRO_D_HOME, ANDROID_HOME, ANDROID_SDK_ROOT, DEVELOPER_DIR and
 MAESTRO_TEAM_ID are recorded when set. The hub's output goes to its
 daemon.log.
 
-  maestro-d hub service install --name lab-a --token-file ~/.hub-token --peer-token-file ~/.peer-token`, hubStartFlags),
+  maestro-d-hub service install --name lab-a --token-file ~/.hub-token --peer-token-file ~/.peer-token`, hubStartFlags),
 				SkipFlagParsing: true,
 				Action:          withArgs(hubStartFlags, runServiceInstall),
 			},
@@ -198,9 +199,9 @@ func servicePlist(o *daemonOpts, bin, tokenFile, peerTokenFile string) ([]byte, 
 			env[k] = v
 		}
 	}
-	logPath := filepath.Join(daemon.RunDir(o.Name), "daemon.log")
+	logPath := filepath.Join(daemon.HubRunDir(), "daemon.log")
 	return plist.MarshalIndent(map[string]any{
-		"Label":                serviceLabel(o.Name),
+		"Label":                serviceLabel(),
 		"ProgramArguments":     args,
 		"RunAtLoad":            true,
 		"KeepAlive":            map[string]any{"SuccessfulExit": false},
@@ -219,10 +220,10 @@ func runServiceInstall(ctx context.Context, o *daemonOpts, args []string) error 
 	if err != nil {
 		return err
 	}
-	if c, _ := daemon.Dial(o.Name); c != nil && !ServiceInstalled(o.Name) {
-		return daemon.Errorf(daemon.CodeUsage, "hub %q is already running (pid %d); stop it first (maestro-d hub stop)", o.Name, c.Info.PID)
+	if c, _ := daemon.DialHub(); c != nil && !ServiceInstalled() {
+		return daemon.Errorf(daemon.CodeUsage, "hub %q is already running (pid %d); stop it first (maestro-d-hub stop)", o.Name, c.Info.PID)
 	}
-	dir := serviceSecretsDir(o.Name)
+	dir := serviceSecretsDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
@@ -233,7 +234,7 @@ func runServiceInstall(ctx context.Context, o *daemonOpts, args []string) error 
 	if err := writeSecret(peerTokenFile, peerToken); err != nil {
 		return err
 	}
-	bin, err := daemon.Binary()
+	bin, err := daemon.HubExecutable()
 	if err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
@@ -244,16 +245,16 @@ func runServiceInstall(ctx context.Context, o *daemonOpts, args []string) error 
 	if err != nil {
 		return daemon.WrapErr(daemon.CodeInternal, err)
 	}
-	if err := os.MkdirAll(daemon.RunDir(o.Name), 0o700); err != nil {
+	if err := os.MkdirAll(daemon.HubRunDir(), 0o700); err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
 	if err := os.MkdirAll(launchAgentsDir(), 0o755); err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
-	if ServiceInstalled(o.Name) {
-		_, _ = launchctl("bootout", serviceTarget(o.Name))
+	if ServiceInstalled() {
+		_, _ = launchctl("bootout", serviceTarget())
 	}
-	path := servicePlistPath(o.Name)
+	path := servicePlistPath()
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
@@ -279,14 +280,11 @@ func startTimeout(o *daemonOpts) time.Duration {
 
 // kickstartService starts the installed service's hub (hub start).
 func kickstartService(ctx context.Context, o *daemonOpts) error {
-	if c, _ := daemon.Dial(o.Name); c != nil && c.Ping(2*time.Second) == nil {
-		return printHub(o, c.Info, "already running under launchd")
-	}
-	if out, err := launchctl("kickstart", serviceTarget(o.Name)); err != nil {
-		return daemon.Errorf(daemon.CodeDaemonUnavailable, "launchctl kickstart %s: %v %s", serviceTarget(o.Name), err, strings.TrimSpace(string(out)))
+	if out, err := launchctl("kickstart", serviceTarget()); err != nil {
+		return daemon.Errorf(daemon.CodeDaemonUnavailable, "launchctl kickstart %s: %v %s", serviceTarget(), err, strings.TrimSpace(string(out)))
 	}
 	if !o.JSON {
-		common.Progress("Started the hub service through launchd (kickstart %s)", serviceTarget(o.Name))
+		common.Progress("Started the hub service through launchd (kickstart %s)", serviceTarget())
 	}
 	c, err := waitForHub(ctx, o.Name, startTimeout(o))
 	if err != nil {
@@ -299,32 +297,30 @@ func runServiceUninstall(ctx context.Context, o *daemonOpts, args []string) erro
 	if serviceGOOS != "darwin" {
 		return serviceUnsupported()
 	}
-	hubName(o)
-	path := servicePlistPath(o.Name)
-	installed := ServiceInstalled(o.Name)
+	o.Name = DefaultHubDaemon
+	path := servicePlistPath()
+	installed := ServiceInstalled()
 	if installed {
-		if out, err := launchctl("bootout", serviceTarget(o.Name)); err != nil && !strings.Contains(string(out), "No such process") {
-			common.Progress("launchctl bootout %s: %v %s", serviceTarget(o.Name), err, strings.TrimSpace(string(out)))
+		if out, err := launchctl("bootout", serviceTarget()); err != nil && !strings.Contains(string(out), "No such process") {
+			common.Progress("launchctl bootout %s: %v %s", serviceTarget(), err, strings.TrimSpace(string(out)))
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return daemon.WrapErr(daemon.CodeUsage, err)
 		}
 	}
-	if c, _ := daemon.Dial(o.Name); c != nil {
+	if c, _ := daemon.DialHub(); c != nil {
 		daemon.WaitForExit(c.Info, startTimeout(o))
 	}
 	var purged []string
 	if o.hub.purge {
-		dir := serviceSecretsDir(o.Name)
+		dir := serviceSecretsDir()
 		for _, f := range []string{filepath.Join(dir, "token"), filepath.Join(dir, "peer-token")} {
 			if err := os.Remove(f); err == nil {
 				purged = append(purged, f)
 			}
 		}
 		_ = os.Remove(dir)
-		if o.Name != DefaultHubDaemon {
-			_ = os.Remove(filepath.Dir(dir)) // <home>/hub/daemons/<name>, when empty
-		}
+
 	}
 	if o.JSON {
 		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "removed": installed, "plist": path, "purged": purged})
@@ -359,22 +355,22 @@ func runServiceStatus(ctx context.Context, o *daemonOpts, args []string) error {
 	if serviceGOOS != "darwin" {
 		return serviceUnsupported()
 	}
-	hubName(o)
-	if !ServiceInstalled(o.Name) {
+	o.Name = DefaultHubDaemon
+	if !ServiceInstalled() {
 		fmt.Println("hub service: not installed")
 	} else {
-		out, err := launchctl("print", serviceTarget(o.Name))
+		out, err := launchctl("print", serviceTarget())
 		state, pid := launchdState(string(out))
 		switch {
 		case err != nil:
-			fmt.Printf("hub service: installed (%s), not loaded in launchd\n", servicePlistPath(o.Name))
+			fmt.Printf("hub service: installed (%s), not loaded in launchd\n", servicePlistPath())
 		case pid != "":
-			fmt.Printf("hub service: installed (%s), launchd state %s, pid %s\n", servicePlistPath(o.Name), state, pid)
+			fmt.Printf("hub service: installed (%s), launchd state %s, pid %s\n", servicePlistPath(), state, pid)
 		default:
-			fmt.Printf("hub service: installed (%s), launchd state %s\n", servicePlistPath(o.Name), state)
+			fmt.Printf("hub service: installed (%s), launchd state %s\n", servicePlistPath(), state)
 		}
 	}
-	c, _ := daemon.Dial(o.Name)
+	c, _ := daemon.DialHub()
 	if c == nil {
 		fmt.Printf("hub %q is not running\n", o.Name)
 		return nil
