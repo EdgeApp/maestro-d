@@ -110,7 +110,7 @@ type StepOutcome struct {
 	Outputs []string `json:"outputs,omitempty"`
 	// Code is the daemon error code a failure carries when it is not an
 	// ordinary step failure: UNSUPPORTED (the host or device cannot do the
-	// step) or USAGE (a bad network.json). Empty otherwise.
+	// step) or USAGE (a bad config.json). Empty otherwise.
 	Code string `json:"code,omitempty"`
 }
 

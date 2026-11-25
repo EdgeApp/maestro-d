@@ -1,6 +1,6 @@
 // Traffic shaping end to end on real devices, driven through this
 // repository's JavaScript client (npm/maestro-d): setTrafficShape and
-// resetTrafficShape send the calls the host's network.json configures for
+// resetTrafficShape send the calls the host's config.json configures for
 // each device, and the effect is measured with ping from this host. The
 // script never names a shaper; the host's config does.
 //
@@ -18,7 +18,10 @@
 //   [MAESTRO_D=<daemon name>] [MAESTRO_D_CLIENT_ROOT=<client package, default npm/maestro-d>] \
 //     node e2e/trafficShape.e2e.ts
 //
-// $MAESTRO_D_HOME/network.json (mode 0600) must configure both calls for
+// To test a hub, set MAESTRO_D_HUB and MAESTRO_D_TOKEN and use a qualified
+// device id (<UDID or adb serial>@<hub name>). The script leases that device,
+// verifies the shape from across the gateway, resets it and releases the lease.
+// The device host's config.json (mode 0600) must configure both calls for
 // each device named, and this host must reach each address (the shaper
 // must see that traffic). Per device:
 //   0. Attach; a baseline ping (the lowest of 20 round trips).
@@ -43,14 +46,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
-import type { MaestroDevice } from '../npm/maestro-d/dist/types/index.js'
-
-interface Client {
-  MaestroD: {
-    attach: (options: { name?: string; device: string; appId: string; teamId?: string }) => Promise<MaestroDevice>
-  }
-  isMaestroError: (err: unknown, code?: string) => boolean
-}
+type Client = typeof import('../npm/maestro-d/dist/types/index.js')
 
 const run = promisify(execFile)
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -162,96 +158,125 @@ async function wifiAddress(serial: string): Promise<string> {
 
 async function exercise(client: Client, t: Target): Promise<void> {
   say(`== ${t.platform} ${t.device} at ${t.addr}`)
-  const m = await step(`${t.platform}: attach`, async () =>
-    await client.MaestroD.attach({ name: daemonName, device: t.device, appId: t.appId, ...(teamId == null ? {} : { teamId }) })
-  )
-  let detached = false
+  const hub = optional('MAESTRO_D_HUB')
+  const token = optional('MAESTRO_D_TOKEN')
+  const serial = t.device.split('@')[0]
+  if (hub && (!token || !serial || !t.device.slice(serial.length + 1))) {
+    throw new Error('hub mode requires MAESTRO_D_TOKEN and a device qualified with @<hub name>')
+  }
+  const attach = { appId: t.appId, platform: t.platform, teamId }
+  const md = hub ? await client.MaestroD.connect({ hub, token }) : undefined
   try {
-    const base = await step(`${t.platform}: baseline ping`, async () => {
-      const p = await ping(t.addr)
-      say(`     ${show(p)}`)
-      assert(p.received >= pings - 2, `only ${p.received} of ${pings} answered`)
-      return p.min
-    })
+    const m = await step(hub ? `lease and attach ${t.device}` : `attach ${t.device}`, () =>
+      md ? md.lease({ device: t.device, attach, ttlSec: 900 }) :
+        client.MaestroD.attach({ name: daemonName, device: t.device, ...attach })
+    )
+    let detached = false
+    let base: number | undefined
+    try {
+      base = await step(`${t.platform}: baseline ping`, async () => {
+        const p = await ping(t.addr)
+        say(`     ${show(p)}`)
+        assert(p.received >= pings - 2, `only ${p.received} of ${pings} answered`)
+        return p.min
+      })
 
-    await step(`${t.platform}: L1 setTrafficShape {lossPct: 100}`, async () => {
-      const res = await m.setTrafficShape({ lossPct: 100 })
-      say(`     ${String(res.message)}`)
-      const p = await ping(t.addr)
-      say(`     ${show(p)}`)
-      assert.equal(p.received, 0, 'pings still answered under 100% loss')
-      const shot = await m.takeScreenshot()
-      assert.equal(shot.ok, true, 'takeScreenshot failed under 100% loss')
-      say('     takeScreenshot still works (USB)')
-    })
+      const baseline = base
+      await step(`${t.platform}: L1 setTrafficShape {lossPct: 100}`, async () => {
+        const res = await m.setTrafficShape({ lossPct: 100 })
+        say(`     ${String(res.message)}`)
+        const p = await ping(t.addr)
+        say(`     ${show(p)}`)
+        assert.equal(p.received, 0, 'pings still answered under 100% loss')
+        const shot = await m.takeScreenshot()
+        assert.equal(shot.ok, true, 'takeScreenshot failed under 100% loss')
+        say('     takeScreenshot still works (USB)')
+      })
 
-    await step(`${t.platform}: L2 setTrafficShape {latencyMs: 100}`, async () => {
-      await m.setTrafficShape({ latencyMs: 100 })
-      const p = await ping(t.addr)
-      const delta = p.min - base
-      say(`     ${show(p)}: +${delta.toFixed(1)} ms over the baseline`)
-      assert(delta >= 150 && delta <= 300, `ping rose by ${delta.toFixed(1)} ms, want about 200`)
-    })
+      await step(`${t.platform}: L2 setTrafficShape {latencyMs: 100}`, async () => {
+        await m.setTrafficShape({ latencyMs: 100 })
+        const p = await ping(t.addr)
+        const delta = p.min - baseline
+        say(`     ${show(p)}: +${delta.toFixed(1)} ms over the baseline`)
+        assert(delta >= 150 && delta <= 300, `ping rose by ${delta.toFixed(1)} ms, want about 200`)
+      })
 
-    const unshaped = await step(`${t.platform}: L3 resetTrafficShape`, async () => {
-      await m.resetTrafficShape()
-      const p = await backToBaseline(t.addr, base)
-      say(`     ${show(p)}`)
-      return p.min
-    })
+      const unshaped = await step(`${t.platform}: L3 resetTrafficShape`, async () => {
+        await m.resetTrafficShape()
+        const p = await backToBaseline(t.addr, baseline)
+        say(`     ${show(p)}`)
+        return p.min
+      })
 
-    // Against the lower of the two unshaped readings, so one taken in a
-    // slow Wi-Fi spell cannot hide (or fake) the added delay.
-    const floor = Math.min(base, unshaped)
-    await step(`${t.platform}: L4 setTrafficShape {latencyMs: 100, direction: download}`, async () => {
-      await m.setTrafficShape({ latencyMs: 100, direction: 'download' })
-      const p = await ping(t.addr)
-      const delta = p.min - floor
-      say(`     ${show(p)}: +${delta.toFixed(1)} ms over the baseline`)
-      assert(delta >= 60 && delta <= 160, `ping rose by ${delta.toFixed(1)} ms, want about 100 (one direction)`)
-    })
+      // Against the lower of the two unshaped readings, so one taken in a
+      // slow Wi-Fi spell cannot hide (or fake) the added delay.
+      const floor = Math.min(base, unshaped)
+      await step(`${t.platform}: L4 setTrafficShape {latencyMs: 100, direction: download}`, async () => {
+        await m.setTrafficShape({ latencyMs: 100, direction: 'download' })
+        const p = await ping(t.addr)
+        const delta = p.min - floor
+        say(`     ${show(p)}: +${delta.toFixed(1)} ms over the baseline`)
+        assert(delta >= 60 && delta <= 160, `ping rose by ${delta.toFixed(1)} ms, want about 100 (one direction)`)
+      })
 
-    if (t.platform === 'ios') {
-      await step('ios: setAirplaneMode answers UNSUPPORTED', async () => {
-        try {
+      if (t.platform === 'ios') {
+        await step('ios: setAirplaneMode answers UNSUPPORTED', async () => {
+          try {
+            await m.setAirplaneMode('enabled')
+          } catch (error) {
+            assert(client.isMaestroError(error, 'UNSUPPORTED'), String(error))
+            say(`     ${error instanceof Error ? error.message : String(error)}`)
+            return
+          }
+          assert.fail('setAirplaneMode succeeded on iOS')
+        })
+      } else {
+        await step('android: setAirplaneMode enabled', async () => {
           await m.setAirplaneMode('enabled')
-        } catch (error) {
-          assert(client.isMaestroError(error, 'UNSUPPORTED'), String(error))
-          say(`     ${error instanceof Error ? error.message : String(error)}`)
-          return
-        }
-        assert.fail('setAirplaneMode succeeded on iOS')
-      })
-    } else {
-      await step('android: setAirplaneMode enabled', async () => {
-        await m.setAirplaneMode('enabled')
-        say(`     airplane_mode_on = ${await adb(t.device, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')}`)
-      })
-    }
-
-    await step(`${t.platform}: L5 setTrafficShape {latencyMs: 100}, then detach`, async () => {
-      await m.setTrafficShape({ latencyMs: 100 })
-      detached = true
-      await m.detach()
-      let addr = t.addr
-      if (t.platform === 'android') {
-        const on = await adb(t.device, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')
-        say(`     airplane_mode_on = ${on} after detach`)
-        assert.equal(on, '0', 'airplane mode is still on after detach')
-        // Leaving airplane mode rejoins Wi-Fi, and DHCP may hand out
-        // another address; ping the one the phone has now.
-        addr = await wifiAddress(t.device)
-        if (addr !== t.addr) say(`     the phone rejoined Wi-Fi at ${addr}`)
+          say(`     airplane_mode_on = ${await adb(serial, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')}`)
+        })
       }
-      say(`     ${show(await backToBaseline(addr, base))} after detach`)
-    })
+
+      if (md) return
+
+      await step(`${t.platform}: L5 setTrafficShape {latencyMs: 100}, then detach`, async () => {
+        await m.setTrafficShape({ latencyMs: 100 })
+        await m.detach()
+        detached = true
+        let addr = t.addr
+        if (t.platform === 'android') {
+          const on = await adb(serial, 'shell', 'settings', 'get', 'global', 'airplane_mode_on')
+          say(`     airplane_mode_on = ${on} after detach`)
+          assert.equal(on, '0', 'airplane mode is still on after detach')
+          // Leaving airplane mode rejoins Wi-Fi, and DHCP may hand out
+          // another address; ping the one the phone has now.
+          addr = await wifiAddress(serial)
+          if (addr !== t.addr) say(`     the phone rejoined Wi-Fi at ${addr}`)
+        }
+        say(`     ${show(await backToBaseline(addr, floor))} after detach`)
+      })
+    } finally {
+      if (md) {
+        try {
+          await step('reset the leased device shape', () => m.resetTrafficShape())
+        } finally {
+          await step('release the physical device', () => m.release())
+        }
+        if (base !== undefined) {
+          const addr = t.platform === 'android' ? await wifiAddress(serial) : t.addr
+          say(`post-release baseline: ${show(await backToBaseline(addr, base))}`)
+        }
+      } else if (!detached) {
+        await m.detach()
+      }
+    }
   } finally {
-    if (!detached) await m.detach().catch(() => {})
+    await md?.close()
   }
 }
 
 async function main(): Promise<void> {
-  say(`daemon ${daemonName}; devices ${targets.map(t => `${t.platform} ${t.device}`).join(', ')}`)
+  say(`${optional('MAESTRO_D_HUB') ?? daemonName}; devices ${targets.map(t => `${t.platform} ${t.device}`).join(', ')}`)
   const client = (await import(pathToFileURL(path.join(clientRoot, 'dist', 'esm', 'index.js')).href)) as Client
   for (const t of targets) await exercise(client, t)
 }

@@ -13,8 +13,8 @@ var listAndroidDevices = device.ListDevicesWithProps
 
 // applyAndroidProps copies d's properties onto entry. A phone takes its
 // name, model and Android version. An emulator takes its model and
-// version only: its name is its AVD's, which avdEntries sets, and AVD ids,
-// --share-device and lease selectors match on that name.
+// version only: its name is its AVD's, which avdEntries sets, and AVD ids
+// and lease selectors match on that name.
 func applyAndroidProps(entry *DeviceEntry, d device.DeviceWithProps) {
 	entry.Model = d.Model
 	entry.OSVersion = d.OSVersion
