@@ -62,15 +62,6 @@ func TestShutdownDevice_ComputerIsANoOp(t *testing.T) {
 	}
 }
 
-func TestCheckRemoteAttach_Computer(t *testing.T) {
-	if e := CheckRemoteAttach(&AttachConfig{Platform: "macOS"}); e == nil || e.Code != CodeForbidden || !strings.Contains(e.Message, "local only") {
-		t.Fatalf("%v", e)
-	}
-	if e := CheckRemoteAttach(&AttachConfig{Platform: "android"}); e != nil {
-		t.Fatalf("android refused: %v", e)
-	}
-}
-
 func hasID(list []DeviceInfo, id string) bool {
 	for _, d := range list {
 		if d.ID == id {

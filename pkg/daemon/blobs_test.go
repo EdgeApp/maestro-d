@@ -275,7 +275,7 @@ func TestBlobStore_Materialize(t *testing.T) {
 }
 
 func TestBlobRoutes(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("blob"), 1000)
 	h := sha(data)

@@ -11,13 +11,13 @@ import (
 )
 
 type daemonOpts struct {
-	Name, DeviceConfig, NetworkConfig, HTTPAddr, Token, TLSCert, TLSKey, Target, CAFile string
-	JSON, Verbose                                                                       bool
-	StartTimeout                                                                        int
-	PassEnv                                                                             []string
-	explicit                                                                            map[string]bool
-	hub                                                                                 hubOpts
-	deps                                                                                func() daemon.Deps
+	Name, DeviceConfig, NetworkConfig, HTTPAddr, Token, TLSCert, TLSKey string
+	JSON, Verbose                                                       bool
+	StartTimeout                                                        int
+	PassEnv                                                             []string
+	explicit                                                            map[string]bool
+	hub                                                                 hubOpts
+	deps                                                                func() daemon.Deps
 }
 type dflag = common.Flag[daemonOpts]
 
@@ -56,34 +56,12 @@ var outputFlags = []dflag{
 	common.BoolFlag("verbose", "Print progress to stderr", []string{"MAESTRO_VERBOSE"}, func(o *daemonOpts, v bool) { o.Verbose = v }),
 }
 
-// tokenFlag is the bearer token: required by a TCP listener that has one,
-// and sent by a client that targets one.
-var tokenFlag = common.StringFlag("token", "Bearer token: required on the TCP listener (serve/start), sent to a --target-hub", []string{"MAESTRO_D_TOKEN"},
-	func(o *daemonOpts, v string) { o.Token = v })
-
-// targetFlags point a client command at a TCP daemon or hub instead of the
-// local named daemon. A targeted command never spawns a daemon.
-var targetFlags = []dflag{
-	{Name: "target-hub", Kind: common.OptionalValue, Env: []string{"MAESTRO_D_HUB"},
-		Usage: "Talk to the daemon or hub at HOST[:PORT] (default port 7433; https:// for TLS) instead of the local one; bare means localhost:7433",
-		Apply: func(o *daemonOpts, v string) error {
-			if v == "" {
-				v = "localhost"
-			}
-			o.Target = v
-			return nil
-		}},
-	common.StringFlag("ca", "PEM file of a trust root for a --target-hub with a self-signed certificate", []string{"MAESTRO_D_CA"},
-		func(o *daemonOpts, v string) { o.CAFile = v }),
-	tokenFlag,
-}
-
 func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (*daemonOpts, *common.ParsedArgs, error) {
 	o, parsed, err := common.ParseArgs(args, flags, stepKeys)
 	if err != nil {
 		return nil, nil, err
 	}
-	o.Name = daemon.ResolveName(o.Name)
+	o.Name = DefaultHubDaemon
 	o.explicit = parsed.Explicit
 	return o, parsed, nil
 }

@@ -39,7 +39,7 @@ const exists = (rel) => fs.existsSync(path.join(work, rel))
 /** @type {{method: string, url: string, body: string}[]} */ let seen = []
 
 before(async () => {
-  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
   file('flow/main.yaml', 'appId: x\n---\n- launchApp\n- runFlow: sub/open.yaml\n- runScript: scripts/compute.js\n- assertTrue: ${output.ok}\n- addMedia: [photo.png]\n- takeScreenshot: done\n')
   file('flow/sub/open.yaml', '- tapOn: General\n- takeScreenshot: x\n')
   file('flow/scripts/compute.js', 'output.ok = true')

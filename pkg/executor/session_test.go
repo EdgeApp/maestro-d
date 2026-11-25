@@ -342,3 +342,43 @@ func TestSession_StepDelay(t *testing.T) {
 		t.Fatalf("StepDelay not applied between steps: %v", el)
 	}
 }
+
+type flowTimingDriver struct {
+	core.Driver
+	find, idle, typing int
+}
+
+func (d *flowTimingDriver) SetFindTimeout(ms int) { d.find = ms }
+func (d *flowTimingDriver) SetWaitForIdleTimeout(ms int) error {
+	d.idle = ms
+	return nil
+}
+func (d *flowTimingDriver) SetTypingFrequency(hz int) error {
+	d.typing = hz
+	return nil
+}
+
+func TestHubTestRestoresLeasedDriverAfterCancellation(t *testing.T) {
+	driver := &flowTimingDriver{Driver: mock.New(mock.Config{})}
+	s, err := NewSession(context.Background(), driver, RunnerConfig{
+		OutputDir: t.TempDir(), WaitForIdleTimeout: 12, TypingFrequency: 13,
+	}, SessionConfig{CommandTimeout: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	f, err := flow.Parse([]byte("commandTimeout: 21\nwaitForIdleTimeout: 22\ntypingFrequency: 23\n---\n- assertTrue: true\n- assertTrue: true\n"), "paced.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	out := s.RunTestFlow(ctx, *f, TestFlowOptions{StepDelay: 5000})
+	if out.Success || time.Since(start) >= 4*time.Second {
+		t.Fatalf("step delay did not respond to cancellation: %+v", out)
+	}
+	if driver.find != 11 || driver.idle != 12 || driver.typing != 13 {
+		t.Fatalf("leased session timing after cancellation: %+v", driver)
+	}
+}

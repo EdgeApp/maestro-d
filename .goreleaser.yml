@@ -5,8 +5,10 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/maestro-runner
-    binary: maestro-runner
+  - &client
+    id: maestro-d
+    main: ./cmd/maestro-d
+    binary: maestro-d
     env:
       - CGO_ENABLED=0
     goos:
@@ -18,6 +20,11 @@ builds:
       - arm64
     ldflags:
       - -s -w -X github.com/devicelab-dev/maestro-runner/pkg/version.Version={{.Version}} -X github.com/devicelab-dev/maestro-runner/pkg/version.Commit={{.Commit}} -X github.com/devicelab-dev/maestro-runner/pkg/version.BuildDate={{.Date}}
+
+  - <<: *client
+    id: maestro-d-hub
+    main: ./cmd/maestro-d-hub
+    binary: maestro-d-hub
 
 archives:
   - format: tar.gz
@@ -39,5 +46,5 @@ changelog:
 
 release:
   github:
-    owner: devicelab-dev
-    name: maestro-runner
+    owner: EdgeApp
+    name: maestro-d
