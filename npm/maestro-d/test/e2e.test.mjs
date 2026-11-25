@@ -1010,3 +1010,59 @@ describe('binary resolution', () => {
     fs.rmSync(prefix, { recursive: true, force: true })
   })
 })
+
+test('devices() lists both leased devices after their owner unshares them across the mesh', async (t) => {
+  const shared = ['mock-1', 'mock-2', 'mock-3']
+  const token = 'js-listing'
+  function startHub(name, devices, peer) {
+    const home = path.join(tmp, name)
+    fs.mkdirSync(home, { mode: 0o700 })
+    const env = { ...process.env, MAESTRO_D_HOME: home, MAESTRO_D_MOCK_DEVICES: devices.join(',') }
+    const config = path.join(home, 'config.json')
+    const write = (ids) => fs.writeFileSync(config, JSON.stringify({ hubDevices: ids.map(id => ({ id })) }), { mode: 0o600 })
+    write(devices)
+    const result = execFileSync(hubBin, ['start', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
+      '--token', token, '--peer-token', 'js-listing-peer', ...(peer ? ['--peer', peer] : []), '--json'], { env })
+    t.after(() => execFileSync(hubBin, ['stop'], { env }))
+    return { address: JSON.parse(result).daemon.httpAddr, write }
+  }
+
+  const owner = startHub('hub-b', shared)
+  const gateway = startHub('hub-a', [], owner.address)
+  const holder = await MaestroD.connect({ hub: gateway.address, token })
+  const otherHome = path.join(tmp, 'listing-unrelated')
+  const publicId = 'mock-3@hub-b'
+  const all = shared.map(id => id + '@hub-b')
+  function freshListing(home) {
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import { MaestroD } from './dist/esm/index.js'
+      const md = await MaestroD.connect({ hub: process.env.MAESTRO_D_HUB })
+      try { console.log(JSON.stringify((await md.devices({ platform: 'mock' })).map(d => d.id).sort())) }
+      finally { await md.close() }
+    `], { cwd: path.resolve(here, '..'), env: { ...process.env, MAESTRO_D_HOME: home, MAESTRO_D_HUB: gateway.address, MAESTRO_D_TOKEN: token } })
+    return JSON.parse(output)
+  }
+  const listed = async () => (await holder.devices({ platform: 'mock' })).map(d => d.id).sort()
+  try {
+    for (const deadline = Date.now() + 15_000; ; ) {
+      if ((await listed()).length === 3) break
+      assert.ok(Date.now() < deadline, 'peers did not share their initial pool')
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+    await holder.lease({ device: all[0], attach: false })
+    await holder.lease({ device: all[1], attach: false })
+    owner.write(['mock-3'])
+    for (const deadline = Date.now() + 15_000; ; ) {
+      const publicRows = freshListing(otherHome)
+      if (publicRows.length === 1 && publicRows[0] === publicId) break
+      assert.ok(Date.now() < deadline, 'public listing kept the unshared devices')
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+    assert.deepEqual(await listed(), all)
+    assert.deepEqual(freshListing(otherHome), [publicId])
+    assert.deepEqual(freshListing(process.env.MAESTRO_D_HOME), all)
+    assert.deepEqual(await listed(), all)
+  } finally {
+    await holder.close()
+  }
+})
