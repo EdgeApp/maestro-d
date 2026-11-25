@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -21,6 +22,7 @@ type Server struct {
 	teardowns      pending
 	cloudLaunching int
 
+	config    *configCache
 	shareMu   sync.Mutex
 	sharedIDs map[string]bool
 	shareSeen map[string]shareAnswer
@@ -29,12 +31,16 @@ type Server struct {
 
 func (s *Server) Bind(host *daemon.Server, cfg daemon.Config, deps daemon.Deps) {
 	s.Server, s.cfg, s.deps = host, cfg, deps
+	s.config = newConfigCache(daemon.DeviceConfigPath(cfg.DeviceConfig), s.configChanged)
 	s.leases = newLeaseTable()
 	s.sharedIDs = make(map[string]bool)
 	s.shareSeen = make(map[string]shareAnswer)
 }
 
-func (s *Server) Start(ctx context.Context) {
+func (s *Server) Start(ctx context.Context) error {
+	if _, err := s.config.snapshot(time.Now(), true); err != nil {
+		return err
+	}
 	s.loadReservations()
 	share := s.shareList()
 	if share == "" {
@@ -42,6 +48,7 @@ func (s *Server) Start(ctx context.Context) {
 	}
 	logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.HubName(), s.hubLeaseMax(), leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
 	go s.runLeaseSweeper(ctx)
+	return nil
 }
 
 func (s *Server) Routes(mux *http.ServeMux) {
