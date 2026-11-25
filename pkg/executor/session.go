@@ -101,7 +101,8 @@ type StepOutcome struct {
 	Panicked  bool          `json:"panicked,omitempty"`
 	// SubSteps are the nested results of compound steps (runFlow, repeat,
 	// retry), straight from the report.
-	SubSteps []report.Command `json:"subSteps,omitempty"`
+	SubSteps   []report.Command `json:"subSteps,omitempty"`
+	TestReport *TestFlowReport  `json:"testReport,omitempty"`
 	// Forbidden is set when the call's caller policy denied a step: the
 	// daemon reports it as FORBIDDEN.
 	Forbidden *PolicyDenial `json:"forbidden,omitempty"`
@@ -392,6 +393,30 @@ func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnE
 // onFlowStart hooks, steps and onFlowComplete hooks run inside the session
 // (sharing variables), and each nested step lands in SubSteps.
 func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
+	return s.runFlow(ctx, f, nil)
+}
+
+// TestFlowOptions are the invocation settings for a full Maestro test on a leased device.
+type TestFlowOptions struct {
+	Env       map[string]string `json:"env,omitempty"`
+	StepDelay int               `json:"stepDelay,omitempty"`
+	Artifacts ArtifactMode      `json:"artifacts,omitempty"`
+}
+
+// TestFlowReport carries the top-level runner’s executed step counts and diagnostics.
+type TestFlowReport struct {
+	Steps       report.CommandSummary `json:"steps"`
+	StepLatency *report.StepLatency   `json:"stepLatency,omitempty"`
+	ConsoleLogs []report.ConsoleLog   `json:"consoleLogs,omitempty"`
+	Recordings  []string              `json:"recordings,omitempty"`
+}
+
+// RunTestFlow executes a top-level test with its own variables and report entries.
+func (s *Session) RunTestFlow(ctx context.Context, f flow.Flow, opts TestFlowOptions) *StepOutcome {
+	return s.runFlow(ctx, f, &opts)
+}
+
+func (s *Session) runFlow(ctx context.Context, f flow.Flow, opts *TestFlowOptions) *StepOutcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ended() {
@@ -399,10 +424,10 @@ func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
 	}
 	ctx, call, done := s.beginPolicy(ctx)
 	defer done()
-	return s.applyDenial(s.withOutputs(s.runFlowLocked(ctx, f), call), call)
+	return s.applyDenial(s.withOutputs(s.runFlowLocked(ctx, f, opts), call), call)
 }
 
-func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
+func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow, opts *TestFlowOptions) *StepOutcome {
 	fr := s.fr
 	name := f.Config.Name
 	if name == "" && f.SourcePath != "" {
@@ -411,7 +436,7 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 	if name == "" {
 		name = "inline"
 	}
-	if f.Config.AppID != "" {
+	if opts == nil && f.Config.AppID != "" {
 		f.Config.AppID = fr.script.ExpandVariables(f.Config.AppID)
 	}
 	desc := "runFlow: " + name
@@ -423,6 +448,8 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 	fr.depth++
 	var result *core.CommandResult
 	var panicked bool
+	var testReport *TestFlowReport
+	mode := fr.config.Artifacts
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -431,7 +458,12 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 				result = &core.CommandResult{Success: false, Error: fmt.Errorf("driver panic: %v", r), Message: fmt.Sprintf("driver panic: %v", r)}
 			}
 		}()
-		result = s.runFlowSteps(f)
+		if opts != nil {
+			mode = opts.Artifacts
+			result, fr.subCommands, testReport = s.runTestCase(ctx, f, idx, *opts)
+		} else {
+			result = s.runFlowSteps(f)
+		}
 	}()
 	fr.depth--
 	restore()
@@ -441,7 +473,61 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 	if result == nil {
 		result = &core.CommandResult{Success: false, Error: fmt.Errorf("no result"), Message: "no result"}
 	}
-	return s.finishStep(ctx, idx, desc, string(flow.StepRunFlow), false, result, start, panicked, subs, report.CommandArtifacts{})
+	out := s.finishStep(ctx, idx, desc, string(flow.StepRunFlow), false, result, start, panicked, subs, report.CommandArtifacts{}, mode)
+	out.TestReport = testReport
+	return out
+}
+
+// runTestCase uses the same top-level dispatcher as a local test. The session
+// supplies the device and caller policy, and keeps responsibility for cleanup.
+func (s *Session) runTestCase(ctx context.Context, f flow.Flow, idx int, opts TestFlowOptions) (*core.CommandResult, []report.Command, *TestFlowReport) {
+	_, details, err := report.BuildSkeleton([]flow.Flow{f}, report.BuilderConfig{})
+	if err != nil {
+		return &core.CommandResult{Error: err, Message: err.Error()}, nil, nil
+	}
+	parent := s.fr
+	script := NewScriptEngine()
+	defer script.Close()
+	script.SetVariables(parent.script.variables)
+	script.policy = parent.script.policy
+	cfg := parent.config
+	cfg.Env, cfg.StepDelay, cfg.Artifacts = opts.Env, opts.StepDelay, opts.Artifacts
+	detail := &details[0]
+	detail.ID = fmt.Sprintf("test-%d", idx)
+	var recordings []string
+	runner := FlowRunner{
+		ctx: ctx, flow: f, detail: detail, driver: parent.driver, config: cfg,
+		indexWriter: parent.indexWriter, totalFlows: 1, shaper: parent.shaper,
+		undo: parent.undo,
+		rec:  stepRecording{onSaved: func(path string) { recordings = append(recordings, path) }},
+	}
+	defer func() {
+		parent.undo = runner.undo
+		if f.Config.CommandTimeout > 0 {
+			parent.driver.SetFindTimeout(parent.flow.Config.CommandTimeout)
+		}
+		if runner.waitForIdleTimeout != parent.waitForIdleTimeout {
+			_ = parent.driver.SetWaitForIdleTimeout(parent.waitForIdleTimeout)
+		}
+		if f.Config.TypingFrequency != nil {
+			if d, ok := core.Unwrap(parent.driver).(core.TypingFrequencyConfigurer); ok {
+				_ = d.SetTypingFrequency(parent.config.TypingFrequency)
+			}
+		}
+	}()
+	run := runner.runWithScript(script)
+	testReport := &TestFlowReport{
+		Steps:       report.CommandSummary{Total: run.StepsTotal, Passed: run.StepsPassed, Failed: run.StepsFailed, Skipped: run.StepsSkipped},
+		StepLatency: detail.StepLatency, ConsoleLogs: detail.ConsoleLogs, Recordings: recordings,
+	}
+	if run.Status != report.StatusPassed {
+		message := run.Error
+		if message == "" {
+			message = string(run.Status)
+		}
+		return &core.CommandResult{Error: fmt.Errorf("%s", message), Message: message}, detail.Commands, testReport
+	}
+	return &core.CommandResult{Success: true}, detail.Commands, testReport
 }
 
 // runFlowSteps runs a flow's hooks and steps through the nested dispatcher.
@@ -713,7 +799,7 @@ func (s *Session) executeLocked(ctx context.Context, step flow.Step) *StepOutcom
 	if screenshotPath != "" {
 		before.ScreenshotAfter = screenshotPath
 	}
-	return s.finishStep(ctx, idx, desc, typ, step.IsOptional(), result, start, panicked, subs, before)
+	return s.finishStep(ctx, idx, desc, typ, step.IsOptional(), result, start, panicked, subs, before, fr.config.Artifacts)
 }
 
 // applyDefaultAppID fills the session appId into app-lifecycle steps that
@@ -752,7 +838,7 @@ func (s *Session) applyDefaultAppID(step flow.Step) {
 // a takeScreenshot's own file) that the after-capture must not clobber.
 func (s *Session) finishStep(ctx context.Context, idx int, desc, typ string, optional bool,
 	result *core.CommandResult, start time.Time, panicked bool, subs []report.Command,
-	seed report.CommandArtifacts) *StepOutcome {
+	seed report.CommandArtifacts, mode ArtifactMode) *StepOutcome {
 	fr := s.fr
 	dur := time.Since(start).Milliseconds()
 	out := &StepOutcome{
@@ -798,7 +884,7 @@ func (s *Session) finishStep(ctx context.Context, idx int, desc, typ string, opt
 	}
 
 	artifacts := seed
-	if (!result.Success && fr.config.Artifacts != ArtifactNever) || fr.config.Artifacts == ArtifactAlways {
+	if (!result.Success && mode != ArtifactNever) || mode == ArtifactAlways {
 		after := fr.captureArtifacts(idx, "after")
 		if artifacts.ScreenshotAfter == "" {
 			artifacts.ScreenshotAfter = after.ScreenshotAfter

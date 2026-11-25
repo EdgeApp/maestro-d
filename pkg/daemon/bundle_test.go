@@ -52,7 +52,7 @@ func attachRemote(t *testing.T, env *callerEnv) string {
 }
 
 func TestBundle_FlowRunsInsideTheBundle(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	m := bundleOf(t, env, "main.yaml", map[string]string{
@@ -97,8 +97,32 @@ func TestBundle_FlowRunsInsideTheBundle(t *testing.T) {
 	wantErrCode(t, err, CodeUsage)
 }
 
+func TestBundledTestScopesVariablesAndCallerPolicy(t *testing.T) {
+	t.Setenv("MAESTRO_D_PRIVATE_TEST_VALUE", "host-only")
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
+	ctx := context.Background()
+	attachRemote(t, env)
+	if _, err := env.remote.SetVars(ctx, "mock-1", map[string]string{"FLOW_VALUE": "session"}); err != nil {
+		t.Fatal(err)
+	}
+	m := bundleOf(t, env, "main.yaml", map[string]string{
+		"main.yaml": "appId: ${APP_ID}\nenv:\n  FLOW_VALUE: flow\n---\n- assertTrue: ${FLOW_VALUE == 'flow' && APP_ID == 'expected' && typeof MAESTRO_D_PRIVATE_TEST_VALUE == 'undefined'}\n",
+	})
+	opts := &executor.TestFlowOptions{Env: map[string]string{"APP_ID": "expected", "THIS_CALL_ONLY": "yes"}}
+	if _, err := env.remote.Flow(ctx, "mock-1", FlowRequest{Bundle: m, Test: opts}, true); err != nil {
+		t.Fatal(err)
+	}
+	vars, err := env.remote.Vars(ctx, "mock-1")
+	if _, leaked := vars["THIS_CALL_ONLY"]; err != nil || leaked || vars["FLOW_VALUE"] != "session" {
+		t.Fatalf("session environment changed: %v %v", vars, err)
+	}
+	m = bundleOf(t, env, "deny.yaml", map[string]string{"deny.yaml": "- runShell: echo forbidden\n"})
+	_, err = env.remote.Flow(ctx, "mock-1", FlowRequest{Bundle: m, Test: opts}, true)
+	_ = wantErrCode(t, err, CodeForbidden)
+}
+
 func TestBundle_StepListRootBelowCommonDir(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	attachRemote(t, env)
 	m := bundleOf(t, env, "flows/steps.yaml", map[string]string{
@@ -137,7 +161,7 @@ func TestBundle_StepListRootBelowCommonDir(t *testing.T) {
 }
 
 func TestBundle_PolicyStillApplies(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	attachRemote(t, env)
 	shell := bundleOf(t, env, "runShell.yaml", map[string]string{"runShell.yaml": "- runShell: echo x\n"})
@@ -157,7 +181,7 @@ func TestBundle_PolicyStillApplies(t *testing.T) {
 }
 
 func TestBundle_ManifestValidation(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	good := strings.Repeat("a", 64)
@@ -216,7 +240,7 @@ func TestBundle_ManifestValidation(t *testing.T) {
 }
 
 func TestBundle_RefsInOneShots(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	reportDir := attachRemote(t, env)
 	m := bundleOf(t, env, "sub/open.yaml", map[string]string{

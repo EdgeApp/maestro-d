@@ -2,12 +2,8 @@ package daemon
 
 // caller.go: who sent a request, and what a remote caller may not do.
 //
-// Only the unix socket is local on a hub: every TCP request, loopback
-// included, is remote there. On a plain `serve --http` daemon a request
-// from a non-loopback address is remote and a loopback one stays local, so
-// existing `--http 127.0.0.1:…` users keep host paths, runShell and the
-// system environment. The caller policy for each step-running call is
-// decided from the request, never from who attached the session.
+// Only the unix socket is local on a hub. Both transports are local on a
+// loopback-only daemon. Each request carries its own caller policy.
 
 import (
 	"context"
@@ -22,6 +18,8 @@ import (
 type Caller struct {
 	// Remote is true for a caller that must not reach the daemon's host.
 	Remote bool
+	// AllowShell permits a remote caller to execute runShell on this hub.
+	AllowShell bool
 	// Addr is the TCP peer address ("" on the unix socket).
 	Addr string
 	// ClientOutputs is set when the client names its own output files
@@ -57,33 +55,25 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// isLoopbackListen reports whether a --http address binds only loopback.
-// ":7433" means 127.0.0.1:7433 for `serve`, so an empty host is loopback.
-func isLoopbackListen(addr string) bool {
+// CheckLocalListen requires an explicit loopback host. Wildcard addresses bind all interfaces.
+func CheckLocalListen(addr string) *Error {
+	if addr == "" {
+		return nil
+	}
 	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
+	if err != nil || !isLoopbackHost(host) {
+		return Errorf(CodeUsage, "remote access is maestro-d-hub's job: run maestro-d-hub start (--http on maestro-d serve takes a loopback address only)")
 	}
-	return host == "" || isLoopbackHost(host)
+	return nil
 }
 
-// remoteTCP decides whether a TCP request is remote.
-func (s *Server) remoteTCP(remoteAddr string) bool {
-	if s.cfg.Hub != nil {
-		return true
+func (s *Server) tcpCaller(addr string, clientOutputs bool) Caller {
+	if hub := s.cfg.Hub; hub != nil {
+		return hub.TCPCaller(addr, clientOutputs)
 	}
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	return !isLoopbackHost(host)
+	return Caller{Addr: addr, ClientOutputs: clientOutputs}
 }
-
-// importsEnv reports whether sessions import the daemon's environment: not
-// on a hub, nor on a daemon that listens beyond loopback.
-func (s *Server) importsEnv() bool {
-	return s.cfg.Hub == nil && (s.cfg.HTTPAddr == "" || isLoopbackListen(s.cfg.HTTPAddr))
-}
+func (s *Server) importsEnv() bool { return s.cfg.Hub == nil }
 
 // callerPolicy is the executor policy for a step-running call on a.
 func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.CallerPolicy {
@@ -92,7 +82,7 @@ func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.Caller
 	p := &executor.CallerPolicy{Remote: c.Remote, ClientOutputs: c.ClientOutputs,
 		Blobs: sessionBlobs{store: s.blobs, dir: filepath.Join(a.reportDir, "blobs"), bundles: filepath.Join(a.reportDir, "bundles")}}
 	if c.Remote {
-		p.AllowShell = s.cfg.AllowRemoteShell
+		p.AllowShell = c.AllowShell
 	}
 	if c.Remote || c.ClientOutputs {
 		p.OutputsDir = filepath.Join(a.reportDir, "outputs")
@@ -103,67 +93,4 @@ func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.Caller
 // Forbidden builds a FORBIDDEN error for a remote request.
 func Forbidden(format string, args ...any) *Error {
 	return Errorf(CodeForbidden, format, args...)
-}
-
-// CheckRemoteAttach refuses the attach settings that would give a remote
-// caller the hub's host: a web session, a report or flow directory, a
-// browser profile, an app file that is not a blob ref, or Appium (its
-// driver, server URL or capabilities file).
-func CheckRemoteAttach(cfg *AttachConfig) *Error {
-	if strings.EqualFold(cfg.Platform, ComputerPlatform) {
-		return Forbidden("a remote caller cannot attach this computer: the computer device is local only").
-			WithDetails("field", "platform")
-	}
-	if strings.EqualFold(cfg.Platform, "web") || isWebDriver(cfg.Driver) {
-		return Forbidden("a remote caller cannot attach a web session: hubs share simulators, emulators and phones, not the host's browser").
-			WithDetails("field", "platform")
-	}
-	if cfg.OutputDir != "" {
-		return Forbidden("a remote caller cannot set outputDir (a directory on the daemon's host)").WithDetails("field", "outputDir")
-	}
-	if cfg.FlowDir != "" {
-		return Forbidden("a remote caller cannot set flowDir (a directory on the daemon's host)").WithDetails("field", "flowDir")
-	}
-	if cfg.AppFile != "" && !strings.HasPrefix(cfg.AppFile, "blob:") {
-		return Forbidden("appFile %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", cfg.AppFile).
-			WithDetails("field", "appFile")
-	}
-	if v, ok := cfg.Extra["browser"]; ok && v != "" && v != nil {
-		return Forbidden("a remote caller cannot set extra.browser (a program on the daemon's host)").
-			WithDetails("field", "extra.browser")
-	}
-	if v, ok := cfg.Extra["userDataDir"]; ok && v != "" && v != nil {
-		return Forbidden("a remote caller cannot set extra.userDataDir (a browser profile on the daemon's host)").
-			WithDetails("field", "extra.userDataDir")
-	}
-	// Appium capabilities name host files and programs (appium:app,
-	// appium:chromedriverExecutable, …) and appiumUrl points the hub at
-	// any address it can reach, so a remote caller gets no Appium at all.
-	if isAppiumDriver(cfg.Driver) {
-		return Forbidden("a remote caller cannot attach with the Appium driver (its capabilities reach the daemon's host)").
-			WithDetails("field", "driver")
-	}
-	if cfg.AppiumURL != "" {
-		return Forbidden("a remote caller cannot set appiumUrl (an Appium server the daemon would connect to)").
-			WithDetails("field", "appiumUrl")
-	}
-	if v, ok := cfg.Extra["capsFile"]; ok && v != "" && v != nil {
-		return Forbidden("a remote caller cannot set extra.capsFile (Appium capabilities reach the daemon's host)").
-			WithDetails("field", "extra.capsFile")
-	}
-	return nil
-}
-
-// isAppiumDriver matches the driver names upstream's CreateDriver routes to
-// Appium: it lower-cases the name, so any case of "appium" counts.
-func isAppiumDriver(driver string) bool {
-	return strings.EqualFold(strings.TrimSpace(driver), "appium")
-}
-
-func isWebDriver(driver string) bool {
-	switch strings.ToLower(driver) {
-	case "cdp", "playwright", "browser", "chrome", "chromium":
-		return true
-	}
-	return false
 }

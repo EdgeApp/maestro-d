@@ -18,7 +18,7 @@ case "${1:-}" in
     rm -rf coverage/tvos/e2e
     mkdir -p coverage/tvos/e2e coverage/tvos/bin
     printf '%s' "$revision" > coverage/tvos/e2e.revision
-    go build -cover -coverpkg="$packages,." -o coverage/tvos/bin/maestro-d .
+    go build -cover -coverpkg="$packages,./cmd/maestro-d" -o coverage/tvos/bin/maestro-d ./cmd/maestro-d
     ;;
   combined)
     test "$revision" = "$(cat coverage/tvos/unit.revision)"

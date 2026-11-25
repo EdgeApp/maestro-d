@@ -48,7 +48,7 @@ func appDeps(env *callerEnv, calls *appCalls) {
 }
 
 func TestApps_InstallAndUninstall(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	var calls appCalls
 	appDeps(env, &calls)
 	ctx := context.Background()
@@ -120,7 +120,7 @@ func TestAppPlatform(t *testing.T) {
 }
 
 func TestAttach_BlobAppFileAndCaps(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	var got AttachConfig
 	next := env.s.deps.NewDriver
@@ -166,7 +166,7 @@ func TestAttach_BlobAppFileAndCaps(t *testing.T) {
 // An attach that fails after it materialized its blobs removes them: a
 // packed .app is a full unzipped copy, and every retry would leave another.
 func TestAttach_FailedAttachRemovesItsBlobs(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	apk := []byte("PK\x03\x04apk")
 	if _, err := env.remote.UploadBlob(ctx, "mock-1", sha(apk), writeTemp(t, "app.apk", apk), int64(len(apk))); err != nil {
@@ -242,7 +242,7 @@ func TestAttach_FailedAttachRemovesItsBlobs(t *testing.T) {
 }
 
 func TestArtifacts_ListAndFetch(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	info, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"})
 	if err != nil {
@@ -305,7 +305,7 @@ func TestArtifacts_ListAndFetch(t *testing.T) {
 }
 
 func TestOutputs_RemoteAndLocal(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	info, err := env.local.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"})
 	if err != nil {

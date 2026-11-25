@@ -33,6 +33,7 @@ type stepRecording struct {
 	// inReport puts recordings under the report directory itself (a
 	// daemon session) instead of the flow's assets directory.
 	inReport bool
+	onSaved  func(string) // receives the report-relative path of each finalized movie
 	active   *capture.Recorder
 	used     map[string]bool // the file names this runner's recordings took
 	name     string          // the running recording's file name
@@ -195,7 +196,9 @@ func (fr *FlowRunner) finishRecording() error {
 	}
 	fr.rec.active = nil
 	err := r.Stop(dest)
-	recordingSaved("recording "+rel, err)
+	if recordingSaved("recording "+rel, err) && fr.rec.onSaved != nil {
+		fr.rec.onSaved(rel)
+	}
 	if err == nil {
 		logger.Info("Saved recording %s", dest)
 	}
