@@ -38,7 +38,7 @@ func (s *Server) Start(ctx context.Context) {
 	s.loadReservations()
 	share := s.shareList()
 	if share == "" {
-		share = "nothing (name devices with --share-device, --share-tv or config.json's hubDevices)"
+		share = "nothing (list devices in config.json's hubDevices)"
 	}
 	logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.HubName(), s.hubLeaseMax(), leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
 	go s.runLeaseSweeper(ctx)

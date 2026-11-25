@@ -49,15 +49,6 @@ type Config struct {
 	Hub Hub
 	// HubName names a hub (default: the short host name).
 	HubName string
-	// ShareDevices, on a hub, names the devices remote callers see and may
-	// lease, by id or name (--share-device). A hub shares only the devices
-	// it names here, in ShareTVs or in ShareConfig: none by default.
-	ShareDevices []string
-	// ShareTVs, on a hub, names the Apple TVs it shares, by id or name. A
-	// TV pairs with several Macs, so it is shared only when named, and
-	// naming it on one hub keeps one owner for it. TVs are left out of
-	// ShareDevices either way.
-	ShareTVs []string
 	// ShareConfig, on a hub, is its config.json's hubDevices, read when it
 	// starts: it shares each of them, TVs included.
 	ShareConfig []string
@@ -85,12 +76,8 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
-	// DeviceConfig is the device config (--config): read as config.json,
-	// with no fallback. NetworkConfig (--network-config) is an older
-	// network.json, read as one. With neither, <home>/config.json is read
-	// when it exists, else <home>/network.json.
-	DeviceConfig  string
-	NetworkConfig string
+	// DeviceConfig overrides the default <home>/config.json.
+	DeviceConfig string
 	// BlobsDir is the blob store's root (default <home>/blobs).
 	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
@@ -122,13 +109,6 @@ type Server struct {
 	idle           *idleTimer
 	idem           *idemCache
 	blobs          *BlobStore
-	// sharedIDs remembers the stable device ids found in the
-	// --share-device pool; shareSeen, other answers for a short while
-	// (shared). shareGen counts forgetShared calls.
-	shareMu   sync.Mutex
-	sharedIDs map[string]bool
-	shareSeen map[string]shareAnswer
-	shareGen  int
 	// idemGrace: how long a dropped TCP request waits for its retry.
 	idemGrace time.Duration
 
@@ -172,8 +152,6 @@ func New(cfg Config, deps Deps) *Server {
 		events:         NewEventBus(0),
 		idem:           newIdemCache(),
 		blobs:          NewBlobStore(cfg.BlobsDir),
-		sharedIDs:      map[string]bool{},
-		shareSeen:      map[string]shareAnswer{},
 		idemGrace:      idemGrace,
 		attached:       map[string]*attached{},
 		attaching:      map[string]chan struct{}{},
@@ -187,7 +165,6 @@ func New(cfg Config, deps Deps) *Server {
 	if deps.ShutdownDevice != nil {
 		s.registry.shutdown = deps.ShutdownDevice
 	}
-	s.events.observe = s.forgetShared
 	if cfg.Hub != nil {
 		cfg.Hub.Bind(s, cfg, deps)
 		s.events.observe = cfg.Hub.OnEvent

@@ -24,7 +24,7 @@ package hubd
 // A plain daemon (not a hub) has no leases: there, attach-and-own stays as
 // it was, and the lease routes answer USAGE.
 //
-// --share-device keeps a hub's other devices private to its own machine:
+// The hub keeps its other devices private to its own machine:
 // a remote caller does not see them in listings and is refused them with
 // DEVICE_NOT_FOUND. The unix socket, which only the hub's machine reaches,
 // sees every device.
@@ -818,54 +818,23 @@ func leaseFrom(ctx context.Context) *leaseEntry {
 	return v.e
 }
 
-// shareMatches reports whether a --share-device entry names the device, by
+// shareMatches reports whether a lease duration override names a device, by
 // id or by name (a running emulator's name is its AVD name).
 func shareMatches(entry string, d daemon.DeviceInfo) bool {
 	return entry == d.ID || (d.Name != "" && strings.EqualFold(entry, d.Name)) ||
 		(strings.HasPrefix(d.ID, daemon.AVDPrefix) && strings.EqualFold(entry, strings.TrimPrefix(d.ID, daemon.AVDPrefix)))
 }
 
-// sharedInfo reports whether a listed device is in the hub's pool. A hub
-// shares only what it names: a TV when --share-tv or config.json names it
-// (see Config.ShareTVs), any other device when --share-device or
-// config.json does. A daemon that is not a hub shares every device unless
-// Config.ShareDevices names some.
+// sharedInfo reports whether this hub exposes the device to remote callers.
 func (s *Server) sharedInfo(d daemon.DeviceInfo) bool {
 	if daemon.IsComputer(d) {
-		return false // local only, whatever --share-device says
+		return false
 	}
-	// A cloud device a hub launched for a lease is always in its pool. On a
-	// plain daemon a cloud device (its owner's credentials pay for it)
-	// follows --share-device like any other.
 	if d.Provider != "" {
-		return true
+		return true // the hub launched this cloud device for a lease
 	}
-	if strings.EqualFold(d.Kind, "tv") {
-		return s.sharedTV(d)
-	}
-	return namedIn(s.cfg.ShareDevices, d) || s.configShares(d)
-}
-
-// sharedTV reports whether --share-tv or config.json names the TV d.
-func (s *Server) sharedTV(d daemon.DeviceInfo) bool {
-	return namedIn(s.cfg.ShareTVs, d) || s.configShares(d)
-}
-
-// configShares reports whether config.json's hubDevices names device d
-// (see configNames).
-func (s *Server) configShares(d daemon.DeviceInfo) bool {
 	for _, id := range s.cfg.ShareConfig {
 		if daemon.ConfigNames(id, d) {
-			return true
-		}
-	}
-	return false
-}
-
-// namedIn reports whether an entry of list names device d.
-func namedIn(list []string, d daemon.DeviceInfo) bool {
-	for _, entry := range list {
-		if shareMatches(entry, d) {
 			return true
 		}
 	}
@@ -875,17 +844,10 @@ func namedIn(list []string, d daemon.DeviceInfo) bool {
 // shareList describes what a hub shares, for its log and refusals: "" when
 // it names nothing.
 func (s *Server) shareList() string {
-	var parts []string
-	if len(s.cfg.ShareDevices) > 0 {
-		parts = append(parts, strings.Join(s.cfg.ShareDevices, ", "))
+	if len(s.cfg.ShareConfig) == 0 {
+		return ""
 	}
-	if len(s.cfg.ShareTVs) > 0 {
-		parts = append(parts, "TVs "+strings.Join(s.cfg.ShareTVs, ", "))
-	}
-	if len(s.cfg.ShareConfig) > 0 {
-		parts = append(parts, "config.json "+strings.Join(s.cfg.ShareConfig, ", "))
-	}
-	return strings.Join(parts, "; ")
+	return "config.json " + strings.Join(s.cfg.ShareConfig, ", ")
 }
 
 // tvInfo reports whether id is an Apple TV on this host, and its name: from
@@ -932,7 +894,7 @@ func (s *Server) shared(id string) bool {
 		return false
 	}
 	if tv, ok := s.tvInfo(id); ok {
-		return s.sharedTV(tv)
+		return s.sharedInfo(tv)
 	}
 	stable := !daemon.IsEmulatorSerial(id)
 	now := s.leases.now()

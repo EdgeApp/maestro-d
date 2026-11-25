@@ -496,7 +496,7 @@ type DeviceInfo struct {
 	Machine   string   `json:"machine,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
 	// TrafficShaping is true when the device's host has both traffic-shaping
-	// calls configured for it in its network.json.
+	// calls configured for it in its config.json.
 	TrafficShaping bool `json:"trafficShaping,omitempty"`
 	// Location is where the device is, relative to the caller's computer:
 	// local, mesh or cloud. It is computed per request (location.go).

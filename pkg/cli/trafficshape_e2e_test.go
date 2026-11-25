@@ -51,19 +51,19 @@ func (sr *shapeRecorder) take(t *testing.T) []string {
 	return out
 }
 
-// writeShapingConfig writes home/network.json configuring one device.
+// writeShapingConfig writes home/config.json configuring one device.
 func writeShapingConfig(t *testing.T, home, device, base string) string {
 	t.Helper()
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(map[string]any{"devices": map[string]any{device: map[string]any{
+	data, _ := json.Marshal(map[string]any{"hubDevices": []any{map[string]any{"id": device, "trafficShaping": map[string]any{
 		"setTrafficShape": map[string]any{"method": "POST", "url": base + "/v1/shape",
 			"body":            map[string]any{"device": "${deviceId}", "mbit": "${mbit}", "lossPct": "${lossPct}", "latencyMs": "${latencyMs}", "jitterMs": "${jitterMs}", "direction": "${direction}"},
 			"directionValues": map[string]string{"download": "down", "upload": "up"}},
 		"resetTrafficShape": map[string]any{"method": "POST", "url": base + "/v1/shape", "body": map[string]any{"device": "${deviceId}"}},
-	}}})
-	path := filepath.Join(home, "network.json")
+	}}}})
+	path := filepath.Join(home, "config.json")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +153,7 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 	homeA, homeB, homeC := filepath.Join(e.cwd, "home-a"), filepath.Join(e.cwd, "home-b"), filepath.Join(e.cwd, "home-c")
 	writeShapingConfig(t, homeA, "mock-1", sr.URL)
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1"}
+	writeSharedMocks(t, homeB, "mock-3")
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	t.Cleanup(func() {
 		e.runEnv(envB, "maestro-d-hub", "stop")
@@ -169,8 +170,8 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--share-device", "mock-1"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=shape-tok"}
 
 	// Without a lease the owner refuses, and nothing is sent.
@@ -207,7 +208,7 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 
 // config.json through real hubs: hub-a shares only the device its
 // hubDevices lists, which carries its description and shaping across the
-// mesh; a broken config.json, or --config with --network-config, stops
+// mesh; a broken config.json stops
 // hub start.
 func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 	e := newE2E(t)
@@ -229,6 +230,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 		t.Fatal(err)
 	}
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
+	writeSharedMocks(t, homeB, "mock-3")
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	t.Cleanup(func() {
 		e.runEnv(envB, "maestro-d-hub", "stop")
@@ -236,17 +238,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "cfg-tok", "--peer-token", "cfg-peer", "--json"}
 
-	// Both flags, or a config.json that cannot be used: USAGE, no hub.
-	other := filepath.Join(e.cwd, "other.json")
-	if err := os.WriteFile(other, []byte(`{"hubDevices":[]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if r := e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--config", other, "--network-config", other}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
-		t.Fatalf("both flags: exit %d\n%s", r.code, r.stderr)
-	}
-	if r := e.runEnv(envA, "serve", "--daemon", "cfg-s", "--config", other, "--network-config", other); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
-		t.Fatalf("serve with both flags: exit %d\n%s", r.code, r.stderr)
-	}
+	// A broken config is refused before hub start.
 	broken := filepath.Join(e.cwd, "broken.json")
 	if err := os.WriteFile(broken, []byte(`{"hubDevices":[{"description":"no id"}]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -266,7 +258,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 		return out.Daemon
 	}
 	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=cfg-tok"}
 
 	var listed daemon.DevicesResult
@@ -296,7 +288,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 		t.Fatalf("hub-a shared mock-2, which its config.json does not list: %v", listed.Devices)
 	}
 	if _, ok := byID["mock-3@hub-b"]; !ok {
-		t.Fatalf("hub-b's --share-device mock-3 missing: %v", listed.Devices)
+		t.Fatalf("hub-b's configured mock-3 missing: %v", listed.Devices)
 	}
 	if r := e.runEnv(client, "lease", "--device", "mock-1@hub-a"); r.code != 0 {
 		t.Fatalf("lease: exit %d\n%s", r.code, r.stderr)
