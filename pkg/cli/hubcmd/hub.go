@@ -25,6 +25,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
 
@@ -56,20 +57,14 @@ var hubStartFlags = common.FlagSet(outputFlags, []dflag{
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
 	common.StringFlag("peer-ca", "PEM trust root for peers' TLS (default: the system roots)", nil,
 		func(o *daemonOpts, v string) { o.hub.peerCA = v }),
-	{Name: "share-device", Kind: common.Slice, Usage: "Share this device, by id or name (a running emulator's AVD name); repeatable. A hub shares only the devices named here, with --share-tv or in config.json's hubDevices: none by default",
-		Apply: func(o *daemonOpts, v string) error { o.hub.share = append(o.hub.share, v); return nil }},
-	{Name: "share-tv", Kind: common.Slice, Usage: "Share this Apple TV, by id or name; repeatable. A TV pairs with several Macs, so name each TV on one hub only. Default: none",
-		Apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
 	{Name: "lease-max", Kind: common.Slice, Value: "8h", Usage: "The longest lease window, DURATION (8h, 90m, or seconds) for the whole hub, or DEVICE=DURATION for one device by id or name; repeatable",
 		Apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
 	common.StringFlag("reservation-lead", "How far ahead a reservation may start, DURATION (24h, 90m, or seconds); default 24h", nil,
 		func(o *daemonOpts, v string) { o.hub.reservationLead = v }),
 	common.BoolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
-	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
-	common.StringFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
-		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 	common.BoolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
 		func(o *daemonOpts, v bool) { o.hub.devicefarm = v }),
 	common.StringFlag("devicefarm-credentials-file", "With --devicefarm: an AWS shared credentials file (a regular file, mode 0600 or stricter)", nil,
@@ -95,7 +90,8 @@ var hubStopFlags = common.FlagSet(outputFlags, []dflag{
 var hubStatusFlags = outputFlags
 
 func Commands(deps func() daemon.Deps) []*cli.Command {
-	withArgs := actions(deps)
+	withArgs := actions(deps, parseDaemonArgs)
+	withConfig := actions(deps, common.ConfigParser(parseDaemonArgs, deps))
 	return []*cli.Command{
 		{
 			Name:      "start",
@@ -118,7 +114,7 @@ seed. Any hub lists and drives every hub's devices: <id>@<hub>.
   maestro-d-hub start --name lab-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
   maestro-d-hub start --no-mdns --peer https://hub-b.example.com:7433 --token T --peer-token P --tls-cert hub.pem --tls-key hub-key.pem`, hubStartFlags),
 			SkipFlagParsing: true,
-			Action:          withArgs(hubStartFlags, runHubStart),
+			Action:          withConfig(hubStartFlags, runHubStart),
 		},
 		{
 			Name:            "stop",
@@ -136,7 +132,7 @@ seed. Any hub lists and drives every hub's devices: <id>@<hub>.
 			SkipFlagParsing: true,
 			Action:          withArgs(hubStatusFlags, runHubStatus),
 		},
-		serviceCommand(withArgs),
+		serviceCommand(withArgs, withConfig),
 	}
 }
 
@@ -266,18 +262,12 @@ func checkCloudFlags(o *daemonOpts) error {
 
 // configShare reads the device config a hub starts with and returns the
 // devices its hubDevices lists, which the hub shares. A config.json that
-// cannot be used stops the start: it decides what the hub shares. An older
-// network.json shares nothing and is not read here; its problems reach
-// the shaping commands, as before.
+// cannot be used stops the start: it decides what the hub shares.
 func configShare(o *daemonOpts) ([]string, error) {
-	if err := common.CheckConfigFlags(&o.DeviceConfig, &o.NetworkConfig, o.explicit); err != nil {
+	if err := common.CheckConfigPath(o.DeviceConfig, o.explicit); err != nil {
 		return nil, err
 	}
-	src := daemon.DeviceConfigSource(o.DeviceConfig, o.NetworkConfig)
-	if _, legacy := src.Resolve(); legacy {
-		return nil, nil
-	}
-	cfg, _, err := src.Load()
+	cfg, err := netshape.LoadConfig(daemon.DeviceConfigPath(o.DeviceConfig))
 	if err != nil {
 		return nil, daemon.Errorf(daemon.CodeUsage, "%v", err)
 	}
@@ -308,12 +298,6 @@ func hubChildArgs(o *daemonOpts) []string {
 	if o.hub.peerCA != "" {
 		args = append(args, "--peer-ca", abs(o.hub.peerCA))
 	}
-	for _, d := range o.hub.share {
-		args = append(args, "--share-device", d)
-	}
-	for _, d := range o.hub.shareTV {
-		args = append(args, "--share-tv", d)
-	}
 	for _, m := range o.hub.leaseMax {
 		args = append(args, "--lease-max", m)
 	}
@@ -343,9 +327,6 @@ func hubChildArgs(o *daemonOpts) []string {
 	}
 	if o.DeviceConfig != "" {
 		args = append(args, "--config", abs(o.DeviceConfig))
-	}
-	if o.NetworkConfig != "" {
-		args = append(args, "--network-config", abs(o.NetworkConfig))
 	}
 	return args
 }
@@ -497,8 +478,6 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		TLSKey:           o.TLSKey,
 		Hub:              &hubd.Server{},
 		HubName:          o.hub.name,
-		ShareDevices:     o.hub.share,
-		ShareTVs:         o.hub.shareTV,
 		ShareConfig:      o.hub.configShare,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,
@@ -508,7 +487,6 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		PassEnv:          o.PassEnv,
 
 		DeviceConfig:    o.DeviceConfig,
-		NetworkConfig:   o.NetworkConfig,
 		StartArgs:       redactArgs(os.Args[1:]),
 		Ready:           os.Stdout,
 		Mesh:            mesh,

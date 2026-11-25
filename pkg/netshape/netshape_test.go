@@ -63,7 +63,7 @@ func (r *recorder) last(t *testing.T) recorded {
 
 func writeConfig(t *testing.T, dir string, body string, mode os.FileMode) string {
 	t.Helper()
-	path := filepath.Join(dir, FileName)
+	path := filepath.Join(dir, ConfigFileName)
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,11 @@ func writeConfig(t *testing.T, dir string, body string, mode os.FileMode) string
 
 func jsonConfig(t *testing.T, devices map[string]Device) string {
 	t.Helper()
-	data, err := json.Marshal(Config{Devices: devices})
+	var entries []map[string]any
+	for id, d := range devices {
+		entries = append(entries, map[string]any{"id": id, "trafficShaping": d})
+	}
+	data, err := json.Marshal(map[string]any{"hubDevices": entries})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +87,7 @@ func jsonConfig(t *testing.T, devices map[string]Device) string {
 }
 
 func TestLoad_MissingFileIsEmpty(t *testing.T) {
-	cfg, err := Load(filepath.Join(t.TempDir(), FileName))
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), ConfigFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +97,8 @@ func TestLoad_MissingFileIsEmpty(t *testing.T) {
 }
 
 func TestLoad_RefusesAFileOthersCanRead(t *testing.T) {
-	path := writeConfig(t, t.TempDir(), `{"devices":{}}`, 0o644)
-	_, err := Load(path)
+	path := writeConfig(t, t.TempDir(), `{"hubDevices":[]}`, 0o644)
+	_, err := LoadConfig(path)
 	var ce *ConfigError
 	if !errors.As(err, &ce) || !strings.Contains(err.Error(), "chmod 600") || ce.Path != path {
 		t.Fatalf("err = %v", err)
@@ -104,7 +108,7 @@ func TestLoad_RefusesAFileOthersCanRead(t *testing.T) {
 func TestLoad_StatFailureIsAConfigError(t *testing.T) {
 	// A path through a regular file cannot be stat'ed as anything but an error.
 	file := writeConfig(t, t.TempDir(), `{}`, 0o600)
-	_, err := Load(filepath.Join(file, "network.json"))
+	_, err := LoadConfig(filepath.Join(file, "config.json"))
 	var ce *ConfigError
 	if !errors.As(err, &ce) {
 		t.Fatalf("err = %v", err)
@@ -116,7 +120,7 @@ func TestLoad_UnreadableIsAConfigError(t *testing.T) {
 		t.Skip("root reads anything")
 	}
 	path := writeConfig(t, t.TempDir(), `{}`, 0o200)
-	_, err := Load(path)
+	_, err := LoadConfig(path)
 	var ce *ConfigError
 	if !errors.As(err, &ce) {
 		t.Fatalf("err = %v", err)
@@ -125,19 +129,19 @@ func TestLoad_UnreadableIsAConfigError(t *testing.T) {
 
 func TestLoad_ErrorsNameTheFileAndDevice(t *testing.T) {
 	dir := t.TempDir()
-	path := writeConfig(t, dir, `{"devices":{"phone":{"setTrafficShape":{"method":"POST","url":"http://x/"}}}}`, 0o600)
-	_, err := Load(path)
+	path := writeConfig(t, dir, `{"hubDevices":[{"id":"phone","trafficShaping":{"setTrafficShape":{"method":"POST","url":"http://x/"}}}]}`, 0o600)
+	_, err := LoadConfig(path)
 	var ce *ConfigError
 	if !errors.As(err, &ce) || ce.Path != path || ce.Device != "phone" {
 		t.Fatalf("err = %#v", err)
 	}
-	want := fmt.Sprintf("config %s: device phone: has setTrafficShape but no resetTrafficShape", path)
+	want := fmt.Sprintf("config %s: device phone: trafficShaping: has setTrafficShape but no resetTrafficShape", path)
 	if err.Error() != want {
 		t.Fatalf("err = %q, want %q", err, want)
 	}
 
-	path = writeConfig(t, dir, `{"devices":`, 0o600)
-	_, err = Load(path)
+	path = writeConfig(t, dir, `{"hubDevices":`, 0o600)
+	_, err = LoadConfig(path)
 	if !errors.As(err, &ce) || ce.Device != "" || !strings.HasPrefix(err.Error(), "config "+path+": ") {
 		t.Fatalf("err = %v", err)
 	}
@@ -148,30 +152,31 @@ func TestParse_Validation(t *testing.T) {
 	cases := []struct {
 		name, json, want string
 	}{
-		{"unknown top-level key", `{"devices":{},"extra":1}`, `unknown field "extra"`},
-		{"unknown device key", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},` + good + `,"airplane":{}}}}`, `unknown field "airplane"`},
-		{"unknown call key", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/","timeout":3},` + good + `}}}`, `unknown field "timeout"`},
-		{"trailing data", `{"devices":{}} {}`, "trailing data"},
-		{"empty device", `{"devices":{"d":{}}}`, "neither setTrafficShape nor resetTrafficShape"},
-		{"description is config.json's", `{"devices":{"d":{"description":"x",` + good + `}}}`, `unknown field "description"`},
-		{"reset only", `{"devices":{"d":{` + good + `}}}`, "has resetTrafficShape but no setTrafficShape"},
-		{"bad method", `{"devices":{"d":{"setTrafficShape":{"method":"FETCH","url":"https://s.example/"},` + good + `}}}`, `setTrafficShape: method "FETCH"`},
-		{"lower-case method", `{"devices":{"d":{"setTrafficShape":{"method":"post","url":"https://s.example/"},` + good + `}}}`, `method "post"`},
-		{"body on GET", `{"devices":{"d":{"setTrafficShape":{"method":"GET","url":"https://s.example/","body":{}},` + good + `}}}`, "a GET call has no body"},
-		{"body on DELETE", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},"resetTrafficShape":{"method":"DELETE","url":"https://s.example/","body":{"a":1}}}}}`, "resetTrafficShape: a DELETE call has no body"},
-		{"relative URL", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"/v1/shape"},` + good + `}}}`, "not an absolute http or https URL"},
-		{"other scheme", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"ftp://s.example/"},` + good + `}}}`, "not an absolute http or https URL"},
-		{"unparsable URL", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"http://[::1"},` + good + `}}}`, "not an absolute http or https URL"},
-		{"unknown placeholder in URL", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/?bw=${bandwidth}"},` + good + `}}}`, "url: unknown placeholder ${bandwidth}"},
-		{"unknown placeholder in header", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/","headers":{"X-Id":"${serial}"}},` + good + `}}}`, "header X-Id: unknown placeholder ${serial}"},
-		{"unknown placeholder in body", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/","body":{"shapes":[{"delay":"${latency}"}]}},` + good + `}}}`, "body: unknown placeholder ${latency}"},
-		{"unknown placeholder in body list", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/","body":["${x}"]},` + good + `}}}`, "body: unknown placeholder ${x}"},
-		{"directionValues on reset", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},"resetTrafficShape":{"method":"POST","url":"https://s.example/","directionValues":{"both":"all"}}}}}`, "directionValues belongs on setTrafficShape only"},
-		{"bad directionValues key", `{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"https://s.example/","directionValues":{"down":"dn"}},` + good + `}}}`, `directionValues key "down"`},
+		{"unknown top-level key", `{"hubDevices":[],"extra":1}`, `unknown field "extra"`},
+		{"unknown device key", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},` + good + `,"airplane":{}}}]}`, `unknown field "airplane"`},
+		{"unknown call key", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/","timeout":3},` + good + `}}]}`, `unknown field "timeout"`},
+		{"trailing data", `{"hubDevices":[]} {}`, "trailing data"},
+		{"trailing delimiter", `{"hubDevices":[]} ]`, "trailing data"},
+		{"empty device", `{"hubDevices":[{"id":"d","trafficShaping":{}}]}`, "neither setTrafficShape nor resetTrafficShape"},
+		{"description is config.json's", `{"hubDevices":[{"id":"d","trafficShaping":{"description":"x",` + good + `}}]}`, `unknown field "description"`},
+		{"reset only", `{"hubDevices":[{"id":"d","trafficShaping":{` + good + `}}]}`, "has resetTrafficShape but no setTrafficShape"},
+		{"bad method", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"FETCH","url":"https://s.example/"},` + good + `}}]}`, `setTrafficShape: method "FETCH"`},
+		{"lower-case method", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"post","url":"https://s.example/"},` + good + `}}]}`, `method "post"`},
+		{"body on GET", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"GET","url":"https://s.example/","body":{}},` + good + `}}]}`, "a GET call has no body"},
+		{"body on DELETE", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},"resetTrafficShape":{"method":"DELETE","url":"https://s.example/","body":{"a":1}}}}]}`, "resetTrafficShape: a DELETE call has no body"},
+		{"relative URL", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"/v1/shape"},` + good + `}}]}`, "not an absolute http or https URL"},
+		{"other scheme", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"ftp://s.example/"},` + good + `}}]}`, "not an absolute http or https URL"},
+		{"unparsable URL", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"http://[::1"},` + good + `}}]}`, "not an absolute http or https URL"},
+		{"unknown placeholder in URL", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/?bw=${bandwidth}"},` + good + `}}]}`, "url: unknown placeholder ${bandwidth}"},
+		{"unknown placeholder in header", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/","headers":{"X-Id":"${serial}"}},` + good + `}}]}`, "header X-Id: unknown placeholder ${serial}"},
+		{"unknown placeholder in body", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/","body":{"shapes":[{"delay":"${latency}"}]}},` + good + `}}]}`, "body: unknown placeholder ${latency}"},
+		{"unknown placeholder in body list", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/","body":["${x}"]},` + good + `}}]}`, "body: unknown placeholder ${x}"},
+		{"directionValues on reset", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},"resetTrafficShape":{"method":"POST","url":"https://s.example/","directionValues":{"both":"all"}}}}]}`, "directionValues belongs on setTrafficShape only"},
+		{"bad directionValues key", `{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/","directionValues":{"down":"dn"}},` + good + `}}]}`, `directionValues key "down"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Parse([]byte(c.json))
+			_, err := ParseConfig([]byte(c.json))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to contain %q", err, c.want)
 			}
@@ -180,13 +185,12 @@ func TestParse_Validation(t *testing.T) {
 }
 
 func TestParse_AcceptsAFullConfig(t *testing.T) {
-	cfg, err := Parse([]byte(`{"devices":{
-		"a":{"setTrafficShape":{"method":"POST","url":"https://s.example/v1/shape","headers":{"Authorization":"Bearer t"},
+	cfg, err := ParseConfig([]byte(`{"hubDevices":[{"id":"a","trafficShaping":{"setTrafficShape":{"method":"POST","url":"https://s.example/v1/shape","headers":{"Authorization":"Bearer t"},
 			"body":{"ip":"192.0.2.15","mbit":"${mbit}","direction":"${direction}","tags":["${deviceId}",3,true,null]},
 			"directionValues":{"download":"down","upload":"up","both":"both"},"insecureSkipVerify":true},
-		     "resetTrafficShape":{"method":"POST","url":"https://s.example/v1/shape","body":{"ip":"192.0.2.15"}}},
-		"b":{"setTrafficShape":{"method":"PUT","url":"http://s.example/d/7?mbit=${mbit}&dir=${direction}"},
-		     "resetTrafficShape":{"method":"DELETE","url":"http://s.example/d/7"}}}}`))
+		     "resetTrafficShape":{"method":"POST","url":"https://s.example/v1/shape","body":{"ip":"192.0.2.15"}}}},
+		{"id":"b","trafficShaping":{"setTrafficShape":{"method":"PUT","url":"http://s.example/d/7?mbit=${mbit}&dir=${direction}"},
+		     "resetTrafficShape":{"method":"DELETE","url":"http://s.example/d/7"}}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +299,7 @@ func newShaper(t *testing.T, rec http.Handler, devices func(base string) map[str
 	path := writeConfig(t, t.TempDir(), jsonConfig(t, devices(srv.URL)), 0o600)
 	var lines []string
 	var mu sync.Mutex
-	return &Shaper{Source: Source{Legacy: path}, DeviceID: "phone", Log: func(f string, a ...any) {
+	return &Shaper{ConfigPath: path, DeviceID: "phone", Log: func(f string, a ...any) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf(f, a...))
 		mu.Unlock()
@@ -360,7 +364,7 @@ func TestShaper_NotConfigured(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	}
-	missing := &Shaper{Source: Source{Legacy: filepath.Join(t.TempDir(), FileName)}, DeviceID: "phone"}
+	missing := &Shaper{ConfigPath: filepath.Join(t.TempDir(), ConfigFileName), DeviceID: "phone"}
 	if _, err := missing.Set(context.Background(), Values{}); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("missing file: err = %v", err)
 	}
@@ -375,7 +379,7 @@ func TestShaper_ConfigErrors(t *testing.T) {
 	if _, err := s.Device(); err != nil {
 		t.Fatalf("the configured device: %v", err)
 	}
-	if err := os.WriteFile(s.Source.Legacy, []byte(`{"devices":`), 0o600); err != nil {
+	if err := os.WriteFile(s.ConfigPath, []byte(`{"hubDevices":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var ce *ConfigError
@@ -396,7 +400,7 @@ func TestShaper_ReadsTheFileOnEveryCall(t *testing.T) {
 	srvBase := strings.TrimSuffix(setURL(t, s), "/v1/shape")
 	edited := calls(srvBase)
 	edited["phone"].Set.URL = srvBase + "/v2/shape"
-	if err := os.WriteFile(s.Source.Legacy, []byte(jsonConfig(t, edited)), 0o600); err != nil {
+	if err := os.WriteFile(s.ConfigPath, []byte(jsonConfig(t, edited)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Set(context.Background(), Values{}); err != nil {
@@ -483,7 +487,7 @@ func TestShaper_InsecureSkipVerify(t *testing.T) {
 	t.Cleanup(srv.Close)
 	devices := calls(srv.URL)
 	path := writeConfig(t, t.TempDir(), jsonConfig(t, devices), 0o600)
-	s := &Shaper{Source: Source{Legacy: path}, DeviceID: "phone"}
+	s := &Shaper{ConfigPath: path, DeviceID: "phone"}
 	if _, err := s.Set(context.Background(), Values{}); err == nil || !strings.Contains(err.Error(), "certificate") {
 		t.Fatalf("a self-signed shaper was trusted without insecureSkipVerify: %v", err)
 	}
@@ -497,10 +501,10 @@ func TestShaper_InsecureSkipVerify(t *testing.T) {
 }
 
 func TestShaper_BadURLAfterFilling(t *testing.T) {
-	s := &Shaper{Source: Source{Legacy: writeConfig(t, t.TempDir(), jsonConfig(t, map[string]Device{"phone": {
+	s := &Shaper{ConfigPath: writeConfig(t, t.TempDir(), jsonConfig(t, map[string]Device{"phone": {
 		Set:   &Call{Method: "POST", URL: "http://s.example/\x7f"},
 		Reset: &Call{Method: "POST", URL: "http://s.example/"},
-	}}), 0o600)}, DeviceID: "phone"}
+	}}), 0o600), DeviceID: "phone"}
 	// The control character fails validation before any request is built.
 	if _, err := s.Set(context.Background(), Values{}); err == nil {
 		t.Fatal("expected an error")
@@ -541,8 +545,8 @@ func TestShaper_LogsRedactedUserInfo(t *testing.T) {
 }
 
 func TestErrorMessages(t *testing.T) {
-	ce := &ConfigError{Path: "/h/network.json", Err: errors.New("boom")}
-	if ce.Error() != "config /h/network.json: boom" || ce.Unwrap().Error() != "boom" {
+	ce := &ConfigError{Path: "/h/config.json", Err: errors.New("boom")}
+	if ce.Error() != "config /h/config.json: boom" || ce.Unwrap().Error() != "boom" {
 		t.Errorf("ConfigError = %q", ce)
 	}
 	fe := &FetchError{Command: CommandSet, Method: "POST", URL: "http://s/", Err: errors.New("refused")}
@@ -559,7 +563,7 @@ func TestShaper_NoAnswerHidesTheURLsSecrets(t *testing.T) {
 		Set:   &Call{Method: "POST", URL: "http://shapeuser:S3cret@127.0.0.1:1/v1/shape?token=QTOKEN"},
 		Reset: &Call{Method: "POST", URL: "http://127.0.0.1:1/"},
 	}}), 0o600)
-	s := &Shaper{Source: Source{Legacy: path}, DeviceID: "phone", Log: func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }}
+	s := &Shaper{ConfigPath: path, DeviceID: "phone", Log: func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }}
 	_, err := s.Set(context.Background(), Values{})
 	if err == nil {
 		t.Fatal("expected a connection error")
@@ -591,9 +595,9 @@ func TestFill_PathAndQueryEscaping(t *testing.T) {
 
 // Numbers written in a body reach the shaper exactly as written.
 func TestParse_BodyNumbersPassThrough(t *testing.T) {
-	cfg, err := Parse([]byte(`{"devices":{"d":{
+	cfg, err := ParseConfig([]byte(`{"hubDevices":[{"id":"d","trafficShaping":{
 		"setTrafficShape":{"method":"POST","url":"https://s.example/","body":{"pipe":9007199254740993,"big":1e21,"rate":"${mbit}"}},
-		"resetTrafficShape":{"method":"POST","url":"https://s.example/","body":{"pipe":9007199254740993}}}}}`))
+		"resetTrafficShape":{"method":"POST","url":"https://s.example/","body":{"pipe":9007199254740993}}}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,9 +627,9 @@ func TestValueErrorAndDefaults(t *testing.T) {
 // A bad URL is named in the error with its credentials redacted: the
 // message reaches callers of any device on the host, and the log.
 func TestParse_BadURLIsRedacted(t *testing.T) {
-	_, err := Parse([]byte(`{"devices":{"d":{
+	_, err := ParseConfig([]byte(`{"hubDevices":[{"id":"d","trafficShaping":{
 		"setTrafficShape":{"method":"POST","url":"htps://user:secret@shaper.example/v1?token=abc"},
-		"resetTrafficShape":{"method":"POST","url":"https://shaper.example/"}}}}`))
+		"resetTrafficShape":{"method":"POST","url":"https://shaper.example/"}}}]}`))
 	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "abc") || strings.Contains(err.Error(), "user") ||
 		!strings.Contains(err.Error(), "url htps://[redacted]@shaper.example/v1?[redacted] is not an absolute http or https URL") {
 		t.Fatalf("err = %v", err)
@@ -637,8 +641,8 @@ func TestLoad_ModeCheckIsSkippedOnWindows(t *testing.T) {
 	old := goos
 	goos = "windows"
 	t.Cleanup(func() { goos = old })
-	path := writeConfig(t, t.TempDir(), `{"devices":{}}`, 0o644)
-	if _, err := Load(path); err != nil {
+	path := writeConfig(t, t.TempDir(), `{"hubDevices":[]}`, 0o644)
+	if _, err := LoadConfig(path); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -665,7 +669,7 @@ func TestShaper_ARedirectFails(t *testing.T) {
 
 func TestParse_PlaceholderInTheHostIsRefused(t *testing.T) {
 	for _, u := range []string{"http://shaper-${deviceId}.lab/set?token=SECRET", "http://${deviceId}/x", "https://u:p@h${mbit}:80/"} {
-		_, err := Parse([]byte(`{"devices":{"d":{"setTrafficShape":{"method":"POST","url":"` + u + `"},"resetTrafficShape":{"method":"POST","url":"https://s.example/"}}}}`))
+		_, err := ParseConfig([]byte(`{"hubDevices":[{"id":"d","trafficShaping":{"setTrafficShape":{"method":"POST","url":"` + u + `"},"resetTrafficShape":{"method":"POST","url":"https://s.example/"}}}]}`))
 		if err == nil || !strings.Contains(err.Error(), "placeholders belong in the path or the query string, not the host") ||
 			strings.Contains(err.Error(), "SECRET") {
 			t.Errorf("%s: err = %v", u, err)
@@ -739,52 +743,6 @@ func TestParseConfig_Validation(t *testing.T) {
 	}
 }
 
-// Source reads config.json when it exists and network.json only when it
-// does not; an explicit path is read as is, with no fallback.
-func TestSource_ResolveAndLoad(t *testing.T) {
-	home := t.TempDir()
-	src := Source{Home: home}
-	if p, legacy := src.Resolve(); p != filepath.Join(home, FileName) || !legacy {
-		t.Errorf("neither file: %s %v", p, legacy)
-	}
-	if cfg, _, err := src.Load(); err != nil || len(cfg.Devices) != 0 {
-		t.Errorf("neither file loads empty: %+v %v", cfg, err)
-	}
-	writeConfig(t, home, `{"devices":{"old":{"setTrafficShape":{"method":"POST","url":"https://s.example/"},"resetTrafficShape":{"method":"DELETE","url":"https://s.example/"}}}}`, 0o600)
-	if cfg, p, err := src.Load(); err != nil || p != filepath.Join(home, FileName) || !cfg.Devices["old"].Shapeable() || len(cfg.Shared) != 0 {
-		t.Errorf("network.json only: %+v %s %v", cfg, p, err)
-	}
-	cfgPath := filepath.Join(home, ConfigFileName)
-	if err := os.WriteFile(cfgPath, []byte(`{"hubDevices":[{"id":"new","description":"From config.json"}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, p, err := src.Load()
-	if err != nil || p != cfgPath || cfg.Devices["new"].Description != "From config.json" {
-		t.Fatalf("both files: %+v %s %v", cfg, p, err)
-	}
-	if _, ok := cfg.Lookup("old"); ok {
-		t.Error("network.json was read beside config.json")
-	}
-	// A config.json that cannot be used is an error, not a fallback.
-	if err := os.WriteFile(cfgPath, []byte(`{"hubDevices":`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, p, err := src.Load(); err == nil || p != cfgPath {
-		t.Errorf("a broken config.json: %s %v", p, err)
-	}
-	// Explicit paths, each in its own format, with no fallback.
-	missing := filepath.Join(t.TempDir(), "absent.json")
-	if p, legacy := (Source{Config: missing, Home: home}).Resolve(); p != missing || legacy {
-		t.Errorf("--config: %s %v", p, legacy)
-	}
-	if cfg, _, err := (Source{Config: missing, Home: home}).Load(); err != nil || len(cfg.Devices) != 0 {
-		t.Errorf("a missing --config file is empty: %+v %v", cfg, err)
-	}
-	if p, legacy := (Source{Legacy: missing, Home: home}).Resolve(); p != missing || !legacy {
-		t.Errorf("--network-config: %s %v", p, legacy)
-	}
-}
-
 // A device in config.json without trafficShaping cannot be shaped: both
 // commands answer ErrNotConfigured and send nothing.
 func TestShaper_ConfigDeviceWithoutShapingIsNotConfigured(t *testing.T) {
@@ -795,7 +753,7 @@ func TestShaper_ConfigDeviceWithoutShapingIsNotConfigured(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"hubDevices":[{"id":"phone","description":"Lab phone"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &Shaper{Source: Source{Config: path}, DeviceID: "phone"}
+	s := &Shaper{ConfigPath: path, DeviceID: "phone"}
 	if _, err := s.Device(); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("Device: %v", err)
 	}
@@ -810,7 +768,7 @@ func TestShaper_ConfigDeviceWithoutShapingIsNotConfigured(t *testing.T) {
 	}
 }
 
-// A config.json device's calls are sent like network.json's.
+// A device uses the shaping calls from its config entry.
 func TestShaper_ConfigDeviceShapes(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(rec)
@@ -822,7 +780,7 @@ func TestShaper_ConfigDeviceShapes(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &Shaper{Source: Source{Home: filepath.Dir(path)}, DeviceID: "phone"}
+	s := &Shaper{ConfigPath: path, DeviceID: "phone"}
 	if _, err := s.Set(context.Background(), Values{Mbit: 2}); err != nil {
 		t.Fatal(err)
 	}
@@ -840,44 +798,17 @@ func TestShaper_Alias(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s := &Shaper{Source: Source{Config: path}, DeviceID: "serial", Alias: "avd:pix"}
+	s := &Shaper{ConfigPath: path, DeviceID: "serial", Alias: "avd:pix"}
 	if d, err := s.Device(); err != nil || d.Set.Method != "PUT" {
 		t.Fatalf("serial through its alias: %+v %v", d, err)
 	}
-	s = &Shaper{Source: Source{Config: path}, DeviceID: "avd:pix"}
+	s = &Shaper{ConfigPath: path, DeviceID: "avd:pix"}
 	if _, err := s.Device(); err != nil {
 		t.Fatalf("own entry: %v", err)
 	}
-	s = &Shaper{Source: Source{Config: path}, DeviceID: "other", Alias: "avd:none"}
+	s = &Shaper{ConfigPath: path, DeviceID: "other", Alias: "avd:none"}
 	if _, err := s.Device(); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("no entry, no alias: %v", err)
-	}
-}
-
-// Unread names the <home> files that exist but are not read.
-func TestSource_Unread(t *testing.T) {
-	home := t.TempDir()
-	cfg, legacy := filepath.Join(home, ConfigFileName), filepath.Join(home, FileName)
-	other := filepath.Join(t.TempDir(), "lab.json")
-	for _, p := range []string{legacy, other} {
-		if err := os.WriteFile(p, []byte(`{}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := (Source{Home: home}).Unread(); len(got) != 0 {
-		t.Errorf("network.json alone: %v", got)
-	}
-	if got := (Source{Home: home, Config: other}).Unread(); strings.Join(got, ",") != legacy {
-		t.Errorf("--config: %v", got)
-	}
-	if err := os.WriteFile(cfg, []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := (Source{Home: home}).Unread(); strings.Join(got, ",") != legacy {
-		t.Errorf("config.json beside network.json: %v", got)
-	}
-	if got := (Source{Home: home, Legacy: other}).Unread(); strings.Join(got, ",") != cfg+","+legacy {
-		t.Errorf("--network-config: %v", got)
 	}
 }
 

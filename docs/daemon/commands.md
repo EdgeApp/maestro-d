@@ -67,7 +67,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`removeMedia`](#removemedia) | _none_ | Clears media added by addMedia (Android: MediaStore index). |
 | [`repeat`](#repeat) | — | Repeats steps. |
 | [`resetPermissions`](#resetpermissions) | _none_ | Resets all browser permissions. |
-| [`resetTrafficShape`](#resettrafficshape) | _none_ | Removes the device's network shape through the call its host's config.json (or older network.json) configures for it. |
+| [`resetTrafficShape`](#resettrafficshape) | _none_ | Removes the device's network shape through the call its host's config.json configures for it. |
 | [`retry`](#retry) | — | Retries steps on failure. |
 | [`runBrowserScript`](#runbrowserscript) | `file` | Loads and executes a JS file in the browser page context. |
 | [`runFlow`](#runflow) | `file` | Runs another flow. |
@@ -86,7 +86,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`setNetworkConditions`](#setnetworkconditions) | — | Simulates network throttling or offline mode. |
 | [`setOrientation`](#setorientation) | `orientation` | Sets device orientation. |
 | [`setPermissions`](#setpermissions) | — | Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all |
-| [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. |
+| [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's config.json configures for it. |
 | [`startRecording`](#startrecording) | `path` | Starts recording. |
 | [`stopApp`](#stopapp) | `appId` | Stops an app. |
 | [`stopRecording`](#stoprecording) | `path` | Stops recording. |
@@ -1458,7 +1458,7 @@ await m.resetPermissions()
 
 ## `resetTrafficShape`
 
-Removes the device's network shape through the call its host's config.json (or older network.json) configures for it.
+Removes the device's network shape through the call its host's config.json configures for it.
 
 ```sh
 maestro-d resetTrafficShape
@@ -1878,7 +1878,7 @@ await m.setPermissions({ … })
 
 ## `setTrafficShape`
 
-Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.
+Sets the device's whole network shape through the call its host's config.json configures for it.
 
 ```sh
 maestro-d setTrafficShape --key value […]

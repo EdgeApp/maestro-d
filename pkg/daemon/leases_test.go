@@ -22,7 +22,7 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 func TestLeases_ClientForgetsExpiredLease(t *testing.T) {
-	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", ShareDevices: []string{"mock-1"}})
+	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", ShareConfig: []string{"mock-1"}})
 	ctx := context.Background()
 	var told []string
 	env.remote.OnLeaseExpired = func(device, lease, _ string) { told = append(told, device+"="+lease) }
@@ -44,15 +44,6 @@ func TestLeases_ClientForgetsExpiredLease(t *testing.T) {
 		if got := pathDevice(in); got != want {
 			t.Errorf("pathDevice(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// A plain daemon (not a hub) treats a TV like any other device.
-func TestShared_TVOnPlainDaemon(t *testing.T) {
-	s := &Server{cfg: Config{}, deps: Deps{TVInfo: func(string) (string, bool) { return "Lab TV", true }}}
-	s.registry = NewRegistry("plain", func(string) []DeviceInfo { return nil })
-	if !s.shared("TV-1") || !s.sharedInfo(DeviceInfo{ID: "TV-1", Kind: "tv"}) {
-		t.Fatal("a plain daemon hid a TV")
 	}
 }
 

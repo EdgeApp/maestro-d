@@ -94,20 +94,6 @@ func TestLeases_SelectorMatchesAndroidPhoneProps(t *testing.T) {
 	wantErrCode(t, err, daemon.CodeDeviceNotFound)
 }
 
-func TestSharedInfoMatchesAPhoneBySerialOrName(t *testing.T) {
-	phone := daemon.DeviceInfo{ID: "FAKEPIXEL0001", Platform: "android", Kind: "device", Name: "Lab Pixel", Model: "Pixel 8"}
-	for _, entry := range []string{"FAKEPIXEL0001", "Lab Pixel"} {
-		s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareDevices: []string{entry}}}
-		if !s.sharedInfo(phone) {
-			t.Errorf("--share-device %q does not share %+v", entry, phone)
-		}
-	}
-	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareDevices: []string{"Other"}}}
-	if s.sharedInfo(phone) {
-		t.Error("--share-device Other shares the phone")
-	}
-}
-
 // A selector boot of an AVD named like a shared phone boots the AVD and
 // leases it, not the phone.
 func TestLeases_SelectorBootOfAnAVDNamedLikeAPhone(t *testing.T) {
@@ -130,8 +116,7 @@ func TestLeases_SelectorBootOfAnAVDNamedLikeAPhone(t *testing.T) {
 	}
 }
 
-// A hub shares only what it names, through --share-device, --share-tv or
-// config.json's hubDevices; a daemon that is not a hub shares everything.
+// A hub shares only its configured device IDs.
 func TestSharedInfo_ExplicitOnly(t *testing.T) {
 	phone := daemon.DeviceInfo{ID: "PHONE-A", Platform: "android", Kind: "device", Name: "Lab Pixel"}
 	tv := daemon.DeviceInfo{ID: "TV-1", Platform: "ios", Kind: "tv", Name: "Lab TV"}
@@ -142,12 +127,9 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 	}{
 		{"hub naming nothing", daemon.Config{Hub: &Server{}}, false, false},
 
-		{"--share-device", daemon.Config{Hub: &Server{}, ShareDevices: []string{"PHONE-A"}}, true, false},
-		{"--share-device never shares a TV", daemon.Config{Hub: &Server{}, ShareDevices: []string{"TV-1"}}, false, false},
-		{"--share-tv", daemon.Config{Hub: &Server{}, ShareTVs: []string{"Lab TV"}}, false, true},
 		{"config.json phone", daemon.Config{Hub: &Server{}, ShareConfig: []string{"PHONE-A"}}, true, false},
 		{"config.json TV", daemon.Config{Hub: &Server{}, ShareConfig: []string{"TV-1"}}, false, true},
-		{"flags and config.json add up", daemon.Config{Hub: &Server{}, ShareDevices: []string{"Lab Pixel"}, ShareConfig: []string{"TV-1"}}, true, true},
+		{"names alone do not share", daemon.Config{Hub: &Server{}, ShareConfig: []string{"Lab Pixel", "Lab TV"}}, false, false},
 	} {
 		s := &Server{cfg: c.cfg}
 		if got := s.sharedInfo(phone); got != c.phone {
@@ -157,8 +139,8 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 			t.Errorf("%s: TV shared %v", c.name, got)
 		}
 	}
-	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareDevices: []string{"a"}, ShareTVs: []string{"t"}, ShareConfig: []string{"c"}}}
-	if got := s.shareList(); got != "a; TVs t; config.json c" {
+	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareConfig: []string{"a", "t", "c"}}}
+	if got := s.shareList(); got != "config.json a, t, c" {
 		t.Errorf("shareList = %q", got)
 	}
 }
@@ -166,7 +148,7 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 // A hub that names nothing lists nothing to a remote caller, refuses its
 // lease and its create, and still lists everything to a local one.
 func TestLeases_HubNamingNothingSharesNothing(t *testing.T) {
-	env := newHubEnv(t, daemon.Config{ShareDevices: []string{}})
+	env := newHubEnv(t, daemon.Config{ShareConfig: []string{}})
 	ctx := context.Background()
 	if devs, err := env.remote.Devices(ctx, ""); err != nil || len(devs) != 0 {
 		t.Fatalf("remote listing: %+v %v", devs, err)
@@ -197,7 +179,7 @@ func TestLeases_ShareConfigShares(t *testing.T) {
 
 // A hubDevices avd:<name> entry shares the AVD, its running emulator, and
 // an android boot or create by its bare name. An entry is an id: a device's name
-// shares nothing, as it would through --share-device.
+// shares nothing.
 func TestSharedInfo_ConfigAVDEntry(t *testing.T) {
 	s := &Server{cfg: daemon.Config{Hub: &Server{}, ShareConfig: []string{"avd:ci-pixel", "Lab Pixel"}}}
 	for _, c := range []struct {
