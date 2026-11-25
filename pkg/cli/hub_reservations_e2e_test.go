@@ -23,11 +23,16 @@ import (
 // by --peer, and returns their infos.
 func startTwoHubs(t *testing.T, e *e2e, prefix string, extraA ...string) (daemon.Info, daemon.Info, []string, []string) {
 	t.Helper()
+	return startMockHubPair(t, e, prefix, []string{"mock-1", "mock-2"}, []string{"mock-3"}, extraA...)
+}
+
+func startMockHubPair(t *testing.T, e *e2e, prefix string, poolA, poolB []string, extraA ...string) (daemon.Info, daemon.Info, []string, []string) {
+	t.Helper()
 	homeA, homeB := filepath.Join(e.cwd, prefix+"-home-a"), filepath.Join(e.cwd, prefix+"-home-b")
-	writeSharedMocks(t, homeA, "mock-1", "mock-2")
-	writeSharedMocks(t, homeB, "mock-3")
-	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
-	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
+	writeSharedMocks(t, homeA, poolA...)
+	writeSharedMocks(t, homeB, poolB...)
+	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=" + strings.Join(poolA, ",")}
+	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=" + strings.Join(poolB, ",")}
 	t.Cleanup(func() {
 		e.runEnv(envB, "maestro-d-hub", "stop")
 		e.runEnv(envA, "maestro-d-hub", "stop")

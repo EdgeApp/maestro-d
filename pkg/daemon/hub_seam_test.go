@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +23,8 @@ type recordingHub struct {
 func (h *recordingHub) TCPCaller(addr string, outputs bool) Caller {
 	return Caller{Remote: true, Addr: addr, ClientOutputs: outputs}
 }
-func (h *recordingHub) Bind(*Server, Config, Deps) {}
+func (h *recordingHub) DeviceConfig() *netshape.Config { return &netshape.Config{} }
+func (h *recordingHub) Bind(*Server, Config, Deps)     {}
 func (h *recordingHub) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /test-hub", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })
 }
