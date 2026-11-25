@@ -155,8 +155,8 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", "shape-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", "shape-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "shape-tok", "--peer-token", "shape-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -169,8 +169,8 @@ func TestE2E_TrafficShapeTwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "shape-a", "--name", "hub-a", "--share-device", "mock-1"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "shape-b", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--share-device", "mock-1"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=shape-tok"}
 
 	// Without a lease the owner refuses, and nothing is sent.
@@ -231,8 +231,8 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", "cfg-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", "cfg-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "cfg-tok", "--peer-token", "cfg-peer", "--json"}
 
@@ -241,7 +241,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 	if err := os.WriteFile(other, []byte(`{"hubDevices":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a", "--config", other, "--network-config", other}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
+	if r := e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--config", other, "--network-config", other}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
 		t.Fatalf("both flags: exit %d\n%s", r.code, r.stderr)
 	}
 	if r := e.runEnv(envA, "serve", "--daemon", "cfg-s", "--config", other, "--network-config", other); r.code != 2 || !strings.Contains(r.stderr, "--config and --network-config") {
@@ -251,7 +251,7 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 	if err := os.WriteFile(broken, []byte(`{"hubDevices":[{"description":"no id"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a", "--config", broken}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "hubDevices[0] has no id") {
+	if r := e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--config", broken}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "hubDevices[0] has no id") {
 		t.Fatalf("broken config: exit %d\n%s", r.code, r.stderr)
 	}
 
@@ -265,8 +265,8 @@ func TestE2E_ConfigJSONTwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "cfg-a", "--name", "hub-a"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "cfg-b", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3"}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=cfg-tok"}
 
 	var listed daemon.DevicesResult

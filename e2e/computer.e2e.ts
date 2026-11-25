@@ -47,6 +47,7 @@ function required(key: string): string {
   return v
 }
 const bin = required('MAESTRO_D_BIN')
+const hubBin = process.env.MAESTRO_D_HUB_BIN ?? path.join(path.dirname(bin), 'maestro-d-hub')
 const home = required('MAESTRO_D_HOME')
 const daemonName = process.env.MAESTRO_D ?? 'computerDevice-e2e'
 const clientRoot = process.env.MAESTRO_D_CLIENT_ROOT ?? path.join(repoRoot, 'npm', 'maestro-d')
@@ -70,10 +71,10 @@ async function sleep(ms: number): Promise<void> {
 
 interface CLIResult { code: number; stdout: string; stderr: string }
 
-async function cli(args: string[], env: Record<string, string> = {}, label?: string): Promise<CLIResult> {
-  show(`${label ?? ''}maestro-d ${args.join(' ')}`)
+async function cli(args: string[], env: Record<string, string> = {}, label?: string, executable = bin): Promise<CLIResult> {
+  show(`${label ?? ''}${path.basename(executable)} ${args.join(' ')}`)
   try {
-    const r = await run(bin, args, { env: { ...process.env, MAESTRO_D_HOME: home, ...env }, maxBuffer: 64 << 20 })
+    const r = await run(executable, args, { env: { ...process.env, MAESTRO_D_HOME: home, ...env }, maxBuffer: 64 << 20 })
     if (r.stdout.trim()) console.log(r.stdout.trimEnd())
     return { code: 0, stdout: r.stdout, stderr: r.stderr }
   } catch (error) {
@@ -288,7 +289,7 @@ interface Device {
 }
 interface Client {
   MaestroD: {
-    connect: (opts: { name?: string; bin?: string }) => Promise<any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    connect: (opts: { name?: string; bin?: string; hubSocket?: boolean }) => Promise<any> // eslint-disable-line @typescript-eslint/no-explicit-any
   }
   isMaestroError: (err: unknown, code?: string) => boolean
 }
@@ -588,26 +589,36 @@ scenario('C14', async () => {
   for (const f of ['token', 'peer']) {
     await writeFile(path.join(tokens, f), `${Math.random().toString(36).slice(2)}${Date.now()}\n`, { mode: 0o600 })
   }
-  // Hub names are lowercase; the daemon names keep the branch prefix.
-  const hub = (name: string, port: number, peer: number) => ['hub', 'start', '--daemon', name, '--name', name.toLowerCase(), '--listen', `127.0.0.1:${port}`, '--no-mdns',
+  const homeA = home
+  const homeB = path.join(scratch, 'hub-b-home')
+  const localHub = (hubHome: string, args: string[]) => cli(args, { MAESTRO_D_HOME: hubHome }, undefined, hubBin)
+  const hub = (name: string, port: number, peer: number) => ['start', '--name', name, '--listen', `127.0.0.1:${port}`, '--no-mdns',
     '--token-file', path.join(tokens, 'token'), '--peer-token-file', path.join(tokens, 'peer'), '--peer', `127.0.0.1:${peer}`]
-  await cli(hub('computerDevice-a', hubPortA, hubPortB))
-  await cli(hub('computerDevice-b', hubPortB, hubPortA))
+  await localHub(homeA, hub('computerdevice-a', hubPortA, hubPortB))
+  await localHub(homeB, hub('computerdevice-b', hubPortB, hubPortA))
   try {
     for (let i = 0; i < 20; i++) {
-      const st = await cli(['hub', 'status', '--daemon', 'computerDevice-a'])
+      const st = await localHub(homeA, ['status'])
       if (st.stdout.includes('computerdevice-b')) break
       await sleep(500)
     }
-    let r = await cli(['lease', '--device', 'mac', '--daemon', 'computerDevice-a'])
-    assert.equal(r.code, 0, 'a local lease on hub A')
-    r = await cli(['get', 'screenshot', '--device', 'mac', '--region', '0,0,400,300', '-o', path.join(scratch, 'c14-under-lease.jpg'), '--daemon', 'computerDevice-a'])
-    assert.equal(r.code, 0, 'a screenshot under the lease')
-    allOf(await decodeImage(await readFile(path.join(scratch, 'c14-under-lease.jpg')), 'c14.jpg'), 'red')
-    r = await cli(['release', '--device', 'mac', '--daemon', 'computerDevice-a'])
-    r = await cli(['lease', '--os', '26', '--no-attach', '--daemon', 'computerDevice-a'])
-    assert.ok(!/\bmac\b/.test(r.stdout.split('\n').find(l => l.includes('lease')) ?? ''), 'the --os 26 lease got mac')
-    if (r.code === 0) await cli(['release', '--all', '--daemon', 'computerDevice-a'])
+    const local = await client.MaestroD.connect({ hubSocket: true })
+    try {
+      const computer = await local.lease({ device: 'mac' })
+      const screenshot = await computer.screenshot({ region: { x: 0, y: 0, width: 400, height: 300 } })
+      await writeFile(path.join(scratch, 'c14-under-lease.jpg'), screenshot)
+      allOf(await decodeImage(screenshot, 'c14.jpg'), 'red')
+      await computer.release()
+      try {
+        const selected = await local.lease({ select: { osVersion: '26' }, attach: false })
+        assert.ok(!selected.id.startsWith('mac@'), 'the OS 26 lease got mac')
+        await selected.release()
+      } catch (err) {
+        if (!client.isMaestroError(err, 'DEVICE_NOT_FOUND')) throw err
+      }
+    } finally {
+      await local.close()
+    }
     // Hub B over REST with the client token (the CLI's --target-hub does
     // not send MAESTRO_D_TOKEN to a plain http:// hub on origin/master
     // either; that is outside this test).
@@ -628,8 +639,8 @@ scenario('C14', async () => {
     const lease = await rest('POST', '/v1/leases', { device: 'mac@computerdevice-a' })
     assert.ok(lease.status >= 400 && lease.text.includes('DEVICE_NOT_FOUND'), 'hub B leased the computer')
   } finally {
-    await cli(['hub', 'stop', '--daemon', 'computerDevice-a'])
-    await cli(['hub', 'stop', '--daemon', 'computerDevice-b'])
+    await localHub(homeA, ['stop'])
+    await localHub(homeB, ['stop'])
   }
 })
 

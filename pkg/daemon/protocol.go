@@ -36,7 +36,8 @@ const (
 	CodeCommandFailed Code = "COMMAND_FAILED"
 	// CodeUsage: unknown command, bad flags, unparsable step/YAML, unknown
 	// device, bad request body. Exit 2 / HTTP 400.
-	CodeUsage Code = "USAGE"
+	CodeUsage      Code = "USAGE"
+	CodeHubRunning Code = "HUB_RUNNING"
 	// CodeDaemonUnavailable: could not connect to or spawn the daemon, API
 	// version mismatch, daemon shutting down. Exit 3 / HTTP 503.
 	CodeDaemonUnavailable Code = "DAEMON_UNAVAILABLE"
@@ -100,7 +101,7 @@ const (
 
 // Codes lists every code, for tables and tests.
 var Codes = []Code{
-	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeCommandFailed, CodeUsage, CodeHubRunning, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
 	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted, CodeCaptureUnavailable, CodeUnsupported,
@@ -113,7 +114,7 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
+	case CodeUsage, CodeHubRunning, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
@@ -134,6 +135,8 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK
 	case CodeCommandFailed:
 		return http.StatusUnprocessableEntity
+	case CodeHubRunning:
+		return http.StatusConflict
 	case CodeUsage:
 		return http.StatusBadRequest
 	case CodeDaemonUnavailable, CodePeerUnavailable, CodeCaptureUnavailable:
@@ -289,19 +292,20 @@ func FailureEnvelope(e *Error) Envelope {
 // `error` still populated so callers can see what went wrong.
 type StepResult struct {
 	Envelope
-	Device     string                  `json:"device"`
-	Step       string                  `json:"step"`
-	Type       string                  `json:"type"`
-	Index      int                     `json:"index"`
-	DurationMs int64                   `json:"durationMs"`
-	Message    string                  `json:"message,omitempty"`
-	Skipped    bool                    `json:"skipped,omitempty"`
-	Optional   bool                    `json:"optional,omitempty"`
-	Element    *core.ElementInfo       `json:"element,omitempty"`
-	Data       any                     `json:"data,omitempty"`
-	Artifacts  report.CommandArtifacts `json:"artifacts"`
-	SubSteps   []report.Command        `json:"subSteps,omitempty"`
-	ReportDir  string                  `json:"reportDir,omitempty"`
+	Device     string                   `json:"device"`
+	Step       string                   `json:"step"`
+	Type       string                   `json:"type"`
+	Index      int                      `json:"index"`
+	DurationMs int64                    `json:"durationMs"`
+	Message    string                   `json:"message,omitempty"`
+	Skipped    bool                     `json:"skipped,omitempty"`
+	Optional   bool                     `json:"optional,omitempty"`
+	Element    *core.ElementInfo        `json:"element,omitempty"`
+	Data       any                      `json:"data,omitempty"`
+	Artifacts  report.CommandArtifacts  `json:"artifacts"`
+	SubSteps   []report.Command         `json:"subSteps,omitempty"`
+	TestReport *executor.TestFlowReport `json:"testReport,omitempty"`
+	ReportDir  string                   `json:"reportDir,omitempty"`
 	// Outputs name the files a remote call's output fields wrote, as
 	// paths under the report directory (outputs/<path>), fetched with
 	// GET …/artifacts/{path}. Absent for local calls.
@@ -326,6 +330,7 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		Data:       o.Data,
 		Artifacts:  o.Artifacts,
 		SubSteps:   o.SubSteps,
+		TestReport: o.TestReport,
 		ReportDir:  reportDir,
 		Outputs:    o.Outputs,
 	}
@@ -632,10 +637,13 @@ type StepsRequest struct {
 
 // FlowRequest is the body of POST /v1/devices/{dev}/flows.
 type FlowRequest struct {
-	File string            `json:"file,omitempty"`
-	YAML string            `json:"yaml,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
-	Cwd  string            `json:"cwd,omitempty"`
+	Test *executor.TestFlowOptions `json:"test,omitempty"`
+	// DefaultAppID is inherited from a suite when its child has no app ID or URL.
+	DefaultAppID string            `json:"defaultAppId,omitempty"`
+	File         string            `json:"file,omitempty"`
+	YAML         string            `json:"yaml,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Cwd          string            `json:"cwd,omitempty"`
 	// Bundle, used instead of File or YAML, is an uploaded flow bundle;
 	// its root file runs as the flow.
 	Bundle *BundleManifest `json:"bundle,omitempty"`
