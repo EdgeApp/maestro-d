@@ -506,10 +506,24 @@ export class MaestroD {
    */
   async devices(opts: DeviceQuery & { signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
     const { signal, ...q } = opts
-    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(withQuery('/v1/devices', q), {
-      signal: this.sig(signal),
-    })
-    return res.devices
+    const path = withQuery('/v1/devices', q)
+    const list = async (collectionLease?: string) =>
+      (await this.transport.json<Envelope & { devices: DeviceInfo[] }>(path, {
+        signal: this.sig(signal), collectionLease,
+      })).devices
+    if (!this.leasing) return list()
+    const leases = new Set(this.transport.leases.values())
+    for (const record of loadLeases()) {
+      if (record.hub === this.leaseKey && record.id) leases.add(record.id)
+    }
+    if (leases.size === 0) return list()
+    const devices = new Map<string, DeviceInfo>()
+    for (const lease of leases) {
+      for (const d of await list(lease)) {
+        if (!devices.has(d.id)) devices.set(d.id, d)
+      }
+    }
+    return [...devices.values()]
   }
 
   /** One device by id. */

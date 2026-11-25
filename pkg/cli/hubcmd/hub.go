@@ -219,7 +219,7 @@ func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
 	if err = checkCloudFlags(o); err != nil {
 		return "", "", err
 	}
-	if o.hub.configShare, err = configShare(o); err != nil {
+	if _, err = configShare(o); err != nil {
 		return "", "", err
 	}
 	return token, peerToken, nil
@@ -478,7 +478,6 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		TLSKey:           o.TLSKey,
 		Hub:              &hubd.Server{},
 		HubName:          o.hub.name,
-		ShareConfig:      o.hub.configShare,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,
 		ReservationLead:  lead,

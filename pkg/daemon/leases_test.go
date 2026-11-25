@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
+
 	"context"
 	"os"
 	"path/filepath"
@@ -22,7 +24,7 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 func TestLeases_ClientForgetsExpiredLease(t *testing.T) {
-	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", ShareConfig: []string{"mock-1"}})
+	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", DeviceConfig: daemontest.DeviceConfig(t, "mock-1")})
 	ctx := context.Background()
 	var told []string
 	env.remote.OnLeaseExpired = func(device, lease, _ string) { told = append(told, device+"="+lease) }
