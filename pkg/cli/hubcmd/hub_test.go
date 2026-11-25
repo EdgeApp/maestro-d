@@ -1,4 +1,4 @@
-package cli
+package hubcmd
 
 import (
 	"bytes"
@@ -207,7 +207,7 @@ func TestHubService_RefusedOffMacOS(t *testing.T) {
 			t.Fatalf("linux: %v", err)
 		}
 	}
-	if serviceInstalled("hub") {
+	if ServiceInstalled("hub") {
 		t.Fatal("installed on linux")
 	}
 	if st, pid := launchdState("x\n\tstate = waiting\n"); st != "waiting" || pid != "" {
@@ -454,4 +454,9 @@ func TestHubService_TwoDaemonsInOneHome(t *testing.T) {
 	if _, err := os.Stat(servicePlistPath("hub")); err != nil {
 		t.Fatal("uninstalling tvhub removed hub's plist")
 	}
+}
+
+func isCode(err error, code daemon.Code) bool {
+	de, ok := err.(*daemon.Error)
+	return ok && de.Code == code
 }

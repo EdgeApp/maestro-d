@@ -1,4 +1,4 @@
-package daemon
+package hubd
 
 // leases.go: device leases on a hub daemon.
 //
@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -45,133 +44,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
-// HeaderLease carries the lease id on every request that drives a leased
-// device.
-const HeaderLease = "X-Maestro-Lease"
-
-const (
-	// DefaultLeaseTTL is a lease's window when the request names none (or
-	// the device's maximum, when that is shorter).
-	DefaultLeaseTTL = 8 * time.Hour
-	// DefaultLeaseMax is the longest window a hub grants unless
-	// --lease-max says otherwise.
-	DefaultLeaseMax = 8 * time.Hour
-	// leaseSweepEvery is how often a hub ends the leases that expired.
-	leaseSweepEvery = time.Second
-)
-
-// Lease is one lease, as the lease routes return it.
-type Lease struct {
-	// ID is what X-Maestro-Lease sends.
-	ID     string `json:"id"`
-	Device string `json:"device"`
-	Holder string `json:"holder,omitempty"`
-	// StartsAt is RFC 3339: the start of the window (the grant, for a
-	// lease taken at once). A renew leaves it as it is.
-	StartsAt string `json:"startsAt"`
-	// ExpiresAt is RFC 3339: the end of the window. Only an explicit
-	// renew moves it.
-	ExpiresAt string `json:"expiresAt"`
-	// State is LeaseScheduled until the window starts, then LeaseActive.
-	State string `json:"state"`
-	// TTLSec is the window's length; MaxSec the device's maximum window.
-	TTLSec int `json:"ttlSec"`
-	MaxSec int `json:"maxSec"`
-	// Booted is true when the hub booted the device for this lease; it
-	// shuts it down again when the lease ends.
-	Booted bool `json:"booted,omitempty"`
-}
-
-// The states of a lease.
-const (
-	LeaseScheduled = "scheduled"
-	LeaseActive    = "active"
-)
-
-// DeviceLease is the lease state a hub's device listings carry: the
-// active lease, and each reservation, which carries StartsAt.
-type DeviceLease struct {
-	Holder    string `json:"holder,omitempty"`
-	StartsAt  string `json:"startsAt,omitempty"`
-	ExpiresAt string `json:"expiresAt"`
-}
-
-// LeaseSelector picks a device by its properties. Every field set must
-// match: platform and kind exactly, name as the device's name or id,
-// osVersion as the version or a prefix of it ("26" matches "26.5"), hub as
-// the hub's name. A TV (kind tv) is picked only by a selector that asks
-// for kind tv or names the TV: a client asking for an iOS device wants a
-// phone or tablet.
-type LeaseSelector struct {
-	Platform  string `json:"platform,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Name      string `json:"name,omitempty"`
-	OSVersion string `json:"osVersion,omitempty"`
-	Hub       string `json:"hub,omitempty"`
-	// Location "cloud" launches a cloud device for the lease (remote.go):
-	// Provider (default devicefarm), Platform, Name (the model), OSVersion
-	// and the OSVersionMin/Max range pick it. In a mesh it goes to the
-	// hub the launch routing rule names (cloudroute.go).
-	Location     string `json:"location,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	OSVersionMin string `json:"osVersionMin,omitempty"`
-	OSVersionMax string `json:"osVersionMax,omitempty"`
-	// Boot makes shut-down simulators and AVDs candidates too: the hub
-	// boots the one it picks, and shuts it down when the lease ends.
-	Boot bool `json:"boot,omitempty"`
-}
-
-// LeaseRequest is the body of POST /v1/leases.
-type LeaseRequest struct {
-	// Device or Select names the device; exactly one is given.
-	Device string         `json:"device,omitempty"`
-	Select *LeaseSelector `json:"select,omitempty"`
-	// TTLSec is the window in seconds: default 8 hours (or the device's
-	// maximum, when that is shorter); over the maximum is USAGE.
-	TTLSec int    `json:"ttlSec,omitempty"`
-	Holder string `json:"holder,omitempty"`
-	// Attach, when given, attaches the device in the same call.
-	Attach *AttachConfig `json:"attach,omitempty"`
-	// Cloud tunes a cloud launch (Select.Location "cloud"): idle release,
-	// Appium version, capabilities, app id. Apps are installed after the
-	// lease, through the install route.
-	Cloud *cloudprov.CloudSpec `json:"cloud,omitempty"`
-}
-
-// RenewRequest is the body of POST /v1/leases/{lid}/renew.
-type RenewRequest struct {
-	// TTLSec is the new window from now (default the lease's own).
-	TTLSec int `json:"ttlSec,omitempty"`
-}
-
-// LeaseMax is one --lease-max DEVICE=DURATION: the longest window a lease
-// on that device (by id or name, as for --share-device) may have.
-type LeaseMax struct {
-	Device string
-	Max    time.Duration
-}
-
-// LeaseResult answers POST /v1/leases, GET /v1/leases/{lid}, renew and
-// release.
-type LeaseResult struct {
-	Envelope
-	Lease  Lease       `json:"lease"`
-	Device *DeviceInfo `json:"device,omitempty"`
-	// DeviceMinutes, on a release, is the time the lease's cloud device
-	// used (absent when its release was still pending or failed).
-	DeviceMinutes *cloudprov.DeviceMinutes `json:"deviceMinutes,omitempty"`
-}
-
-// LeasesResult answers GET /v1/leases.
-type LeasesResult struct {
-	Envelope
-	Leases []Lease `json:"leases"`
-	// Unreachable, on a hub, names the peers whose leases are missing.
-	Unreachable []UnreachablePeer `json:"unreachable,omitempty"`
-}
+// leaseSweepEvery is how often a hub ends the leases that expired.
+const leaseSweepEvery = time.Second
 
 type leaseEntry struct {
 	id, device, holder string
@@ -209,7 +87,7 @@ type leaseEntry struct {
 	// cloud is the cloud device the lease launched (remote.go): the lease's
 	// end releases it, and its release ends the lease. cloudDone is closed
 	// once it is released, with its minutes in cloudMinutes.
-	cloud        *remoteDevice
+	releaseCloud func() *cloudprov.DeviceMinutes
 	cloudDone    chan struct{}
 	cloudMinutes *cloudprov.DeviceMinutes
 }
@@ -260,15 +138,15 @@ func (e *leaseEntry) doneWork() {
 
 // leaseExpiredErr is LEASE_EXPIRED for a request whose lease e ended
 // before it could start.
-func leaseExpiredErr(e *leaseEntry) *Error {
-	return Errorf(CodeLeaseExpired, "lease %s on device %s has expired or was released; take a new one", e.id, e.device).
+func leaseExpiredErr(e *leaseEntry) *daemon.Error {
+	return daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on device %s has expired or was released; take a new one", e.id, e.device).
 		WithDetails("lease", e.id)
 }
 
 // beingReleasedErr is DEVICE_IN_USE for a device whose ended lease is
 // still being torn down.
-func beingReleasedErr(device string) *Error {
-	return Errorf(CodeDeviceInUse, "device %s is being released (its lease ended); try again shortly", device)
+func beingReleasedErr(device string) *daemon.Error {
+	return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is being released (its lease ended); try again shortly", device)
 }
 
 // pending counts work that must finish before the hub stops (the lease
@@ -323,7 +201,7 @@ func (p *pending) wait(d time.Duration) bool {
 // sweeper ends it within a second), or still being torn down after its
 // lease ended (an attach under it may still be unwinding). Such a device
 // is not available.
-func (t *leaseTable) reserved(d DeviceInfo) bool {
+func (t *leaseTable) reserved(d daemon.DeviceInfo) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.reservedLocked(d) || t.ending[bootKey(d)] || t.byDevice[d.ID] != nil
@@ -334,7 +212,7 @@ func (t *leaseTable) reserved(d DeviceInfo) bool {
 func (t *leaseTable) tearingDown(id string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.reservedLocked(DeviceInfo{ID: id})
+	return t.reservedLocked(daemon.DeviceInfo{ID: id})
 }
 
 // leaseTable holds a hub's live leases.
@@ -393,8 +271,8 @@ func (t *leaseTable) doneEndingLocked(keys ...string) {
 // bootKey names a shut-down device in the booting reservations so that
 // the ready device it becomes matches too: a simulator keeps its UDID,
 // and an AVD becomes an emulator serial listed under the AVD's name.
-func bootKey(d DeviceInfo) string {
-	if name, ok := strings.CutPrefix(d.ID, AVDPrefix); ok {
+func bootKey(d daemon.DeviceInfo) string {
+	if name, ok := strings.CutPrefix(d.ID, daemon.AVDPrefix); ok {
 		return "android:" + strings.ToLower(name)
 	}
 	return d.ID
@@ -404,11 +282,11 @@ func bootKey(d DeviceInfo) string {
 // (a running emulator's name is its AVD's, and a shut-down AVD is listed
 // as avd:<name>), or "" for any other device. A phone has none: phones are
 // named too, and two of one model share a name.
-func avdKey(d DeviceInfo) string {
+func avdKey(d daemon.DeviceInfo) string {
 	if d.Platform != "android" || d.Name == "" {
 		return ""
 	}
-	if d.Kind != "emulator" && !strings.HasPrefix(d.ID, "emulator-") && !strings.HasPrefix(d.ID, AVDPrefix) {
+	if d.Kind != "emulator" && !strings.HasPrefix(d.ID, "emulator-") && !strings.HasPrefix(d.ID, daemon.AVDPrefix) {
 		return ""
 	}
 	return "android:" + strings.ToLower(d.Name)
@@ -418,7 +296,7 @@ func avdKey(d DeviceInfo) string {
 // booting (it may be listed ready before that boot returns) or a teardown
 // is shutting down, by its id or, for a running emulator or a shut-down
 // AVD, by its AVD's key. The caller holds t.mu.
-func (t *leaseTable) reservedLocked(d DeviceInfo) bool {
+func (t *leaseTable) reservedLocked(d daemon.DeviceInfo) bool {
 	if t.booting[d.ID] || t.ending[d.ID] {
 		return true
 	}
@@ -434,7 +312,7 @@ func (t *leaseTable) reservedLocked(d DeviceInfo) bool {
 // by a lease that expired but has not ended yet, still being torn down
 // after its lease ended, or booting for a selector lease (reservedLocked,
 // so an emulator and its AVD are one device).
-func (t *leaseTable) releasing(d DeviceInfo) bool {
+func (t *leaseTable) releasing(d daemon.DeviceInfo) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.reservedLocked(d) {
@@ -467,42 +345,42 @@ func (e *leaseEntry) liveAt(now time.Time) bool { return e.started.Load() && now
 // pending reports whether e is a reservation that has not started.
 func (e *leaseEntry) pending() bool { return !e.started.Load() }
 
-func (e *leaseEntry) view() Lease {
-	state := LeaseActive
+func (e *leaseEntry) view() daemon.Lease {
+	state := daemon.LeaseActive
 	if e.pending() {
-		state = LeaseScheduled
+		state = daemon.LeaseScheduled
 	}
-	return Lease{ID: e.id, Device: e.device, Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+	return daemon.Lease{ID: e.id, Device: e.device, Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
 		ExpiresAt: e.expires.UTC().Format(time.RFC3339), State: state,
 		TTLSec: int(e.ttl / time.Second), MaxSec: int(e.max / time.Second), Booted: e.booted}
 }
 
 // liveFor returns the live lease on device, if any.
-func (t *leaseTable) liveFor(device string) (Lease, bool) {
+func (t *leaseTable) liveFor(device string) (daemon.Lease, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if e := t.byDevice[device]; e != nil && e.liveAt(t.now()) {
 		return e.view(), true
 	}
-	return Lease{}, false
+	return daemon.Lease{}, false
 }
 
 // get returns a live or scheduled lease by id.
-func (t *leaseTable) get(id string) (Lease, bool) {
+func (t *leaseTable) get(id string) (daemon.Lease, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if e := t.byID[id]; e != nil && (e.liveAt(t.now()) || e.pending()) {
 		return e.view(), true
 	}
-	return Lease{}, false
+	return daemon.Lease{}, false
 }
 
 // list returns every live and scheduled lease, by device, then start.
-func (t *leaseTable) list() []Lease {
+func (t *leaseTable) list() []daemon.Lease {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	out := []Lease{}
+	out := []daemon.Lease{}
 	for _, e := range t.byID {
 		if e.liveAt(now) || e.pending() {
 			out = append(out, e.view())
@@ -521,29 +399,29 @@ func (t *leaseTable) list() []Lease {
 // window), refusing one over the lease's maximum, one that would reach
 // into the device's next reservation, and a reservation that has not
 // started.
-func (t *leaseTable) renew(id string, ttlSec int) (Lease, *Error) {
+func (t *leaseTable) renew(id string, ttlSec int) (daemon.Lease, *daemon.Error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	e := t.byID[id]
 	if e != nil && e.pending() {
-		return Lease{}, Errorf(CodeUsage, "lease %s starts at %s; a reservation is not renewed: release it and reserve again to move it",
+		return daemon.Lease{}, daemon.Errorf(daemon.CodeUsage, "lease %s starts at %s; a reservation is not renewed: release it and reserve again to move it",
 			id, e.starts.UTC().Format(time.RFC3339)).WithDetails("lease", id, "startsAt", e.starts.UTC().Format(time.RFC3339))
 	}
 	if e == nil || !e.liveAt(now) {
-		return Lease{}, Errorf(CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id)
+		return daemon.Lease{}, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id)
 	}
 	ttl := e.ttl
 	if ttlSec != 0 {
-		var we *Error
+		var we *daemon.Error
 		if ttl, we = leaseWindow(e.device, ttlSec, e.max); we != nil {
-			return Lease{}, we
+			return daemon.Lease{}, we
 		}
 	}
 	// Counted from the start of the current second, as a grant is.
 	expires := now.Truncate(time.Second).Add(ttl)
 	if c := t.overlapLocked(e.device, now.Truncate(time.Second), expires, e); c != nil {
-		return Lease{}, overlapErr(e.device, c)
+		return daemon.Lease{}, overlapErr(e.device, c)
 	}
 	e.ttl = ttl
 	e.expires = expires
@@ -571,14 +449,14 @@ func (t *leaseTable) overlapLocked(device string, from, to time.Time, skip *leas
 
 // overlapErr is DEVICE_IN_USE for a window that overlaps lease c on
 // device: c's holder and window, and nextStartsAt when c is a reservation.
-func overlapErr(device string, c *leaseEntry) *Error {
+func overlapErr(device string, c *leaseEntry) *daemon.Error {
 	starts, expires := c.starts.UTC().Format(time.RFC3339), c.expires.UTC().Format(time.RFC3339)
 	if c.pending() {
-		return Errorf(CodeDeviceInUse, "device %s is reserved by %s from %s until %s; ask for a window that ends by %s",
-			device, HolderName(c.holder), starts, expires, starts).
+		return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is reserved by %s from %s until %s; ask for a window that ends by %s",
+			device, daemon.HolderName(c.holder), starts, expires, starts).
 			WithDetails("holder", c.holder, "startsAt", starts, "expiresAt", expires, "nextStartsAt", starts)
 	}
-	return Errorf(CodeDeviceInUse, "device %s is leased by %s until %s", device, HolderName(c.holder), expires).
+	return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is leased by %s until %s", device, daemon.HolderName(c.holder), expires).
 		WithDetails("holder", c.holder, "startsAt", starts, "expiresAt", expires)
 }
 
@@ -602,19 +480,19 @@ func (t *leaseTable) pendingFor(id, device string) *leaseEntry {
 }
 
 // notStartedErr is LEASE_NOT_STARTED for a request under reservation e.
-func notStartedErr(e *leaseEntry) *Error {
+func notStartedErr(e *leaseEntry) *daemon.Error {
 	starts := e.starts.UTC().Format(time.RFC3339)
-	return Errorf(CodeLeaseNotStarted, "lease %s on device %s starts at %s; run the command after then", e.id, e.device, starts).
+	return daemon.Errorf(daemon.CodeLeaseNotStarted, "lease %s on device %s starts at %s; run the command after then", e.id, e.device, starts).
 		WithDetails("lease", e.id, "startsAt", starts)
 }
 
 // reservations lists device's reservations that have not started, by start.
-func (t *leaseTable) reservations(device string) []DeviceLease {
+func (t *leaseTable) reservations(device string) []daemon.DeviceLease {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var out []DeviceLease
+	var out []daemon.DeviceLease
 	for _, e := range t.scheduled[device] {
-		out = append(out, DeviceLease{Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+		out = append(out, daemon.DeviceLease{Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
 			ExpiresAt: e.expires.UTC().Format(time.RFC3339)})
 	}
 	return out
@@ -712,12 +590,12 @@ func (t *leaseTable) handBoot(device string) *leaseEntry {
 
 // overMax is the USAGE error for a window over a device's maximum; device
 // "" is a cloud device not launched yet.
-func overMax(device string, ttlSec int, maxTTL time.Duration) *Error {
+func overMax(device string, ttlSec int, maxTTL time.Duration) *daemon.Error {
 	whose := "device " + device + "'s"
 	if device == "" {
 		whose = "a cloud device's"
 	}
-	return Errorf(CodeUsage, "leases: a window of ttlSec %d is over %s maximum of %s (maxSec %d)",
+	return daemon.Errorf(daemon.CodeUsage, "leases: a window of ttlSec %d is over %s maximum of %s (maxSec %d)",
 		ttlSec, whose, maxTTL, int(maxTTL/time.Second)).
 		WithDetails("maxSec", int(maxTTL/time.Second), "ttlSec", ttlSec)
 }
@@ -730,7 +608,7 @@ func overMax(device string, ttlSec int, maxTTL time.Duration) *Error {
 // booted. A later start is a reservation, kept in scheduled until the
 // sweeper starts it. The caller holds Server.leaseMu, which serialises
 // grants with the sweeper.
-func (t *leaseTable) grant(device, avd, holder string, starts time.Time, ttl, maxTTL time.Duration, booted bool) (*leaseEntry, *Error) {
+func (t *leaseTable) grant(device, avd, holder string, starts time.Time, ttl, maxTTL time.Duration, booted bool) (*leaseEntry, *daemon.Error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
@@ -744,7 +622,7 @@ func (t *leaseTable) grant(device, avd, holder string, starts time.Time, ttl, ma
 	expires := starts.Add(ttl)
 	pending := starts.After(now)
 	if e := t.byDevice[device]; e != nil && !pending && !e.liveAt(now) {
-		return nil, Errorf(CodeDeviceInUse, "device %s is being released (its lease expired); try again shortly", device)
+		return nil, daemon.Errorf(daemon.CodeDeviceInUse, "device %s is being released (its lease expired); try again shortly", device)
 	}
 	if c := t.overlapLocked(device, starts, expires, nil); c != nil {
 		return nil, overlapErr(device, c)
@@ -800,12 +678,12 @@ func (t *leaseTable) remove(e *leaseEntry) bool {
 
 // goneLeaseErr is LEASE_EXPIRED for a lease whose device went away with it.
 // A cloud device's hint is a new cloud lease, since its id never comes back.
-func (s *Server) goneLeaseErr(lease, id string) *Error {
+func (s *Server) goneLeaseErr(lease, id string) *daemon.Error {
 	hint := "maestro-d device list"
 	if local, _, _ := strings.Cut(id, "@"); len(s.deps.Providers) > 0 && cloudIDPattern.MatchString(local) {
 		hint = "maestro-d lease --location cloud --platform ios|android"
 	}
-	return Errorf(CodeLeaseExpired, "lease %s on device %s has ended, and the device is gone with it; take a new lease (%s)", lease, id, hint).
+	return daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on device %s has ended, and the device is gone with it; take a new lease (%s)", lease, id, hint).
 		WithDetails("lease", lease, "hint", hint)
 }
 
@@ -814,7 +692,7 @@ var cloudIDPattern = regexp.MustCompile(`^[a-z0-9]+-[0-9a-f]{8}$`)
 
 // known reports whether this daemon can see device id at all.
 func (s *Server) known(id string) bool {
-	_, ok := s.registry.Lookup(id)
+	_, ok := s.Registry().Lookup(id)
 	return ok
 }
 
@@ -862,7 +740,7 @@ func (t *leaseTable) expiredOn(device string) *leaseEntry {
 // false for a route that needs a lease only when the device is leased
 // (stopping or deleting a device nobody holds). On success it returns the
 // entry the request runs under, if any; using it never moves its expiry.
-func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *Error) {
+func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *daemon.Error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
@@ -872,14 +750,14 @@ func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *Error)
 	}
 	if header == "" {
 		if cur != nil {
-			return nil, Errorf(CodeLeaseRequired, "device %s is leased by %s until %s; send its lease in %s", device,
-				HolderName(cur.holder), cur.expires.UTC().Format(time.RFC3339), HeaderLease).
+			return nil, daemon.Errorf(daemon.CodeLeaseRequired, "device %s is leased by %s until %s; send its lease in %s", device,
+				daemon.HolderName(cur.holder), cur.expires.UTC().Format(time.RFC3339), daemon.HeaderLease).
 				WithDetails("holder", cur.holder, "expiresAt", cur.expires.UTC().Format(time.RFC3339))
 		}
 		if need {
-			return nil, Errorf(CodeLeaseRequired, "device %s needs a lease on this hub, and clients never take one on their own: "+
+			return nil, daemon.Errorf(daemon.CodeLeaseRequired, "device %s needs a lease on this hub, and clients never take one on their own: "+
 				"run `maestro-d lease --device %s` (or md.lease() in JavaScript, POST /v1/leases over REST) and send it in %s",
-				device, device, HeaderLease).WithDetails("hint", "maestro-d lease --device "+device)
+				device, device, daemon.HeaderLease).WithDetails("hint", "maestro-d lease --device "+device)
 		}
 		return nil, nil
 	}
@@ -890,10 +768,10 @@ func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *Error)
 		return nil, notStartedErr(p)
 	}
 	if other := t.byID[header]; other != nil && (other.liveAt(now) || other.pending()) {
-		return nil, Errorf(CodeLeaseRequired, "lease %s is for device %s, not %s", header, other.device, device).
+		return nil, daemon.Errorf(daemon.CodeLeaseRequired, "lease %s is for device %s, not %s", header, other.device, device).
 			WithDetails("leaseDevice", other.device)
 	}
-	return nil, Errorf(CodeLeaseExpired, "lease %s on device %s has expired or was released; take a new one", header, device).
+	return nil, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on device %s has expired or was released; take a new one", header, device).
 		WithDetails("lease", header)
 }
 
@@ -905,7 +783,7 @@ func (t *leaseTable) use(device, header string, need bool) (*leaseEntry, *Error)
 // ending from the client going (clientContext). stop releases the watch.
 func underLease(r *http.Request, e *leaseEntry) (*http.Request, func()) {
 	r = withLease(r, e)
-	ctx, cancel := untilLeaseEnds(r.Context(), e)
+	ctx, cancel := daemon.ContextUntilLeaseEnds(r.Context(), e.ended)
 	return r.WithContext(ctx), cancel
 }
 
@@ -920,7 +798,8 @@ func withLease(r *http.Request, e *leaseEntry) *http.Request {
 // (endStoppedLease) calls it first, so the teardown does not wait for the
 // request that runs it.
 func withLeaseWork(r *http.Request, e *leaseEntry, doneWork func()) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), leaseCtxKey{}, leaseCtx{e: e, client: r.Context(), doneWork: doneWork}))
+	ctx := daemon.WithLeaseWindow(r.Context(), e.ended)
+	return r.WithContext(context.WithValue(ctx, leaseCtxKey{}, leaseCtx{e: e, doneWork: doneWork}))
 }
 
 // leaseCtxKey carries the lease a request runs under in its context.
@@ -930,7 +809,6 @@ type leaseCtxKey struct{}
 // context before underLease tied it to the lease.
 type leaseCtx struct {
 	e        *leaseEntry
-	client   context.Context
 	doneWork func()
 }
 
@@ -940,47 +818,11 @@ func leaseFrom(ctx context.Context) *leaseEntry {
 	return v.e
 }
 
-// clientContext is ctx without the lease's end: the context of the
-// client's request, which ends only when the client goes (or, over TCP
-// with a request id, after the grace). ctx itself when no lease is on it.
-func clientContext(ctx context.Context) context.Context {
-	if v, ok := ctx.Value(leaseCtxKey{}).(leaseCtx); ok {
-		return v.client
-	}
-	return ctx
-}
-
-// untilLeaseEnds returns a child of ctx that is cancelled as soon as lease
-// e ends. cancel releases the watch.
-func untilLeaseEnds(ctx context.Context, e *leaseEntry) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(ctx)
-	go func() {
-		select {
-		case <-e.ended:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx, cancel
-}
-
-// HolderName is how a lease's holder reads in messages and listings:
-// the holder, or "another client" when it gave none.
-func HolderName(h string) string {
-	if h == "" {
-		return "another client"
-	}
-	return h
-}
-
-// ---------------------------------------------------------------------------
-// Sharing
-
 // shareMatches reports whether a --share-device entry names the device, by
 // id or by name (a running emulator's name is its AVD name).
-func shareMatches(entry string, d DeviceInfo) bool {
+func shareMatches(entry string, d daemon.DeviceInfo) bool {
 	return entry == d.ID || (d.Name != "" && strings.EqualFold(entry, d.Name)) ||
-		(strings.HasPrefix(d.ID, AVDPrefix) && strings.EqualFold(entry, strings.TrimPrefix(d.ID, AVDPrefix)))
+		(strings.HasPrefix(d.ID, daemon.AVDPrefix) && strings.EqualFold(entry, strings.TrimPrefix(d.ID, daemon.AVDPrefix)))
 }
 
 // sharedInfo reports whether a listed device is in the hub's pool. A hub
@@ -988,41 +830,32 @@ func shareMatches(entry string, d DeviceInfo) bool {
 // (see Config.ShareTVs), any other device when --share-device or
 // config.json does. A daemon that is not a hub shares every device unless
 // Config.ShareDevices names some.
-func (s *Server) sharedInfo(d DeviceInfo) bool {
-	if isComputer(d) {
+func (s *Server) sharedInfo(d daemon.DeviceInfo) bool {
+	if daemon.IsComputer(d) {
 		return false // local only, whatever --share-device says
-	}
-	if s.sharesAll() {
-		return true
 	}
 	// A cloud device a hub launched for a lease is always in its pool. On a
 	// plain daemon a cloud device (its owner's credentials pay for it)
 	// follows --share-device like any other.
-	if s.cfg.Hub && d.Provider != "" {
+	if d.Provider != "" {
 		return true
 	}
-	if s.cfg.Hub && strings.EqualFold(d.Kind, "tv") {
+	if strings.EqualFold(d.Kind, "tv") {
 		return s.sharedTV(d)
 	}
 	return namedIn(s.cfg.ShareDevices, d) || s.configShares(d)
 }
 
-// sharesAll reports whether remote callers see every device: on a daemon
-// that is not a hub and names none. A hub shares only what it names.
-func (s *Server) sharesAll() bool {
-	return !s.cfg.Hub && len(s.cfg.ShareDevices) == 0
-}
-
 // sharedTV reports whether --share-tv or config.json names the TV d.
-func (s *Server) sharedTV(d DeviceInfo) bool {
+func (s *Server) sharedTV(d daemon.DeviceInfo) bool {
 	return namedIn(s.cfg.ShareTVs, d) || s.configShares(d)
 }
 
 // configShares reports whether config.json's hubDevices names device d
 // (see configNames).
-func (s *Server) configShares(d DeviceInfo) bool {
+func (s *Server) configShares(d daemon.DeviceInfo) bool {
 	for _, id := range s.cfg.ShareConfig {
-		if configNames(id, d) {
+		if daemon.ConfigNames(id, d) {
 			return true
 		}
 	}
@@ -1030,7 +863,7 @@ func (s *Server) configShares(d DeviceInfo) bool {
 }
 
 // namedIn reports whether an entry of list names device d.
-func namedIn(list []string, d DeviceInfo) bool {
+func namedIn(list []string, d daemon.DeviceInfo) bool {
 	for _, entry := range list {
 		if shareMatches(entry, d) {
 			return true
@@ -1059,16 +892,16 @@ func (s *Server) shareList() string {
 // Deps.TVInfo, or from the registry's record of a TV this daemon attached.
 // Neither runs discovery, and neither forgets a TV while devicectl fails,
 // so an unshared TV stays private.
-func (s *Server) tvInfo(id string) (DeviceInfo, bool) {
+func (s *Server) tvInfo(id string) (daemon.DeviceInfo, bool) {
 	if s.deps.TVInfo != nil {
 		if name, ok := s.deps.TVInfo(id); ok {
-			return DeviceInfo{ID: id, Kind: "tv", Name: name}, true
+			return daemon.DeviceInfo{ID: id, Kind: "tv", Name: name}, true
 		}
 	}
-	if rec, ok := s.registry.Record(id); ok && strings.EqualFold(rec.Kind, "tv") {
+	if rec, ok := s.Registry().Record(id); ok && strings.EqualFold(rec.Kind, "tv") {
 		return rec, true
 	}
-	return DeviceInfo{}, false
+	return daemon.DeviceInfo{}, false
 }
 
 // shareCacheFor is how long shared remembers an answer it may not keep:
@@ -1092,21 +925,16 @@ type shareAnswer struct {
 func (s *Server) shared(id string) bool {
 	// The computer device is never in the pool. Checked first: the empty
 	// share-all answer below and the positive cache would share it.
-	if id == ComputerID {
+	if id == daemon.ComputerID {
 		return false
 	}
-	if rec, ok := s.registry.Record(id); ok && isComputer(rec) {
+	if rec, ok := s.Registry().Record(id); ok && daemon.IsComputer(rec) {
 		return false
 	}
-	if s.cfg.Hub {
-		if tv, ok := s.tvInfo(id); ok {
-			return s.sharedTV(tv)
-		}
+	if tv, ok := s.tvInfo(id); ok {
+		return s.sharedTV(tv)
 	}
-	if s.sharesAll() {
-		return true
-	}
-	stable := !isEmulatorSerial(id)
+	stable := !daemon.IsEmulatorSerial(id)
 	now := s.leases.now()
 	s.shareMu.Lock()
 	if stable && s.sharedIDs[id] {
@@ -1119,9 +947,9 @@ func (s *Server) shared(id string) bool {
 	}
 	gen := s.shareGen
 	s.shareMu.Unlock()
-	info, found := s.registry.Lookup(id)
+	info, found := s.Registry().Lookup(id)
 	if !found {
-		info = DeviceInfo{ID: id}
+		info = daemon.DeviceInfo{ID: id}
 	}
 	ok := s.sharedInfo(info)
 	s.shareMu.Lock()
@@ -1141,7 +969,7 @@ func (s *Server) shared(id string) bool {
 // state changes here: a booted, stopped, created or deleted device, or an
 // ended lease (its device may be stopped, and another AVD boot on the
 // serial).
-func (s *Server) forgetShared(ev Event) {
+func (s *Server) OnEvent(ev daemon.Event) {
 	switch {
 	case ev.Type == "device.booted", ev.Type == "device.stopped", ev.Type == "device.created", ev.Type == "device.deleted",
 		strings.HasPrefix(ev.Type, "lease.") && ev.Type != "lease.granted":
@@ -1152,16 +980,10 @@ func (s *Server) forgetShared(ev Event) {
 	}
 }
 
-// isEmulatorSerial reports whether id is an Android emulator's adb serial
-// (emulator-<port>), which the next AVD to boot on that port reuses.
-func isEmulatorSerial(id string) bool {
-	return strings.HasPrefix(id, "emulator-")
-}
-
 // sharedWith reports whether the request's caller may see device id: a
 // remote caller sees only the shared pool.
 func (s *Server) sharedWith(r *http.Request, id string) bool {
-	return !CallerFrom(r.Context()).Remote || s.shared(id)
+	return !daemon.CallerFrom(r.Context()).Remote || s.shared(id)
 }
 
 // handleEvents serves GET /v1/events. A remote caller sees only the shared
@@ -1169,20 +991,20 @@ func (s *Server) sharedWith(r *http.Request, id string) bool {
 // devices' events are left out, and so is any event that names no device
 // but the daemon's shutdown. A device's attach event carries the host's
 // report directory, which a remote caller does not get either.
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	if !CallerFrom(r.Context()).Remote {
-		s.events.ServeSSE(w, r)
+func (s *Server) EventsHandler(w http.ResponseWriter, r *http.Request) {
+	if !daemon.CallerFrom(r.Context()).Remote {
+		s.Events().ServeSSE(w, r)
 		return
 	}
 	if id := r.URL.Query().Get("device"); id != "" && !s.shared(id) {
-		writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
+		daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", id))
 		return
 	}
-	s.events.ServeSSEView(w, r, s.remoteEvent)
+	s.Events().ServeSSEView(w, r, s.remoteEvent)
 }
 
 // remoteEvent is a remote caller's view of an event.
-func (s *Server) remoteEvent(ev Event) (Event, bool) {
+func (s *Server) remoteEvent(ev daemon.Event) (daemon.Event, bool) {
 	switch {
 	case ev.Device == "":
 		return ev, ev.Type == "daemon.shutdown"
@@ -1197,41 +1019,24 @@ func (s *Server) remoteEvent(ev Event) (Event, bool) {
 // visible filters and annotates a device list for the request's caller:
 // a remote caller sees only the shared pool, and on a hub every entry
 // carries its lease state.
-func (s *Server) visible(r *http.Request, devs []DeviceInfo) []DeviceInfo {
-	out := make([]DeviceInfo, 0, len(devs))
-	remote := CallerFrom(r.Context()).Remote
+func (s *Server) Visible(r *http.Request, devs []daemon.DeviceInfo) []daemon.DeviceInfo {
+	out := make([]daemon.DeviceInfo, 0, len(devs))
+	remote := daemon.CallerFrom(r.Context()).Remote
 	for _, d := range devs {
 		if remote && !s.sharedInfo(d) {
 			continue
 		}
 		out = append(out, d)
 	}
-	if s.cfg.Hub {
-		s.annotate(out)
-	} else {
-		machine := MachineName()
-		for i := range out {
-			out[i].Machine = machine
-		}
-	}
+	s.annotate(out)
 	return out
-}
-
-// annotateAvailable sets available on a plain daemon's entries: ready, not
-// attached here or by another daemon, and not an AVD that is not running.
-// A hub's annotate also weighs its leases.
-func annotateAvailable(devs []DeviceInfo, owners map[string]string) {
-	for i := range devs {
-		d := &devs[i]
-		d.Available = d.Ready && !d.Attached && owners[d.ID] == "" && !strings.HasPrefix(d.ID, AVDPrefix)
-	}
 }
 
 // annotate sets lease, maxSec, available, owner, machine and addresses
 // on a hub's device entries.
-func (s *Server) annotate(devs []DeviceInfo) {
-	owners := otherOwners(s.cfg.Name)
-	machine, addrs := s.hostIdentity()
+func (s *Server) annotate(devs []daemon.DeviceInfo) {
+	owners := daemon.OtherOwners(s.cfg.Name)
+	machine, addrs := s.HostIdentity()
 	for i := range devs {
 		d := &devs[i]
 		if o := owners[d.ID]; o != "" && !d.Attached {
@@ -1239,13 +1044,13 @@ func (s *Server) annotate(devs []DeviceInfo) {
 		}
 		d.Lease = nil
 		if l, ok := s.leases.liveFor(d.ID); ok {
-			d.Lease = &DeviceLease{Holder: l.Holder, ExpiresAt: l.ExpiresAt}
+			d.Lease = &daemon.DeviceLease{Holder: l.Holder, ExpiresAt: l.ExpiresAt}
 		}
 		d.Reservations = s.leases.reservations(d.ID)
 		d.MaxSec = int(s.leaseMaxInfo(*d) / time.Second)
 		d.Machine, d.Addresses = machine, addrs
 		// A cloud device belongs to the lease that launched it: never free.
-		d.Available = d.Ready && d.Lease == nil && !d.Attached && d.Owner == "" && !strings.HasPrefix(d.ID, AVDPrefix) && d.Provider == ""
+		d.Available = d.Ready && d.Lease == nil && !d.Attached && d.Owner == "" && !strings.HasPrefix(d.ID, daemon.AVDPrefix) && d.Provider == ""
 		if d.Available && s.leases.reserved(*d) {
 			// Booting for a selector lease, or still being released.
 			d.Available = false
@@ -1253,60 +1058,24 @@ func (s *Server) annotate(devs []DeviceInfo) {
 	}
 }
 
-// otherOwners maps each device another live daemon has attached to that
-// daemon's name.
-func otherOwners(self string) map[string]string {
-	out := map[string]string{}
-	daemons, _ := ListDaemons()
-	for _, d := range daemons {
-		if d.Name == self || !d.Alive {
-			continue
-		}
-		for _, dev := range d.Devices {
-			if dev.Attached {
-				out[dev.ID] = d.Name
-			}
-		}
-	}
-	return out
-}
-
-// ---------------------------------------------------------------------------
-// Route guard
-
-type leaseMode int
-
-const (
-	// leaseOpen: GET /v1/devices/{id} and …/info stay open to every
-	// authenticated client.
-	leaseOpen leaseMode = iota
-	// leaseNeeded: every route that drives or changes the device.
-	leaseNeeded
-	// leaseIfHeld: stopping or deleting a device needs its lease only when
-	// someone holds one.
-	leaseIfHeld
-)
-
 // dev guards a /v1/devices/{id} route: an unshared device is not found for
 // a remote caller, and on a hub the request must carry the device's lease.
-func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
+func (s *Server) Gate(mode daemon.LeaseMode, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		target := DeviceInfo{ID: id}
-		if mode == leaseIfHeld && (s.cfg.Hub || CallerFrom(r.Context()).Remote) {
+		target := daemon.DeviceInfo{ID: id}
+		if mode == daemon.LeaseIfHeld {
 			target = s.stopTarget(id)
 			id = target.ID
 		}
-		if s.cfg.Hub {
-			s.startDue()
-		}
+		s.startDue()
 		if !s.sharedWith(r, id) {
 			// A reservation that has not started answers LEASE_NOT_STARTED
 			// even while its device is unlisted (unplugged, or shared by a
 			// name nothing resolves now): the holder keeps it.
-			if header := r.Header.Get(HeaderLease); s.cfg.Hub && mode != leaseOpen && header != "" {
-				if p := s.leases.pendingFor(header, id); p != nil && (!CallerFrom(r.Context()).Remote || s.unlistedShared(header)) {
-					writeError(w, notStartedErr(p))
+			if header := r.Header.Get(daemon.HeaderLease); mode != daemon.LeaseOpen && header != "" {
+				if p := s.leases.pendingFor(header, id); p != nil && (!daemon.CallerFrom(r.Context()).Remote || s.unlistedShared(header)) {
+					daemon.WriteError(w, notStartedErr(p))
 					return
 				}
 			}
@@ -1314,51 +1083,51 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 			// idle release, the session cap) answers a request under that
 			// lease LEASE_EXPIRED, so clients forget the lease. A device
 			// that still exists but is not shared stays not found.
-			if header := r.Header.Get(HeaderLease); s.cfg.Hub && mode != leaseOpen && header != "" && !s.leases.isLive(header) && !s.known(id) {
-				writeError(w, s.goneLeaseErr(header, id))
+			if header := r.Header.Get(daemon.HeaderLease); mode != daemon.LeaseOpen && header != "" && !s.leases.isLive(header) && !s.known(id) {
+				daemon.WriteError(w, s.goneLeaseErr(header, id))
 				return
 			}
-			writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
+			daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", id))
 			return
 		}
-		if !s.cfg.Hub || mode == leaseOpen {
+		if mode == daemon.LeaseOpen {
 			h(w, r)
 			return
 		}
-		e, le := s.leases.use(id, r.Header.Get(HeaderLease), mode == leaseNeeded)
+		e, le := s.leases.use(id, r.Header.Get(daemon.HeaderLease), mode == daemon.LeaseNeeded)
 		if le != nil {
 			// A device that went away (a released cloud device) is not
 			// offered for a lease: without one it is not found, and an
 			// ended lease on it says the device went too.
-			if (le.Code == CodeLeaseRequired || le.Code == CodeLeaseExpired) && !s.known(id) {
-				if header := r.Header.Get(HeaderLease); header != "" {
+			if (le.Code == daemon.CodeLeaseRequired || le.Code == daemon.CodeLeaseExpired) && !s.known(id) {
+				if header := r.Header.Get(daemon.HeaderLease); header != "" {
 					le = s.goneLeaseErr(header, id)
 				} else {
-					le = Errorf(CodeDeviceNotFound, "device %s not found", id)
+					le = daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", id)
 				}
 			}
-			writeError(w, le)
+			daemon.WriteError(w, le)
 			return
 		}
 		if e != nil && s.leases.tearingDown(id) {
 			// A lease the sweeper started as the one before it ended: that
 			// lease's teardown (detach, shutdown) still runs on the device,
 			// and nothing under this one may run beside it.
-			writeError(w, beingReleasedErr(id))
+			daemon.WriteError(w, beingReleasedErr(id))
 			return
 		}
-		if e == nil && mode == leaseIfHeld && s.leases.releasing(target) {
+		if e == nil && mode == daemon.LeaseIfHeld && s.leases.releasing(target) {
 			// The teardown of the device's ended lease may be shutting
 			// it down, or a selector lease booting it (an emulator by its
 			// AVD too): a stop or delete beside it would race it.
-			writeError(w, beingReleasedErr(id))
+			daemon.WriteError(w, beingReleasedErr(id))
 			return
 		}
 		if e == nil {
 			h(w, r)
 			return
 		}
-		if mode == leaseIfHeld {
+		if mode == daemon.LeaseIfHeld {
 			// Stopping or deleting the device is work under its lease, so
 			// a teardown that ends the lease meanwhile waits for it, and
 			// does not shut the device down again once it has
@@ -1368,7 +1137,7 @@ func (s *Server) dev(mode leaseMode, h http.HandlerFunc) http.HandlerFunc {
 			// (endStoppedLease), leaving its own work out first, so the
 			// teardown is done before it answers.
 			if !s.leases.startWork(e) {
-				writeError(w, leaseExpiredErr(e))
+				daemon.WriteError(w, leaseExpiredErr(e))
 				return
 			}
 			var once sync.Once
@@ -1398,7 +1167,7 @@ var leaseUnwindGrace = time.Second
 // available and a new lease on it is DEVICE_IN_USE ("being released").
 func (s *Server) serveLeased(w http.ResponseWriter, r *http.Request, e *leaseEntry, h http.HandlerFunc) {
 	if !s.leases.startWork(e) {
-		writeError(w, leaseExpiredErr(e))
+		daemon.WriteError(w, leaseExpiredErr(e))
 		return
 	}
 	lr, stop := underLease(r, e)
@@ -1413,7 +1182,7 @@ func (s *Server) serveLeased(w http.ResponseWriter, r *http.Request, e *leaseEnt
 		defer func() {
 			if p := recover(); p != nil {
 				logger.Warn("%s %s under lease %s panicked: %v", r.Method, r.URL.Path, e.id, p)
-				writeError(g, Errorf(CodeInternal, "internal error: %v", p))
+				daemon.WriteError(g, daemon.Errorf(daemon.CodeInternal, "internal error: %v", p))
 			}
 			stop()
 			e.doneWork()
@@ -1447,7 +1216,7 @@ func (s *Server) serveLeased(w http.ResponseWriter, r *http.Request, e *leaseEnt
 	if !started {
 		// In full duplex the answer does not wait for that read either.
 		_ = rc.EnableFullDuplex()
-		writeError(w, Errorf(CodeLeaseExpired, "lease %s on device %s ended while the request ran; take a new one", e.id, e.device).
+		daemon.WriteError(w, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on device %s ended while the request ran; take a new one", e.id, e.device).
 			WithDetails("lease", e.id))
 	}
 }
@@ -1594,64 +1363,50 @@ func (g *leaseGate) isClosed() bool {
 // names, never as an id nobody leases. An id that names no device, or
 // several, is checked as given; the handler reports it. The device comes
 // back as listed, so its reservations are checked by its AVD too.
-func (s *Server) stopTarget(id string) DeviceInfo {
-	if info, e := s.registry.resolveManaged(id); e == nil {
+func (s *Server) stopTarget(id string) daemon.DeviceInfo {
+	if info, e := s.Registry().ResolveManaged(id); e == nil {
 		return info
 	}
-	return DeviceInfo{ID: id}
-}
-
-// ---------------------------------------------------------------------------
-// Handlers
-
-func (s *Server) notHub(w http.ResponseWriter) bool {
-	if s.cfg.Hub {
-		return false
-	}
-	writeError(w, Errorf(CodeUsage, "daemon %q is not a hub and has no leases (a hub is started with `maestro-d hub start`)", s.cfg.Name))
-	return true
+	return daemon.DeviceInfo{ID: id}
 }
 
 func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
-	if s.notHub(w) {
-		return
-	}
-	var req LeaseRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	var req daemon.LeaseRequest
+	if e := daemon.DecodeBody(r, &req); e != nil {
+		daemon.WriteError(w, e)
 		return
 	}
 	if (req.Device == "") == (req.Select == nil) {
-		writeError(w, Errorf(CodeUsage, "leases: give device or select, not both or neither"))
+		daemon.WriteError(w, daemon.Errorf(daemon.CodeUsage, "leases: give device or select, not both or neither"))
 		return
 	}
 	if req.TTLSec < 0 {
-		writeError(w, Errorf(CodeUsage, "leases: ttlSec must be positive"))
+		daemon.WriteError(w, daemon.Errorf(daemon.CodeUsage, "leases: ttlSec must be positive"))
 		return
 	}
-	caller := CallerFrom(r.Context())
+	caller := daemon.CallerFrom(r.Context())
 	if req.Attach != nil && caller.Remote {
-		if e := checkRemoteAttach(req.Attach); e != nil {
-			s.logForbidden(r, e)
-			writeError(w, e)
+		if e := daemon.CheckRemoteAttach(req.Attach); e != nil {
+			s.LogForbidden(r, e)
+			daemon.WriteError(w, e)
 			return
 		}
 	}
 	holder := strings.TrimSpace(req.Holder)
 	if holder == "" {
-		holder = describeCaller(caller)
+		holder = daemon.DescribeCaller(caller)
 	}
 	var entry *leaseEntry
-	var e *Error
+	var e *daemon.Error
 	if req.Device != "" {
 		if !s.sharedWith(r, req.Device) {
-			writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", req.Device))
+			daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", req.Device))
 			return
 		}
 		// A shut-down AVD is never driven under its avd: id: booted, it is
 		// emulator-<port>, which such a lease would not cover.
-		if avd, ok := strings.CutPrefix(req.Device, AVDPrefix); ok {
-			writeError(w, Errorf(CodeUsage, "leases: %s is a shut-down AVD, which cannot be leased by id: "+
+		if avd, ok := strings.CutPrefix(req.Device, daemon.AVDPrefix); ok {
+			daemon.WriteError(w, daemon.Errorf(daemon.CodeUsage, "leases: %s is a shut-down AVD, which cannot be leased by id: "+
 				"run `maestro-d lease --name %s --boot` to have the hub boot it for the lease, "+
 				"or `maestro-d device start %s` and lease the emulator it becomes", req.Device, avd, req.Device).
 				WithDetails("hint", "maestro-d lease --name "+avd+" --boot"))
@@ -1659,13 +1414,13 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 		}
 		// A hub leases only a device it lists: an id nothing here can see
 		// would get a lease no driver can use.
-		d, listed := s.registry.Lookup(req.Device)
+		d, listed := s.Registry().Lookup(req.Device)
 		if !listed {
-			writeError(w, Errorf(CodeDeviceNotFound, "device %s is not listed on hub %s", req.Device, s.hubName()))
+			daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s is not listed on hub %s", req.Device, s.HubName()))
 			return
 		}
 		if caller.Remote && !s.sharedInfo(d) {
-			writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", req.Device))
+			daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", req.Device))
 			return
 		}
 		entry, e = s.leaseDevice(d, holder, req.TTLSec, claimNone)
@@ -1673,12 +1428,12 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 		entry, e = s.leaseSelect(r, *req.Select, req.Cloud, holder, req.TTLSec)
 	}
 	if e != nil {
-		writeError(w, e)
+		daemon.WriteError(w, e)
 		return
 	}
 	logger.Info("lease %s: %s leased by %s for %v", entry.id, entry.device, holder, entry.ttl)
-	s.events.Publish(Event{Type: "lease.granted", Device: entry.device, Message: holder})
-	var info *DeviceInfo
+	s.Events().Publish(daemon.Event{Type: "lease.granted", Device: entry.device, Message: holder})
+	var info *daemon.DeviceInfo
 	if req.Attach != nil {
 		// The attach runs under the lease, like any request carrying it:
 		// the window ending answers LEASE_EXPIRED at once and cancels the
@@ -1686,29 +1441,28 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 		// it detaches the device and frees it (attachLeased).
 		ar, stop := underLease(r, entry)
 		cfg := *req.Attach
-		a, ae := s.attachLeased(ar.Context(), entry.device, &cfg)
+		attachedInfo, ae := s.Attach(ar.Context(), entry.device, &cfg)
 		stop()
 		if ae != nil {
 			s.endLease(entry, endAttachFailed)
-			writeError(w, ae)
+			daemon.WriteError(w, ae)
 			return
 		}
-		d := s.deviceInfo(a)
-		info = &d
-	} else if d, ok := s.registry.Lookup(entry.device); ok {
+		info = attachedInfo
+	} else if d, ok := s.Registry().Lookup(entry.device); ok {
 		info = &d
 	}
 	if info != nil {
-		devs := []DeviceInfo{*info}
+		devs := []daemon.DeviceInfo{*info}
 		s.annotate(devs)
-		s.applyDeviceConfig(devs)
+		s.ApplyDeviceConfig(devs)
 		info = &devs[0]
 	}
 	l, _ := s.leases.get(entry.id)
 	if l.ID == "" {
 		l = entry.view()
 	}
-	writeJSON(w, http.StatusOK, LeaseResult{Envelope: Envelope{OK: true}, Lease: l, Device: info})
+	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
 }
 
 // attachLeased is ensureAttached for a request: under a lease (ctx from
@@ -1720,25 +1474,25 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 // teardown keeps the device reserved (not available, DEVICE_IN_USE to a
 // new lease), and then detaches whatever the attach left attached. So a
 // late attach never touches a later holder's session.
-func (s *Server) attachLeased(ctx context.Context, id string, cfg *AttachConfig) (*attached, *Error) {
+func (s *Server) Attach(ctx context.Context, id string, cfg *daemon.AttachConfig) (*daemon.DeviceInfo, *daemon.Error) {
 	e := leaseFrom(ctx)
 	if e == nil {
-		return s.ensureAttached(ctx, id, cfg)
+		return s.AttachDevice(ctx, id, cfg)
 	}
-	ended := func() *Error {
-		return Errorf(CodeLeaseExpired, "lease %s on device %s ended while the device attached; take a new one", e.id, e.device).
+	ended := func() *daemon.Error {
+		return daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on device %s ended while the device attached; take a new one", e.id, e.device).
 			WithDetails("lease", e.id)
 	}
 	if !s.leases.startWork(e) {
 		return nil, ended()
 	}
 	type result struct {
-		a   *attached
-		err *Error
+		a   *daemon.DeviceInfo
+		err *daemon.Error
 	}
 	done := make(chan result, 1)
 	go func() {
-		a, ae := s.ensureAttached(ctx, id, cfg)
+		a, ae := s.AttachDevice(ctx, id, cfg)
 		e.doneWork()
 		done <- result{a, ae}
 	}()
@@ -1777,7 +1531,7 @@ const (
 // emulator's serial) is DEVICE_NOT_FOUND.
 // bind, when given, runs on the granted entry before leaseMu is released,
 // so nothing that ends the lease sees it half set up.
-func (s *Server) leaseDevice(d DeviceInfo, holder string, ttlSec int, claim bootClaim, bind ...func(*leaseEntry)) (*leaseEntry, *Error) {
+func (s *Server) leaseDevice(d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim, bind ...func(*leaseEntry)) (*leaseEntry, *daemon.Error) {
 	device := d.ID
 	for range 3 {
 		s.leaseMu.Lock()
@@ -1799,12 +1553,12 @@ func (s *Server) leaseDevice(d DeviceInfo, holder string, ttlSec int, claim boot
 			// The teardown shut the device down: d is stale, and an
 			// emulator's serial is gone. Grant only on what is listed now.
 			var listed bool
-			if d, listed = s.registry.Lookup(device); !listed {
-				return nil, Errorf(CodeDeviceNotFound, "device %s was shut down as its expired lease ended; it is no longer listed on hub %s", device, s.hubName())
+			if d, listed = s.Registry().Lookup(device); !listed {
+				return nil, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s was shut down as its expired lease ended; it is no longer listed on hub %s", device, s.HubName())
 			}
 		}
 	}
-	return nil, Errorf(CodeDeviceInUse, "device %s: its expired lease is still ending; try again", device)
+	return nil, daemon.Errorf(daemon.CodeDeviceInUse, "device %s: its expired lease is still ending; try again", device)
 }
 
 // leaseDeviceLocked grants the lease with Server.leaseMu held: a window
@@ -1814,7 +1568,7 @@ func (s *Server) leaseDevice(d DeviceInfo, holder string, ttlSec int, claim boot
 // background and the device is DEVICE_IN_USE until its teardown is done.
 // d is the device as the caller listed it: nothing here runs discovery,
 // which would hold leaseMu, and every other lease call, for seconds.
-func (s *Server) leaseDeviceLocked(d DeviceInfo, holder string, ttlSec int, claim bootClaim) (*leaseEntry, *Error) {
+func (s *Server) leaseDeviceLocked(d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim) (*leaseEntry, *daemon.Error) {
 	device := d.ID
 	maxTTL := s.leaseMaxInfo(d)
 	window, we := leaseWindow(device, ttlSec, maxTTL)
@@ -1829,13 +1583,13 @@ func (s *Server) leaseDeviceLocked(d DeviceInfo, holder string, ttlSec int, clai
 	ending := s.leases.ending[device] || k != "" && s.leases.ending[k]
 	s.leases.mu.Unlock()
 	if reserved {
-		return nil, Errorf(CodeDeviceInUse, "device %s is booting for another lease", device)
+		return nil, daemon.Errorf(daemon.CodeDeviceInUse, "device %s is booting for another lease", device)
 	}
 	if ending {
 		return nil, beingReleasedErr(device)
 	}
-	if owner := FindDeviceOwner(device, s.cfg.Name); owner != nil {
-		e := Errorf(CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", device, owner.Name, owner.Info.PID)
+	if owner := daemon.FindDeviceOwner(device, s.cfg.Name); owner != nil {
+		e := daemon.Errorf(daemon.CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", device, owner.Name, owner.Info.PID)
 		return nil, e.WithDetails("owner", owner.Name, "ownerPid", owner.Info.PID)
 	}
 	e, ge := s.leases.grant(device, avdKey(d), holder, time.Time{}, window, maxTTL, claim == claimBooted)
@@ -1854,9 +1608,9 @@ func (s *Server) leaseDeviceLocked(d DeviceInfo, holder string, ttlSec int, clai
 // none the default capped at the device's maximum; over the maximum is
 // USAGE. The seconds are compared before they become a Duration, which a
 // huge ttlSec would overflow into an already-expired window.
-func leaseWindow(device string, ttlSec int, maxTTL time.Duration) (time.Duration, *Error) {
+func leaseWindow(device string, ttlSec int, maxTTL time.Duration) (time.Duration, *daemon.Error) {
 	if ttlSec == 0 {
-		return min(DefaultLeaseTTL, maxTTL), nil
+		return min(daemon.DefaultLeaseTTL, maxTTL), nil
 	}
 	if int64(ttlSec) > int64(maxTTL/time.Second) {
 		return 0, overMax(device, ttlSec, maxTTL)
@@ -1867,7 +1621,7 @@ func leaseWindow(device string, ttlSec int, maxTTL time.Duration) (time.Duration
 // leaseMaxInfo is the longest window a lease on listed device d may have:
 // the first --lease-max DEVICE=DURATION that names it (by id or name),
 // else the hub's --lease-max, else DefaultLeaseMax.
-func (s *Server) leaseMaxInfo(d DeviceInfo) time.Duration {
+func (s *Server) leaseMaxInfo(d daemon.DeviceInfo) time.Duration {
 	max := s.hubLeaseMax()
 	for _, m := range s.cfg.LeaseMaxDevices {
 		if shareMatches(m.Device, d) {
@@ -1887,7 +1641,7 @@ func (s *Server) leaseMaxInfo(d DeviceInfo) time.Duration {
 const cloudLeaseMax = 9000 * time.Second
 
 // leaseMaxNote lists the per-device maximums for the hub's start line.
-func leaseMaxNote(devs []LeaseMax) string {
+func leaseMaxNote(devs []daemon.LeaseMax) string {
 	var b strings.Builder
 	for _, m := range devs {
 		fmt.Fprintf(&b, ", %s %v", m.Device, m.Max)
@@ -1899,29 +1653,29 @@ func (s *Server) hubLeaseMax() time.Duration {
 	if s.cfg.LeaseMax > 0 {
 		return s.cfg.LeaseMax
 	}
-	return DefaultLeaseMax
+	return daemon.DefaultLeaseMax
 }
 
 // leaseSelect leases the first free device that matches sel: a ready one,
 // neither leased nor attached; with sel.Boot, else a shut-down simulator or
 // AVD, which the hub boots for the lease.
-func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudprov.CloudSpec, holder string, ttlSec int) (*leaseEntry, *Error) {
-	notFound := Errorf(CodeDeviceNotFound, "no device matches the selector %s", sel.String()).WithDetails("select", sel)
-	if sel.Hub != "" && !strings.EqualFold(sel.Hub, s.hubName()) {
+func (s *Server) leaseSelect(r *http.Request, sel daemon.LeaseSelector, cloud *cloudprov.CloudSpec, holder string, ttlSec int) (*leaseEntry, *daemon.Error) {
+	notFound := daemon.Errorf(daemon.CodeDeviceNotFound, "no device matches the selector %s", sel.String()).WithDetails("select", sel)
+	if sel.Hub != "" && !strings.EqualFold(sel.Hub, s.HubName()) {
 		return nil, notFound
 	}
-	if strings.EqualFold(sel.Location, LocationCloud) {
+	if strings.EqualFold(sel.Location, daemon.LocationCloud) {
 		return s.leaseCloud(r, sel, cloud, holder, ttlSec)
 	}
 	if sel.Location != "" {
-		return nil, Errorf(CodeUsage, "lease: select.location %q: only cloud launches a device; leave it out to lease one of the hub's", sel.Location)
+		return nil, daemon.Errorf(daemon.CodeUsage, "lease: select.location %q: only cloud launches a device; leave it out to lease one of the hub's", sel.Location)
 	}
 	// What only a cloud launch reads is refused elsewhere, never ignored.
 	if sel.Provider != "" {
-		return nil, Errorf(CodeUsage, "lease: select.provider applies only with select.location cloud").WithDetails("field", "provider")
+		return nil, daemon.Errorf(daemon.CodeUsage, "lease: select.provider applies only with select.location cloud").WithDetails("field", "provider")
 	}
 	if cloud != nil {
-		return nil, Errorf(CodeUsage, "lease: cloud (idle release, Appium version, …) applies only with select.location cloud").WithDetails("field", "cloud")
+		return nil, daemon.Errorf(daemon.CodeUsage, "lease: cloud (idle release, Appium version, …) applies only with select.location cloud").WithDetails("field", "cloud")
 	}
 	matches, me := s.selectorMatches(r, sel)
 	if me != nil {
@@ -1932,7 +1686,7 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 	}
 	// A candidate whose maximum window is shorter than ttlSec is skipped; when
 	// that leaves none, the answer is USAGE naming the maximum.
-	var tooLong, reservedIn *Error
+	var tooLong, reservedIn *daemon.Error
 	s.leaseMu.Lock()
 	for _, d := range matches {
 		if old := s.leases.expiredOn(d.ID); old != nil {
@@ -1951,18 +1705,18 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 			s.leaseMu.Unlock()
 			return e, nil
 		}
-		if le.Code == CodeUsage {
+		if le.Code == daemon.CodeUsage {
 			tooLong = le
 		}
 		// Free now but reserved inside the window: kept, the earliest
 		// reservation first, so the answer can say what window would fit.
-		if next, ok := le.Details["nextStartsAt"].(string); ok && le.Code == CodeDeviceInUse {
-			if prev, _ := reservedIn.detail("nextStartsAt"); reservedIn == nil || next < prev {
+		if next, ok := le.Details["nextStartsAt"].(string); ok && le.Code == daemon.CodeDeviceInUse {
+			if prev, _ := reservedIn.Detail("nextStartsAt"); reservedIn == nil || next < prev {
 				reservedIn = le
 			}
 		}
 	}
-	var boot *DeviceInfo
+	var boot *daemon.DeviceInfo
 	if sel.Boot {
 		s.leases.mu.Lock()
 		for i := range matches {
@@ -1984,7 +1738,7 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 				// would refuse it, so it is not booted, and the answer can
 				// say what window would fit.
 				next := c.starts.UTC().Format(time.RFC3339)
-				if prev, _ := reservedIn.detail("nextStartsAt"); c.pending() && (reservedIn == nil || next < prev) {
+				if prev, _ := reservedIn.Detail("nextStartsAt"); c.pending() && (reservedIn == nil || next < prev) {
 					reservedIn = overlapErr(d.ID, c)
 				}
 				continue
@@ -2005,12 +1759,12 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 			ids = append(ids, d.ID)
 		}
 		if reservedIn != nil {
-			next, _ := reservedIn.detail("nextStartsAt")
-			return nil, Errorf(CodeDeviceInUse, "every device matching %s is leased, attached, not ready, or reserved within the window; "+
+			next, _ := reservedIn.Detail("nextStartsAt")
+			return nil, daemon.Errorf(daemon.CodeDeviceInUse, "every device matching %s is leased, attached, not ready, or reserved within the window; "+
 				"ask for a ttlSec that ends by %s", sel.String(), next).
 				WithDetails("candidates", ids, "nextStartsAt", next)
 		}
-		return nil, Errorf(CodeDeviceInUse, "every device matching %s is leased, attached or not ready", sel.String()).
+		return nil, daemon.Errorf(daemon.CodeDeviceInUse, "every device matching %s is leased, attached or not ready", sel.String()).
 			WithDetails("candidates", ids)
 	}
 	// The reservation stands until the booted device's lease is granted
@@ -2027,24 +1781,24 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 	// unrecorded, so it would end up running with no lease and as nobody's
 	// to shut down. A client gone by the end gets no lease, and the device
 	// is shut down again.
-	s.idle.Hold()
-	info, err := s.registry.Boot(context.WithoutCancel(r.Context()), BootRequest{Platform: boot.Platform, Name: boot.ID})
-	s.idle.Release()
+	releaseIdle := s.HoldIdle()
+	info, err := s.Registry().Boot(context.WithoutCancel(r.Context()), daemon.BootRequest{Platform: boot.Platform, Name: boot.ID})
+	releaseIdle()
 	if err != nil {
-		return nil, WrapErr(CodeDeviceError, err)
+		return nil, daemon.WrapErr(daemon.CodeDeviceError, err)
 	}
 	if r.Context().Err() != nil {
 		logger.Info("lease: the client left while %s booted for its lease", info.ID)
 		s.disownBoot(info)
-		return nil, Errorf(CodeInterrupted, "lease: cancelled while booting %s", boot.ID)
+		return nil, daemon.Errorf(daemon.CodeInterrupted, "lease: cancelled while booting %s", boot.ID)
 	}
 	// Boot returns a device someone else started between the selection and
 	// this call as it is: the lease shuts down only a device this daemon
 	// booted.
 	claim := claimReserved
-	if info.BootedBy == BootedByDaemon {
+	if info.BootedBy == daemon.BootedByDaemon {
 		claim = claimBooted
-		s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: boot.Name})
+		s.Events().Publish(daemon.Event{Type: "device.booted", Device: info.ID, Message: boot.Name})
 	} else {
 		logger.Info("lease: %s was started meanwhile by someone else; its lease will not shut it down", info.ID)
 	}
@@ -2060,18 +1814,18 @@ func (s *Server) leaseSelect(r *http.Request, sel LeaseSelector, cloud *cloudpro
 // matches, in the order selectors try them, refusing an OS bound that is
 // not a version. Cloud devices are left out: one belongs to the lease that
 // launched it. Leases and reservations walk the same list.
-func (s *Server) selectorMatches(r *http.Request, sel LeaseSelector) ([]DeviceInfo, *Error) {
+func (s *Server) selectorMatches(r *http.Request, sel daemon.LeaseSelector) ([]daemon.DeviceInfo, *daemon.Error) {
 	for f, v := range map[string]string{"osVersionMin": sel.OSVersionMin, "osVersionMax": sel.OSVersionMax} {
 		if _, ok := cloudprov.ParseVersion(v); v != "" && !ok {
-			return nil, Errorf(CodeUsage, "lease: select.%s %q is not a version", f, v).WithDetails("field", f)
+			return nil, daemon.Errorf(daemon.CodeUsage, "lease: select.%s %q is not a version", f, v).WithDetails("field", f)
 		}
 	}
-	var matches []DeviceInfo
-	for _, d := range s.visible(r, s.registry.List(strings.ToLower(sel.Platform))) {
+	var matches []daemon.DeviceInfo
+	for _, d := range s.Visible(r, s.Registry().List(strings.ToLower(sel.Platform))) {
 		if d.Provider != "" {
 			continue
 		}
-		if sel.matches(d) {
+		if sel.Matches(d) {
 			matches = append(matches, d)
 		}
 	}
@@ -2083,80 +1837,34 @@ func (s *Server) selectorMatches(r *http.Request, sel LeaseSelector) ([]DeviceIn
 // during the boot): the lease that holds
 // it shuts it down when it ends, and with no lease on it, it is shut down
 // now, unless another daemon has it attached.
-func (s *Server) disownBoot(info DeviceInfo) {
-	if info.BootedBy != BootedByDaemon {
+func (s *Server) disownBoot(info daemon.DeviceInfo) {
+	if info.BootedBy != daemon.BootedByDaemon {
 		return
 	}
 	if s.leases.markBooted(info.ID) {
 		logger.Info("lease: %s, booted for a selector lease, went to another lease; that lease shuts it down", info.ID)
 		return
 	}
-	if FindDeviceOwner(info.ID, s.cfg.Name) != nil {
+	if daemon.FindDeviceOwner(info.ID, s.cfg.Name) != nil {
 		return
 	}
-	if err := s.registry.Stop(info.ID, false); err != nil {
+	if err := s.Registry().Stop(info.ID, false); err != nil {
 		logger.Warn("lease: shut down %s, booted for a lease that failed: %v", info.ID, err)
 	}
 }
 
 // bootable reports whether a listed device is a shut-down simulator or AVD.
-func bootable(d DeviceInfo) bool {
+func bootable(d daemon.DeviceInfo) bool {
 	if d.Ready {
 		return false
 	}
-	return strings.HasPrefix(d.ID, AVDPrefix) || (d.Platform == "ios" && d.Kind == "simulator" && strings.EqualFold(d.State, "Shutdown"))
-}
-
-func (sel LeaseSelector) matches(d DeviceInfo) bool {
-	if sel.Platform != "" && !strings.EqualFold(sel.Platform, d.Platform) {
-		return false
-	}
-	if sel.Kind != "" && !strings.EqualFold(sel.Kind, d.Kind) {
-		return false
-	}
-	// TVs are taken only by a selector that names their kind or name, and
-	// the computer only by one that names its kind, name or platform, so a
-	// selector for phones never lands on either.
-	if sel.Kind == "" && sel.Name == "" && strings.EqualFold(d.Kind, "tv") {
-		return false
-	}
-	if sel.Kind == "" && sel.Name == "" && sel.Platform == "" && isComputer(d) {
-		return false
-	}
-	if sel.Name != "" && sel.Name != d.ID && !strings.EqualFold(sel.Name, d.Name) {
-		return false
-	}
-	if !cloudprov.OSVersionMatches(d.OSVersion, sel.OSVersion) {
-		return false
-	}
-	if (sel.OSVersionMin != "" || sel.OSVersionMax != "") && !VersionInRange(d.OSVersion, sel.OSVersionMin, sel.OSVersionMax) {
-		return false
-	}
-	return true
-}
-
-// String renders the selector for messages: {platform=ios kind=simulator}.
-func (sel LeaseSelector) String() string {
-	var parts []string
-	for _, kv := range [][2]string{{"platform", sel.Platform}, {"kind", sel.Kind}, {"name", sel.Name}, {"osVersion", sel.OSVersion},
-		{"osVersionMin", sel.OSVersionMin}, {"osVersionMax", sel.OSVersionMax}, {"hub", sel.Hub}} {
-		if kv[1] != "" {
-			parts = append(parts, kv[0]+"="+kv[1])
-		}
-	}
-	if sel.Boot {
-		parts = append(parts, "boot=true")
-	}
-	return "{" + strings.Join(parts, " ") + "}"
+	return strings.HasPrefix(d.ID, daemon.AVDPrefix) || (d.Platform == "ios" && d.Kind == "simulator" && strings.EqualFold(d.State, "Shutdown"))
 }
 
 func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
-	if s.notHub(w) {
-		return
-	}
 	s.startDue()
 	leases := s.leases.list()
-	if CallerFrom(r.Context()).Remote {
+	if daemon.CallerFrom(r.Context()).Remote {
 		shared := leases[:0]
 		for _, l := range leases {
 			if s.shared(l.Device) || s.unlistedShared(l.ID) {
@@ -2165,7 +1873,7 @@ func (s *Server) handleListLeases(w http.ResponseWriter, r *http.Request) {
 		}
 		leases = shared
 	}
-	writeJSON(w, http.StatusOK, LeasesResult{Envelope: Envelope{OK: true}, Leases: leases})
+	daemon.WriteJSON(w, http.StatusOK, daemon.LeasesResult{Envelope: daemon.Envelope{OK: true}, Leases: leases})
 }
 
 // visibleLease returns lease id's entry when the caller may see its
@@ -2198,13 +1906,10 @@ func (s *Server) unlistedShared(id string) bool {
 }
 
 func (s *Server) leaseGone(w http.ResponseWriter, id string) {
-	writeError(w, Errorf(CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id))
+	daemon.WriteError(w, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id))
 }
 
 func (s *Server) handleGetLease(w http.ResponseWriter, r *http.Request) {
-	if s.notHub(w) {
-		return
-	}
 	s.startDue()
 	id := r.PathValue("lid")
 	l, ok := s.leases.get(id)
@@ -2212,22 +1917,19 @@ func (s *Server) handleGetLease(w http.ResponseWriter, r *http.Request) {
 		s.leaseGone(w, id)
 		return
 	}
-	writeJSON(w, http.StatusOK, LeaseResult{Envelope: Envelope{OK: true}, Lease: l})
+	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l})
 }
 
 func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
-	if s.notHub(w) {
-		return
-	}
 	s.startDue()
 	id := r.PathValue("lid")
-	var req RenewRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	var req daemon.RenewRequest
+	if e := daemon.DecodeBody(r, &req); e != nil {
+		daemon.WriteError(w, e)
 		return
 	}
 	if req.TTLSec < 0 {
-		writeError(w, Errorf(CodeUsage, "leases: ttlSec must be positive"))
+		daemon.WriteError(w, daemon.Errorf(daemon.CodeUsage, "leases: ttlSec must be positive"))
 		return
 	}
 	le := s.visibleLease(r, id)
@@ -2236,22 +1938,19 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A renewal is activity on the lease's cloud device.
-	if done, ce := s.cloudBusy(le.device); ce == nil {
+	if done, ce := s.CloudBusy(le.device); ce == nil {
 		defer done()
 	}
 	l, e := s.leases.renew(id, req.TTLSec)
 	if e != nil {
-		writeError(w, e)
+		daemon.WriteError(w, e)
 		return
 	}
 	logger.Info("lease %s: %s renewed until %s", l.ID, l.Device, l.ExpiresAt)
-	writeJSON(w, http.StatusOK, LeaseResult{Envelope: Envelope{OK: true}, Lease: l})
+	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l})
 }
 
 func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
-	if s.notHub(w) {
-		return
-	}
 	s.startDue()
 	id := r.PathValue("lid")
 	e := s.visibleLease(r, id)
@@ -2261,8 +1960,8 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 	}
 	l := e.view()
 	s.endLease(e, endReleased)
-	res := LeaseResult{Envelope: Envelope{OK: true}, Lease: l}
-	if e.cloud != nil {
+	res := daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l}
+	if e.releaseCloud != nil {
 		// The cloud device's release runs in the lease's teardown, at once
 		// or once work under the lease unwinds: wait for its minutes a
 		// while. A release still pending, or failed, answers without them;
@@ -2273,7 +1972,7 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 		case <-time.After(cloudLeaseReleaseWait):
 		}
 	}
-	writeJSON(w, http.StatusOK, res)
+	daemon.WriteJSON(w, http.StatusOK, res)
 }
 
 // cloudLeaseReleaseWait bounds how long a lease release waits for its cloud
@@ -2281,9 +1980,6 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 // tears its device down inline first, under the provider release's own
 // timeout (cloudTiming.releaseTimeout), so the answer can take longer.
 var cloudLeaseReleaseWait = 30 * time.Second
-
-// ---------------------------------------------------------------------------
-// Ending leases
 
 // endLease ends a lease: the device is detached, and shut down when the
 // hub booted it for the lease.
@@ -2332,14 +2028,13 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 			}
 			s.leases.mu.Unlock()
 		}()
-		logger.Info("lease %s: %s %s (holder %s)", e.id, e.device, reason, HolderName(e.holder))
-		s.detachForStop(e.device)
-		if e.cloud != nil {
+		logger.Info("lease %s: %s %s (holder %s)", e.id, e.device, reason, daemon.HolderName(e.holder))
+		s.DetachForStop(e.device)
+		if e.releaseCloud != nil {
 			// The lease launched the device: it goes with the lease.
-			e.cloudMinutes, _ = s.releaseRemote(e.cloud, "lease-end")
-			s.forgetRemote(e.cloud)
+			e.cloudMinutes = e.releaseCloud()
 			close(e.cloudDone)
-			s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
+			s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
 			return
 		}
 		switch {
@@ -2354,13 +2049,13 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 		case !s.stillLeasedAVD(e):
 			logger.Warn("lease %s: %s no longer runs %s; not shutting it down", e.id, e.device, e.avd)
 		default:
-			if err := s.registry.Stop(e.device, true); err != nil {
+			if err := s.Registry().Stop(e.device, true); err != nil {
 				logger.Warn("lease %s: shut down %s: %v", e.id, e.device, err)
 			} else {
-				s.events.Publish(Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
+				s.Events().Publish(daemon.Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
 			}
 		}
-		s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
+		s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
 	}
 	return func() {
 		if before != nil {
@@ -2413,12 +2108,12 @@ func (s *Server) handBootOn(e *leaseEntry) bool {
 // booted, the duty moves to the next lease on the device; with none, and
 // no lease started on it, the device is shut down then.
 func (s *Server) endReservationLocked(e *leaseEntry, reason string) (teardown func()) {
-	logger.Info("lease %s: reservation on %s %s (holder %s)", e.id, e.device, reason, HolderName(e.holder))
+	logger.Info("lease %s: reservation on %s %s (holder %s)", e.id, e.device, reason, daemon.HolderName(e.holder))
 	// The reservations file is written in the teardown, which the caller
 	// runs after it unlocks Server.leaseMu.
 	publish := func() {
 		s.saveReservations()
-		s.events.Publish(Event{Type: leaseEndEvent(reason), Device: e.device, Message: HolderName(e.holder)})
+		s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
 	}
 	if !e.booted || reason == endDeleted {
 		return publish
@@ -2451,10 +2146,10 @@ func (s *Server) shutDownBooted(e *leaseEntry, reason string) (teardown func()) 
 			s.leases.doneEndingLocked(e.device)
 			s.leases.mu.Unlock()
 		}()
-		if err := s.registry.Stop(e.device, true); err != nil {
+		if err := s.Registry().Stop(e.device, true); err != nil {
 			logger.Warn("lease %s: shut down %s: %v", e.id, e.device, err)
 		} else {
-			s.events.Publish(Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
+			s.Events().Publish(daemon.Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
 		}
 	}
 }
@@ -2467,7 +2162,7 @@ func (s *Server) stillLeasedAVD(e *leaseEntry) bool {
 	if e.avd == "" {
 		return true
 	}
-	d, ok := s.registry.Lookup(e.device)
+	d, ok := s.Registry().Lookup(e.device)
 	return !ok || avdKey(d) == e.avd
 }
 
@@ -2544,11 +2239,11 @@ func (s *Server) sweepLeases() {
 	}
 	for _, e := range missed {
 		logger.Info("lease %s: the window of the reservation on %s passed before it could start", e.id, e.device)
-		s.events.Publish(Event{Type: "lease.expired", Device: e.device, Message: HolderName(e.holder)})
+		s.Events().Publish(daemon.Event{Type: "lease.expired", Device: e.device, Message: daemon.HolderName(e.holder)})
 	}
 	granted := func(e *leaseEntry) {
-		logger.Info("lease %s: %s reserved by %s starts until %s", e.id, e.device, HolderName(e.holder), e.expires.UTC().Format(time.RFC3339))
-		s.events.Publish(Event{Type: "lease.granted", Device: e.device, Message: HolderName(e.holder)})
+		logger.Info("lease %s: %s reserved by %s starts until %s", e.id, e.device, daemon.HolderName(e.holder), e.expires.UTC().Format(time.RFC3339))
+		s.Events().Publish(daemon.Event{Type: "lease.granted", Device: e.device, Message: daemon.HolderName(e.holder)})
 	}
 	for _, td := range teardowns {
 		go td()
@@ -2623,7 +2318,7 @@ func (s *Server) runLeaseSweeper(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.done:
+		case <-s.Done():
 			return
 		case <-t.C:
 			s.sweepLeases()
@@ -2631,46 +2326,11 @@ func (s *Server) runLeaseSweeper(ctx context.Context) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Hub name
-
-// hubName is the hub's name: Config.HubName, else the short host name.
-func (s *Server) hubName() string {
-	if s.cfg.HubName != "" {
-		return s.cfg.HubName
-	}
-	return DefaultHubName()
-}
-
-// DefaultHubName is the short host name, lowercased, as a hub name:
-// [a-z0-9-]{1,32}.
-func DefaultHubName() string {
-	h, _ := os.Hostname()
-	h, _, _ = strings.Cut(strings.ToLower(h), ".")
-	var b strings.Builder
-	for _, c := range h {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
-			b.WriteRune(c)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	name := strings.Trim(b.String(), "-")
-	if len(name) > 32 {
-		name = name[:32]
-	}
-	if name == "" {
-		return "hub"
-	}
-	return name
-}
-
 // checkShareBoot refuses a remote caller's boot or create of a device the
 // hub does not share: booting an unshared one is DEVICE_NOT_FOUND, and a
 // device may be created only under a name the hub shares.
-func (s *Server) checkShareBoot(r *http.Request, req BootRequest) *Error {
-	if s.sharesAll() || !CallerFrom(r.Context()).Remote {
+func (s *Server) CheckBoot(r *http.Request, req daemon.BootRequest) *daemon.Error {
+	if !daemon.CallerFrom(r.Context()).Remote {
 		return nil
 	}
 	if req.Create != nil {
@@ -2678,12 +2338,12 @@ func (s *Server) checkShareBoot(r *http.Request, req BootRequest) *Error {
 		if name == "" {
 			name = req.Name
 		}
-		if !s.sharedInfo(DeviceInfo{ID: name, Name: name, Platform: strings.ToLower(req.Platform)}) {
+		if !s.sharedInfo(daemon.DeviceInfo{ID: name, Name: name, Platform: strings.ToLower(req.Platform)}) {
 			shares := s.shareList()
 			if shares == "" {
 				shares = "nothing"
 			}
-			return forbidden("this hub shares only %s; a remote caller cannot create %q", shares, name).
+			return daemon.Forbidden("this hub shares only %s; a remote caller cannot create %q", shares, name).
 				WithDetails("field", "name")
 		}
 		return nil
@@ -2692,10 +2352,10 @@ func (s *Server) checkShareBoot(r *http.Request, req BootRequest) *Error {
 	// name is android; a simulator's, or one naming both, is not.
 	platform := strings.ToLower(req.Platform)
 	if platform == "" && len(s.cfg.ShareConfig) > 0 {
-		platform, _ = s.registry.inferBootPlatform(req.Name)
+		platform, _ = s.Registry().InferBootPlatform(req.Name)
 	}
-	if s.sharedInfo(DeviceInfo{ID: req.Name, Name: strings.TrimPrefix(req.Name, AVDPrefix), Platform: platform}) || s.shared(req.Name) {
+	if s.sharedInfo(daemon.DeviceInfo{ID: req.Name, Name: strings.TrimPrefix(req.Name, daemon.AVDPrefix), Platform: platform}) || s.shared(req.Name) {
 		return nil
 	}
-	return Errorf(CodeDeviceNotFound, "device %s not found", req.Name)
+	return daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", req.Name)
 }

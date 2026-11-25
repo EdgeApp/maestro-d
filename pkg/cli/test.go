@@ -31,6 +31,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/report"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/validator"
+	"github.com/devicelab-dev/maestro-runner/pkg/version"
 	"github.com/urfave/cli/v2"
 )
 
@@ -607,7 +608,7 @@ func printBanner() {
 	githubLink := hyperlink("https://github.com/devicelab-dev/maestro-runner", "Star us on GitHub")
 
 	fmt.Println()
-	fmt.Printf("  maestro-runner %s - by %s\n", Version, deviceLabLink)
+	fmt.Printf("  maestro-runner %s - by %s\n", version.Version, deviceLabLink)
 	fmt.Println("  Fast, lightweight Maestro test runner")
 	fmt.Printf("  %s\n", githubLink)
 	fmt.Println()
@@ -1495,7 +1496,7 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
-		RunnerVersion:      Version,
+		RunnerVersion:      version.Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
@@ -1547,7 +1548,7 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
-		RunnerVersion:      Version,
+		RunnerVersion:      version.Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
@@ -1876,7 +1877,7 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
-		RunnerVersion:      Version,
+		RunnerVersion:      version.Version,
 		DriverName:         "appium",
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
@@ -2767,7 +2768,7 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(firstDriver),
-		RunnerVersion:      Version,
+		RunnerVersion:      version.Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,

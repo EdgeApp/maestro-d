@@ -85,7 +85,7 @@ func streamOptsFor(t *testing.T, args ...string) *daemonOpts {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.positional) != 0 || len(p.step) != 0 {
+	if len(p.Positional) != 0 || len(p.Step) != 0 {
 		t.Fatalf("leftovers: %+v", p)
 	}
 	return o

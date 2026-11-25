@@ -3,26 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"io"
-	"math/big"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
-	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 )
 
 // oneShotParse parses a one-shot command line the way runOneShot does.
-func oneShotParse(t *testing.T, name string, args ...string) (*daemonOpts, *parsedArgs) {
+func oneShotParse(t *testing.T, name string, args ...string) (*daemonOpts, *common.ParsedArgs) {
 	t.Helper()
 	keys := map[string]string{}
 	for _, f := range daemon.CommandSpecs[name].Fields {
@@ -61,11 +52,11 @@ func TestTargetHub_OptionalValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		o, p := oneShotParse(t, "tapOn", tc.args...)
-		base, useTLS, err := parseTarget(o.Target)
+		base, useTLS, err := common.ParseTarget(o.Target)
 		if err != nil || base != tc.base || useTLS != tc.tls {
 			t.Errorf("%v: %s tls=%v err=%v", tc.args, base, useTLS, err)
 		}
-		if got := strings.Join(p.positional, " "); got != tc.textArg {
+		if got := strings.Join(p.Positional, " "); got != tc.textArg {
 			t.Errorf("%v: positional %q, want %q", tc.args, got, tc.textArg)
 		}
 	}
@@ -75,8 +66,8 @@ func TestTargetHub_OptionalValue(t *testing.T) {
 	if err != nil || v != "Login" || o.Device != "d" {
 		t.Fatalf("value %v err %v device %q", v, err, o.Device)
 	}
-	if !strings.Contains(flagsUsage(targetFlags), "--target-hub[=HOST[:PORT]]") {
-		t.Fatalf("usage:\n%s", flagsUsage(targetFlags))
+	if !strings.Contains(common.FlagUsage(targetFlags), "--target-hub[=HOST[:PORT]]") {
+		t.Fatalf("usage:\n%s", common.FlagUsage(targetFlags))
 	}
 }
 
@@ -97,61 +88,6 @@ func TestTargetHub_EnvironmentPrecedence(t *testing.T) {
 	if o.Target != "" {
 		t.Fatal("no flag, no variable: the local daemon")
 	}
-}
-
-func TestParseTarget_Errors(t *testing.T) {
-	for _, v := range []string{"ftp://h", "", "h/path", "h:0", "h:99999", "h:x", "user@h"} {
-		if _, _, err := parseTarget(v); err == nil {
-			t.Errorf("%q: expected an error", v)
-		}
-	}
-	// --target-hub and --peer read an address one way.
-	for _, v := range []string{"h", "h:9", "https://h", "HTTP://h:1/", "::1", "[::1]:9", "user@h", "h h", "h:0", "ftp://h", ":9"} {
-		_, _, terr := parseTarget(v)
-		_, perr := hub.ParseAddr(v, hub.DefaultPort)
-		if (terr == nil) != (perr == nil) {
-			t.Errorf("%q: --target-hub %v, --peer %v", v, terr, perr)
-		}
-	}
-}
-
-func TestTargetHub_TLSTrustRoot(t *testing.T) {
-	if c, err := targetTLSConfig(""); c != nil || err != nil {
-		t.Fatal("no --ca: system roots")
-	}
-	if _, err := targetTLSConfig("/no/such/ca.pem"); err == nil {
-		t.Fatal("missing file")
-	}
-	junk := filepath.Join(t.TempDir(), "junk.pem")
-	_ = os.WriteFile(junk, []byte("not a certificate"), 0o644)
-	if _, err := targetTLSConfig(junk); err == nil {
-		t.Fatal("no PEM in the file")
-	}
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "x"}, NotBefore: time.Now(), NotAfter: time.Now().Add(time.Hour)}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	ca := filepath.Join(t.TempDir(), "ca.pem")
-	_ = os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
-	c, err := targetTLSConfig(ca)
-	if err != nil || c == nil || c.RootCAs == nil {
-		t.Fatalf("with --ca: %v", err)
-	}
-	o := &daemonOpts{Target: "https://h:9", CAFile: ca, Verbose: true}
-	client, err := connectTarget(o)
-	if err != nil || client.BaseURL() != "https://h:9" {
-		t.Fatalf("connectTarget: %v", err)
-	}
-	daemon.RetryLog = nil
-	if _, err := connectTarget(&daemonOpts{Target: "https://h", CAFile: "/no/such"}); err == nil {
-		t.Fatal("a missing --ca fails before any request")
-	}
-	if _, err := connectTarget(&daemonOpts{Target: "ftp://h"}); err == nil {
-		t.Fatal("bad target")
-	}
-	if _, err := connectTarget(&daemonOpts{Target: "h", CAFile: ca, Verbose: true}); err != nil {
-		t.Fatal("--ca with http:// is only noted")
-	}
-	daemon.RetryLog = nil
 }
 
 func TestTargetHub_NeverSpawns(t *testing.T) {
@@ -255,7 +191,7 @@ func captureStderr(t *testing.T, fn func()) string {
 func TestFlagSet_ListsAFlagOnce(t *testing.T) {
 	n := 0
 	for _, f := range oneShotFlags {
-		if f.name == "token" {
+		if f.Name == "token" {
 			n++
 		}
 	}
@@ -266,10 +202,10 @@ func TestFlagSet_ListsAFlagOnce(t *testing.T) {
 		detachFlags, runFlags, getFlags, setFlags, evalFlags, oneShotFlags, deviceCatalogFlags, deviceCreateFlags, deviceDeleteFlags} {
 		found := false
 		for _, f := range flags {
-			found = found || f.name == "target-hub"
+			found = found || f.Name == "target-hub"
 		}
 		if !found {
-			t.Errorf("a client command lacks --target-hub: %v", flags[0].name)
+			t.Errorf("a client command lacks --target-hub: %v", flags[0].Name)
 		}
 	}
 }

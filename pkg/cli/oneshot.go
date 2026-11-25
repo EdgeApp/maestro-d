@@ -22,12 +22,13 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
 // oneShotFlags are the table flags every one-shot accepts.
-var oneShotFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), one(waitFlag), attachFlags, targetFlags)
+var oneShotFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), common.One(waitFlag), attachFlags, targetFlags)
 
 // oneShotCommands builds one cli.Command per known step type.
 func oneShotCommands() []*cli.Command {
@@ -43,12 +44,12 @@ func oneShotCommands() []*cli.Command {
 			Name:            name,
 			Usage:           spec.Doc,
 			ArgsUsage:       oneShotArgsUsage(spec),
-			Description:     commandHelp(spec) + "\nCommon flags:\n" + flagsUsage(oneShotFlags),
+			Description:     commandHelp(spec) + "\nCommon flags:\n" + common.FlagUsage(oneShotFlags),
 			Category:        "YAML commands",
 			SkipFlagParsing: true,
 			HideHelpCommand: true,
 			Action: func(c *cli.Context) error {
-				return runOneShot(spec, append(inheritedArgs(c, oneShotFlags), c.Args().Slice()...))
+				return runOneShot(spec, append(common.InheritedArgs(c, oneShotFlags), c.Args().Slice()...))
 			},
 		})
 	}
@@ -99,7 +100,7 @@ func commandHelp(spec daemon.CommandSpec) string {
 	}
 	var fields []daemon.FieldSpec
 	for _, f := range spec.Fields {
-		if _, isBase := baseStepFlags[f.Key]; !isBase && f.Key != "platform" {
+		if !common.IsBaseStepFlag(f.Key) && f.Key != "platform" {
 			fields = append(fields, f)
 		}
 	}
@@ -125,7 +126,7 @@ func commandHelp(spec daemon.CommandSpec) string {
 func runOneShot(spec daemon.CommandSpec, args []string) error {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
-			fmt.Printf("USAGE:\n   maestro-d %s %s\n\n%s\nCommon flags:\n%s", spec.Name, oneShotArgsUsage(spec), commandHelp(spec), flagsUsage(oneShotFlags))
+			fmt.Printf("USAGE:\n   maestro-d %s %s\n\n%s\nCommon flags:\n%s", spec.Name, oneShotArgsUsage(spec), commandHelp(spec), common.FlagUsage(oneShotFlags))
 			return nil
 		}
 	}
@@ -135,14 +136,14 @@ func runOneShot(spec daemon.CommandSpec, args []string) error {
 	}
 	o, p, err := parseDaemonArgs(args, oneShotFlags, stepKeys)
 	if err != nil {
-		return finishErr(err, false)
+		return common.FinishErr(err, false)
 	}
-	ctx, cancel := signalContext()
+	ctx, cancel := common.SignalContext()
 	defer cancel()
-	return finishErr(execOneShot(ctx, spec, o, p), o.JSON)
+	return common.FinishErr(execOneShot(ctx, spec, o, p), o.JSON)
 }
 
-func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p *parsedArgs) error {
+func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p *common.ParsedArgs) error {
 	value, err := buildStepValue(spec, p)
 	if err != nil {
 		return err
@@ -178,28 +179,28 @@ func execOneShot(ctx context.Context, spec daemon.CommandSpec, o *daemonOpts, p 
 
 // buildStepValue turns the parsed positional/flag arguments into the YAML
 // value of the step.
-func buildStepValue(spec daemon.CommandSpec, p *parsedArgs) (any, error) {
+func buildStepValue(spec daemon.CommandSpec, p *common.ParsedArgs) (any, error) {
 	usage := func(format string, a ...any) error { return daemon.Errorf(daemon.CodeUsage, format, a...) }
 
 	// --yaml FILE|- supplies the whole value (compound steps, or anything
 	// too awkward for flags).
 	var value any
 	haveValue := false
-	var fields []stepFlag
-	for _, f := range p.step {
-		if f.key != "yaml" {
+	var fields []common.StepFlag
+	for _, f := range p.Step {
+		if f.Key != "yaml" {
 			fields = append(fields, f)
 			continue
 		}
-		if f.bare {
+		if f.Bare {
 			return nil, usage("--yaml needs a file (or - for stdin)")
 		}
 		var data []byte
 		var err error
-		if f.value == "-" {
+		if f.Value == "-" {
 			data, err = io.ReadAll(os.Stdin)
 		} else {
-			data, err = os.ReadFile(f.value)
+			data, err = os.ReadFile(f.Value)
 		}
 		if err != nil {
 			return nil, usage("--yaml: %v", err)
@@ -211,19 +212,19 @@ func buildStepValue(spec daemon.CommandSpec, p *parsedArgs) (any, error) {
 	}
 
 	if spec.ValueLess {
-		if len(p.positional) > 0 || len(fields) > 0 || haveValue {
+		if len(p.Positional) > 0 || len(fields) > 0 || haveValue {
 			return nil, usage("%s takes no value", spec.Name)
 		}
-		if len(p.base) > 0 || p.platformGate != "" {
-			progress("warning: %s ignores --optional/--label/--timeout/--platform (it takes no value)", spec.Name)
+		if len(p.Base) > 0 || p.PlatformGate != "" {
+			common.Progress("warning: %s ignores --optional/--label/--timeout/--platform (it takes no value)", spec.Name)
 		}
 		return nil, nil
 	}
 
 	var scalar any
 	haveScalar := false
-	if len(p.positional) > 0 {
-		s, err := typedScalar(strings.Join(p.positional, " "))
+	if len(p.Positional) > 0 {
+		s, err := typedScalar(strings.Join(p.Positional, " "))
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +244,7 @@ func buildStepValue(spec daemon.CommandSpec, p *parsedArgs) (any, error) {
 		}
 	}
 
-	needMap := len(fields) > 0 || len(p.base) > 0 || p.platformGate != ""
+	needMap := len(fields) > 0 || len(p.Base) > 0 || p.PlatformGate != ""
 	switch {
 	case haveValue:
 		m, isMap := value.(map[string]any)
@@ -278,36 +279,36 @@ func buildStepValue(spec daemon.CommandSpec, p *parsedArgs) (any, error) {
 		types[f.Key] = f.Type
 	}
 	for _, f := range fields {
-		if top, _, _ := strings.Cut(f.key, "."); len(types) > 0 && types[top] == "" {
+		if top, _, _ := strings.Cut(f.Key, "."); len(types) > 0 && types[top] == "" {
 			return nil, usage("%s has no field %q (see `maestro-d %s --help`)", spec.Name, top, spec.Name)
 		}
 		var v any = true
-		if !f.bare {
+		if !f.Bare {
 			var err error
-			if v, err = typedScalar(f.value); err != nil {
+			if v, err = typedScalar(f.Value); err != nil {
 				return nil, err
 			}
 		}
 		// map fields accept KEY=VALUE pairs: `runFlow x.yaml --env USER=bob`.
-		if strings.HasPrefix(types[f.key], "map[") && !f.bare {
-			if k, val, ok := strings.Cut(f.value, "="); ok {
+		if strings.HasPrefix(types[f.Key], "map[") && !f.Bare {
+			if k, val, ok := strings.Cut(f.Value, "="); ok {
 				if _, isMap := v.(map[string]any); !isMap {
-					if err := setPath(m, f.key+"."+k, val); err != nil {
+					if err := setPath(m, f.Key+"."+k, val); err != nil {
 						return nil, err
 					}
 					continue
 				}
 			}
 		}
-		if err := setPath(m, f.key, v); err != nil {
+		if err := setPath(m, f.Key, v); err != nil {
 			return nil, err
 		}
 	}
-	for k, v := range p.base {
+	for k, v := range p.Base {
 		m[k] = v
 	}
-	if p.platformGate != "" {
-		m["platform"] = p.platformGate
+	if p.PlatformGate != "" {
+		m["platform"] = p.PlatformGate
 	}
 	return m, nil
 }

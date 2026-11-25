@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 )
@@ -27,66 +26,9 @@ func TestLeaseSelector_ComputerOnlyWhenAsked(t *testing.T) {
 		{LeaseSelector{Name: "Demo Mac"}, true},
 		{LeaseSelector{Name: "mac"}, true},
 	} {
-		if got := tc.sel.matches(macDevice); got != tc.want {
+		if got := tc.sel.Matches(macDevice); got != tc.want {
 			t.Errorf("%s: %v", tc.sel, got)
 		}
-	}
-}
-
-// The computer is local only: a remote caller never sees it, leases it or
-// attaches it, whatever --share-device says; the unix socket does all three.
-func TestLeases_ComputerLocalOnly(t *testing.T) {
-	ctx := context.Background()
-	for _, cfg := range []Config{{}, {ShareDevices: []string{"mac", "Demo Mac", "mock-1"}}} {
-		env := newHubEnv(t, cfg)
-		env.mu.Lock()
-		env.phones = append(env.phones, macDevice)
-		env.mu.Unlock()
-
-		devs, err := env.remote.Devices(ctx, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, d := range devs {
-			if d.ID == "mac" {
-				t.Fatalf("%v: remote listing has the computer", cfg.ShareDevices)
-			}
-		}
-		_, err = env.remote.Device(ctx, "mac")
-		wantErrCode(t, err, CodeDeviceNotFound)
-		_, err = env.remote.AcquireLease(ctx, LeaseRequest{Device: "mac"})
-		wantErrCode(t, err, CodeDeviceNotFound)
-		_, err = env.remote.AcquireLease(ctx, LeaseRequest{Select: &LeaseSelector{Kind: "computer"}})
-		wantErrCode(t, err, CodeDeviceNotFound)
-		evCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err = env.remote.Events(evCtx, "mac", 0, func(Event) bool { return false })
-		cancel()
-		wantErrCode(t, err, CodeDeviceNotFound)
-		_, err = env.remote.AcquireLease(ctx, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "macos"}})
-		wantErrCode(t, err, CodeForbidden)
-		if env.s.shared("mac") {
-			t.Fatal("shared(mac)")
-		}
-
-		// Locally: by id, and by a selector that asks for it.
-		if all, _ := env.local.Devices(ctx, ""); !hasID(all, "mac") {
-			t.Fatal("local listing lacks the computer")
-		}
-		l := env.lease(env.local, LeaseRequest{Device: "mac"}).Lease
-		if _, err := env.local.ReleaseLease(ctx, l.ID); err != nil {
-			t.Fatal(err)
-		}
-		l = env.lease(env.local, LeaseRequest{Select: &LeaseSelector{Kind: "computer"}}).Lease
-		if l.Device != "mac" {
-			t.Fatalf("kind selector leased %s", l.Device)
-		}
-		_, _ = env.local.ReleaseLease(ctx, l.ID)
-		// A selector for a simulator never lands on the Mac.
-		l = env.lease(env.local, LeaseRequest{Select: &LeaseSelector{OSVersion: "26"}}).Lease
-		if l.Device == "mac" {
-			t.Fatal("an osVersion selector leased the computer")
-		}
-		_, _ = env.local.ReleaseLease(ctx, l.ID)
 	}
 }
 
@@ -121,10 +63,10 @@ func TestShutdownDevice_ComputerIsANoOp(t *testing.T) {
 }
 
 func TestCheckRemoteAttach_Computer(t *testing.T) {
-	if e := checkRemoteAttach(&AttachConfig{Platform: "macOS"}); e == nil || e.Code != CodeForbidden || !strings.Contains(e.Message, "local only") {
+	if e := CheckRemoteAttach(&AttachConfig{Platform: "macOS"}); e == nil || e.Code != CodeForbidden || !strings.Contains(e.Message, "local only") {
 		t.Fatalf("%v", e)
 	}
-	if e := checkRemoteAttach(&AttachConfig{Platform: "android"}); e != nil {
+	if e := CheckRemoteAttach(&AttachConfig{Platform: "android"}); e != nil {
 		t.Fatalf("android refused: %v", e)
 	}
 }

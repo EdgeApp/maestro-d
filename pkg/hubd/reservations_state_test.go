@@ -1,4 +1,4 @@
-package daemon
+package hubd
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
 func readReservations(t *testing.T, path string) []reservationRecord {
@@ -24,7 +26,7 @@ func readReservations(t *testing.T, path string) []reservationRecord {
 }
 
 func TestReservationsState_Path(t *testing.T) {
-	t.Setenv(EnvHome, "/h")
+	t.Setenv(daemon.EnvHome, "/h")
 	if got := ReservationsPath("hub"); got != "/h/hub/scheduled-leases.json" {
 		t.Fatal(got)
 	}
@@ -36,17 +38,17 @@ func TestReservationsState_Path(t *testing.T) {
 // Every change to the set of reservations rewrites the file, and only
 // reservations that have not started are in it.
 func TestReservationsState_Written(t *testing.T) {
-	env := newHubEnv(t, Config{})
+	env := newHubEnv(t, daemon.Config{})
 	ctx := context.Background()
 	path := ReservationsPath("hubtest")
-	if err := recordCreated(CreatedRecord{Platform: "ios", ID: "SIM-UP", Name: "Shared Phone"}); err != nil {
+	if err := recordCreated(daemon.CreatedRecord{Platform: "ios", ID: "SIM-UP", Name: "Shared Phone"}); err != nil {
 		t.Fatal(err)
 	}
-	env.s.registry.deps.DeleteSimulator = func(string) error { return nil }
-	a := env.mustReserve(env.remote, ReservationRequest{Device: "mock-1", StartAt: env.at(time.Hour), TTLSec: 60, Holder: "alice"})
-	b := env.mustReserve(env.remote, ReservationRequest{Device: "mock-2", StartAt: env.at(10 * time.Second), TTLSec: 60})
-	c := env.mustReserve(env.local, ReservationRequest{Device: "SIM-UP", StartAt: env.at(time.Hour), TTLSec: 60})
-	env.lease(env.remote, LeaseRequest{Device: "SIM-DOWN", TTLSec: 60})
+	env.s.deps.DeleteSimulator = func(string) error { return nil }
+	a := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "mock-1", StartAt: env.at(time.Hour), TTLSec: 60, Holder: "alice"})
+	b := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "mock-2", StartAt: env.at(10 * time.Second), TTLSec: 60})
+	c := env.mustReserve(env.local, daemon.ReservationRequest{Device: "SIM-UP", StartAt: env.at(time.Hour), TTLSec: 60})
+	env.lease(env.remote, daemon.LeaseRequest{Device: "SIM-DOWN", TTLSec: 60})
 	fi, err := os.Stat(path)
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("file: %v %v", fi, err)
@@ -73,7 +75,7 @@ func TestReservationsState_Written(t *testing.T) {
 		t.Fatalf("after cancel and delete: %+v", recs)
 	}
 	// A hub that stops ends its started leases and keeps reservations.
-	d := env.mustReserve(env.remote, ReservationRequest{Device: "mock-1", StartAt: env.at(2 * time.Hour), TTLSec: 60})
+	d := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "mock-1", StartAt: env.at(2 * time.Hour), TTLSec: 60})
 	env.s.endAllLeases()
 	if _, err := env.remote.Lease(ctx, d.ID); err != nil {
 		t.Fatalf("hub stop ended a reservation: %v", err)
@@ -89,7 +91,7 @@ func TestReservationsState_Written(t *testing.T) {
 }
 
 func TestReservationsState_Load(t *testing.T) {
-	env := newHubEnv(t, Config{})
+	env := newHubEnv(t, daemon.Config{})
 	ctx := context.Background()
 	path := ReservationsPath("hubtest")
 	recs := []reservationRecord{
@@ -104,16 +106,16 @@ func TestReservationsState_Load(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.s.loadReservations()
-	if l, err := env.local.Lease(ctx, "future"); err != nil || l.Lease.State != LeaseScheduled || l.Lease.Holder != "alice" || l.Lease.StartsAt != recs[0].StartsAt {
+	if l, err := env.local.Lease(ctx, "future"); err != nil || l.Lease.State != daemon.LeaseScheduled || l.Lease.Holder != "alice" || l.Lease.StartsAt != recs[0].StartsAt {
 		t.Fatalf("future: %+v %v", l, err)
 	}
-	if l, err := env.local.Lease(ctx, "started"); err != nil || l.Lease.State != LeaseActive || l.Lease.ExpiresAt != recs[1].ExpiresAt || l.Lease.Booted {
+	if l, err := env.local.Lease(ctx, "started"); err != nil || l.Lease.State != daemon.LeaseActive || l.Lease.ExpiresAt != recs[1].ExpiresAt || l.Lease.Booted {
 		t.Fatalf("started: %+v %v", l, err)
 	}
 	if _, err := env.local.Lease(ctx, "over"); err == nil {
 		t.Fatal("a reservation whose window is over came back")
 	}
-	if l, err := env.local.Lease(ctx, "gone"); err != nil || l.Lease.State != LeaseScheduled {
+	if l, err := env.local.Lease(ctx, "gone"); err != nil || l.Lease.State != daemon.LeaseScheduled {
 		t.Fatalf("a reservation on an unlisted device is kept: %+v %v", l, err)
 	}
 	if _, err := env.local.Lease(ctx, "clash"); err == nil {
@@ -129,7 +131,7 @@ func TestReservationsState_Load(t *testing.T) {
 }
 
 func TestReservationsState_UnreadableFile(t *testing.T) {
-	env := newHubEnv(t, Config{})
+	env := newHubEnv(t, daemon.Config{})
 	path := ReservationsPath("hubtest")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -147,8 +149,9 @@ func TestReservationsState_UnreadableFile(t *testing.T) {
 	// No file at all is no reservations.
 	env.s.loadReservations()
 	// A plain daemon writes nothing.
-	env.s.cfg.Hub = false
-	env.s.saveReservations()
+	plain := daemon.New(daemon.Config{Name: "hubtest"}, daemon.Deps{})
+	plain.Shutdown("test")
+	<-plain.Done()
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("a plain daemon wrote reservations")
 	}
@@ -159,7 +162,7 @@ func TestReservationsState_UnreadableFile(t *testing.T) {
 // without it, and loading shuts nothing down, whether the reservation's
 // window passed or not.
 func TestReservationsState_BootDutyIsNotReadBack(t *testing.T) {
-	env := newHubEnv(t, Config{})
+	env := newHubEnv(t, daemon.Config{})
 	path := ReservationsPath("hubtest")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)

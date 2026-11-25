@@ -51,9 +51,9 @@ node_target() {
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LDFLAGS="-s -w \
- -X github.com/devicelab-dev/maestro-runner/pkg/cli.Version=${VERSION} \
- -X github.com/devicelab-dev/maestro-runner/pkg/cli.Commit=${COMMIT} \
- -X github.com/devicelab-dev/maestro-runner/pkg/cli.BuildDate=${BUILD_DATE}"
+ -X github.com/devicelab-dev/maestro-runner/pkg/version.Version=${VERSION} \
+ -X github.com/devicelab-dev/maestro-runner/pkg/version.Commit=${COMMIT} \
+ -X github.com/devicelab-dev/maestro-runner/pkg/version.BuildDate=${BUILD_DATE}"
 
 rm -rf "$PLATFORMS_DIR" "$OUT_DIR"
 mkdir -p "$PLATFORMS_DIR" "$OUT_DIR"

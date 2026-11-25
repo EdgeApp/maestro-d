@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"io"
@@ -103,7 +104,7 @@ func runStopOrphans(ctx context.Context, o *daemonOpts) error {
 		}
 		// The one document on stdout: the failure that follows goes to
 		// stderr only.
-		printJSONStdout(out)
+		common.PrintJSONStdout(out)
 	} else {
 		printOrphans(os.Stdout, res)
 	}
@@ -132,7 +133,7 @@ func printOrphans(w io.Writer, res *daemon.OrphanResult) {
 	}
 }
 
-var devicefarmSessionsFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, one(manageHubFlag))
+var devicefarmSessionsFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, common.One(manageHubFlag))
 
 // devicefarmCmd is one devicefarm subcommand that needs no device.
 func devicefarmCmd(name, usage, args string, fn func(ctx context.Context, c *daemon.Client, o *daemonOpts, args []string, w io.Writer) error) *cli.Command {
@@ -140,7 +141,7 @@ func devicefarmCmd(name, usage, args string, fn func(ctx context.Context, c *dae
 		Name:            name,
 		Usage:           usage,
 		ArgsUsage:       args,
-		Description:     flagsDoc("", devicefarmSessionsFlags),
+		Description:     common.FlagHelp("", devicefarmSessionsFlags),
 		SkipFlagParsing: true,
 		Action:          withArgs(devicefarmSessionsFlags, connected(fn)),
 	}
@@ -152,7 +153,7 @@ func runDevicefarmAccount(ctx context.Context, c *daemon.Client, o *daemonOpts, 
 		return err
 	}
 	if o.JSON {
-		printJSON(w, res)
+		common.PrintJSON(w, res)
 		return nil
 	}
 	if res.Hub != "" {
@@ -175,7 +176,7 @@ func runDevicefarmApps(ctx context.Context, c *daemon.Client, o *daemonOpts, _ [
 		return err
 	}
 	if o.JSON {
-		printJSON(w, res)
+		common.PrintJSON(w, res)
 		return nil
 	}
 	if len(res.Apps) == 0 {
@@ -202,7 +203,7 @@ func runDevicefarmUpload(ctx context.Context, c *daemon.Client, o *daemonOpts, a
 		return err
 	}
 	if o.JSON {
-		printJSON(w, res)
+		common.PrintJSON(w, res)
 		return nil
 	}
 	how := "uploaded"
@@ -226,7 +227,7 @@ var devicefarmCommand = &cli.Command{
 			Name:            "sessions",
 			Usage:           "List the project's remote access sessions (name = device id, status, result, device minutes)",
 			ArgsUsage:       " ",
-			Description:     flagsDoc("", devicefarmSessionsFlags),
+			Description:     common.FlagHelp("", devicefarmSessionsFlags),
 			SkipFlagParsing: true,
 			Action: withArgs(devicefarmSessionsFlags, connected(func(ctx context.Context, c *daemon.Client, o *daemonOpts, args []string, w io.Writer) error {
 				res, err := c.ProviderSessions(ctx, "devicefarm", o.manage.hub)
@@ -234,7 +235,7 @@ var devicefarmCommand = &cli.Command{
 					return err
 				}
 				if o.JSON {
-					printJSON(w, res)
+					common.PrintJSON(w, res)
 					return nil
 				}
 				printSessions(w, res)

@@ -8,6 +8,8 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/hubcmd"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/xcodecache"
@@ -19,9 +21,9 @@ var gcBuildCacheDirs = []string{"wda-builds", "devicelab-ios-runner-builds", "em
 
 var gcFlags = []dflag{
 	daemonSelectFlags[1], // --json
-	boolFlag("dry-run", "List what would be deleted without deleting it", nil,
+	common.BoolFlag("dry-run", "List what would be deleted without deleting it", nil,
 		func(o *daemonOpts, v bool) { o.DryRun = v }),
-	boolFlag("include-build-cache", "Also prune iOS runner builds unused for 30 days (the binary's cache, not MAESTRO_D_HOME)", nil,
+	common.BoolFlag("include-build-cache", "Also prune iOS runner builds unused for 30 days (the binary's cache, not MAESTRO_D_HOME)", nil,
 		func(o *daemonOpts, v bool) { o.IncludeBuildCache = v }),
 }
 
@@ -30,10 +32,10 @@ var gcCommand = &cli.Command{
 	Usage:     "Delete what maestro-d no longer needs: old blobs, idle reports, dead daemons' run dirs, orphaned Chrome profiles",
 	ArgsUsage: " ",
 	Description: "Runs the housekeeping sweep every daemon runs half a minute after it starts and hourly, against\n" +
-		"MAESTRO_D_HOME (default ~/.maestro-d), without starting a daemon.\n\n" + flagsDoc("", gcFlags),
+		"MAESTRO_D_HOME (default ~/.maestro-d), without starting a daemon.\n\n" + common.FlagHelp("", gcFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(gcFlags, func(_ context.Context, o *daemonOpts, _ []string) error {
-		res := daemon.Sweep(daemon.Home(), daemon.SweepOptions{DryRun: o.DryRun, KeepRunDir: serviceInstalled})
+		res := daemon.Sweep(daemon.Home(), daemon.SweepOptions{DryRun: o.DryRun, KeepRunDir: hubcmd.ServiceInstalled})
 		if o.IncludeBuildCache {
 			for _, dir := range gcBuildCacheDirs {
 				for _, p := range xcodecache.PruneBuildCache(filepath.Join(config.GetCacheDir(), dir), "", xcodecache.DefaultMaxAge, o.DryRun) {
@@ -42,7 +44,7 @@ var gcCommand = &cli.Command{
 			}
 		}
 		if o.JSON {
-			printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "gc": res})
+			common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "gc": res})
 			return nil
 		}
 		if res.Skipped {
