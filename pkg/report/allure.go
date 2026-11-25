@@ -281,8 +281,9 @@ func collectAttachmentsRecursive(commands []Command, attachments *[]AllureAttach
 	}
 }
 
-// copyAllureAttachments copies screenshot files from assets subdirs into allure-results/ flat.
-func copyAllureAttachments(reportDir, allureDir string, flows []FlowDetail) {
+// CopyAllureAttachments copies report screenshots to a flat Allure results directory.
+// Each screenshot must have a distinct base name within the run.
+func CopyAllureAttachments(reportDir, allureDir string, flows []FlowDetail) {
 	for _, flow := range flows {
 		copyCommandAttachments(reportDir, allureDir, flow.Commands)
 	}
@@ -291,7 +292,7 @@ func copyAllureAttachments(reportDir, allureDir string, flows []FlowDetail) {
 func copyCommandAttachments(reportDir, allureDir string, commands []Command) {
 	for _, cmd := range commands {
 		for _, path := range []string{cmd.Artifacts.ScreenshotBefore, cmd.Artifacts.ScreenshotAfter} {
-			if path == "" {
+			if !filepath.IsLocal(filepath.FromSlash(path)) {
 				continue
 			}
 			src := filepath.Join(reportDir, path)

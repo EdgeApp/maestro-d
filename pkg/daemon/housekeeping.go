@@ -156,20 +156,25 @@ func (s *sweeper) runDirs(runRoot string) {
 	names, _ := os.ReadDir(runRoot)
 	inUse := map[string]bool{}
 	live := map[string]bool{}
+	hubDir := filepath.Join(filepath.Dir(runRoot), "hub", "run")
+	var reportDirs []string
+	if present(hubDir) {
+		reportDirs = append(reportDirs, hubDir)
+		if processLive(hubDir, filepath.Join(filepath.Dir(hubDir), "hub.lock")) {
+			collectReports(hubDir, inUse)
+		}
+	}
 	for _, n := range names {
 		if !n.IsDir() {
 			continue
 		}
 		dir := filepath.Join(runRoot, n.Name())
+		reportDirs = append(reportDirs, dir)
 		if !daemonLive(dir) {
 			continue
 		}
 		live[n.Name()] = true
-		for _, d := range readDevicesAt(dir) {
-			if d.ReportDir != "" {
-				inUse[filepath.Clean(d.ReportDir)] = true
-			}
-		}
+		collectReports(dir, inUse)
 	}
 	for _, n := range names {
 		if n.IsDir() && strings.HasPrefix(n.Name(), tombstonePrefix) {
@@ -181,21 +186,26 @@ func (s *sweeper) runDirs(runRoot string) {
 		}
 		s.deadRunDir(filepath.Join(runRoot, n.Name()))
 	}
-	for _, n := range names {
-		if !n.IsDir() || (!s.opts.DryRun && !present(filepath.Join(runRoot, n.Name()))) {
+	for _, dir := range reportDirs {
+		if s.listed(dir) {
 			continue
 		}
-		reports, _ := filepath.Glob(filepath.Join(runRoot, n.Name(), reportsDirName, "*", "*"))
+		reports, _ := filepath.Glob(filepath.Join(dir, reportsDirName, "*", "*"))
 		for _, r := range reports {
 			if fi, err := os.Stat(r); err != nil || !fi.IsDir() || inUse[filepath.Clean(r)] {
 				continue
 			}
-			if s.listed(filepath.Join(runRoot, n.Name())) {
-				continue // a dry run already lists the whole run dir
-			}
 			if fsage.IdleFor(r, reportMaxAge) {
 				s.remove(r, fmt.Sprintf("report idle for %v", reportMaxAge))
 			}
+		}
+	}
+}
+
+func collectReports(dir string, inUse map[string]bool) {
+	for _, d := range readDevicesAt(dir) {
+		if d.ReportDir != "" {
+			inUse[filepath.Clean(d.ReportDir)] = true
 		}
 	}
 }
@@ -316,14 +326,15 @@ func namedInArgs(args []string, dir string) bool {
 
 // daemonLive reports whether the daemon owning run dir dir is running: its
 // lock is held, or its daemon.json names a live pid.
-func daemonLive(dir string) bool {
+func daemonLive(dir string) bool { return processLive(dir, filepath.Join(dir, "daemon.lock")) }
+
+func processLive(dir, lockPath string) bool {
 	// The pid comes first: only a dir whose daemon.json names no live
 	// process gets the (brief) lock probe, which a daemon starting at that
 	// moment would see as "already running or starting".
 	if pidLive(dir) {
 		return true
 	}
-	lockPath := filepath.Join(dir, "daemon.lock")
 	if _, err := os.Stat(lockPath); err != nil {
 		return false // never locked, and probing must not create one
 	}
