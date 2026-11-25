@@ -44,7 +44,7 @@ func TestMesh_TrafficShapingRunsOnTheOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := startHub(t, "hub-a", testDevices("a"), withDeviceConfig(aConfig))
-	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withDeviceConfig(filepath.Join(dir, "none.json")))
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withShare(t, "b1", "b2"))
 	waitLinked(t, a, "hub-b")
 	waitLinked(t, b, "hub-a")
 	c := b.client()
@@ -108,7 +108,7 @@ func TestMesh_DeviceDescriptionFromTheOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := startHub(t, "hub-a", testDevices("a"), withDeviceConfig(aConfig))
-	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withDeviceConfig(filepath.Join(dir, "none.json")))
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withShare(t, "b1", "b2"))
 	waitLinked(t, a, "hub-b")
 	waitLinked(t, b, "hub-a")
 	ctx := context.Background()

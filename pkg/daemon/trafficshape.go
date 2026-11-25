@@ -37,7 +37,11 @@ func (s *Server) logDeviceConfig() {
 // runs is looked up once, here at attach, so a set and its reset use the
 // same entry and no shaping call runs discovery.
 func (s *Server) trafficShaper(id string) *netshape.Shaper {
-	return &netshape.Shaper{ConfigPath: DeviceConfigPath(s.cfg.DeviceConfig), DeviceID: id, Alias: s.avdAlias(id), Log: logger.Info}
+	shaper := &netshape.Shaper{ConfigPath: DeviceConfigPath(s.cfg.DeviceConfig), DeviceID: id, Alias: s.avdAlias(id), Log: logger.Info}
+	if s.cfg.Hub != nil {
+		shaper.Config = s.cfg.Hub.DeviceConfig
+	}
+	return shaper
 }
 
 // avdAlias is the avd:<name> entry of the AVD that emulator serial id
@@ -94,6 +98,16 @@ func configEntries(cfg *netshape.Config, d DeviceInfo) []netshape.Device {
 	return out
 }
 
+// ConfigDescription resolves the description in device-id then AVD-alias order.
+func ConfigDescription(cfg *netshape.Config, d DeviceInfo) string {
+	for _, entry := range configEntries(cfg, d) {
+		if entry.Description != "" {
+			return entry.Description
+		}
+	}
+	return ""
+}
+
 // ApplyDeviceConfig sets, from the device config, each device's
 // description, capabilities and trafficShaping (whether this host can shape it). Each
 // comes from the first of the device's entries that has one (see
@@ -104,21 +118,24 @@ func (s *Server) ApplyDeviceConfig(devs []DeviceInfo) {
 	if len(devs) == 0 {
 		return
 	}
-	path := DeviceConfigPath(s.cfg.DeviceConfig)
-	cfg, err := netshape.LoadConfig(path)
-	if err != nil {
-		warnShapingOnce(path, err.Error())
-		return
+	var cfg *netshape.Config
+	if s.cfg.Hub != nil {
+		cfg = s.cfg.Hub.DeviceConfig()
+	} else {
+		path := DeviceConfigPath(s.cfg.DeviceConfig)
+		var err error
+		cfg, err = netshape.LoadConfig(path)
+		if err != nil {
+			warnShapingOnce(path, err.Error())
+			return
+		}
+		shapingWarned.Delete(path)
 	}
-	shapingWarned.Delete(path)
 	for i := range devs {
 		dev := &devs[i]
-		dev.TrafficShaping, dev.Description, dev.Capabilities = false, "", nil
+		dev.TrafficShaping, dev.Description, dev.Capabilities = false, ConfigDescription(cfg, *dev), nil
 		for _, e := range configEntries(cfg, *dev) {
 			dev.TrafficShaping = dev.TrafficShaping || e.Shapeable()
-			if dev.Description == "" {
-				dev.Description = e.Description
-			}
 			if dev.Capabilities == nil {
 				dev.Capabilities = e.Capabilities
 			}

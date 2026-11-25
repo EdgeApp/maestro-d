@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"net/http"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
 // Hub supplies the device-lease policy and routes of a hub. New binds it to
 // one device server. A plain daemon leaves Config.Hub nil.
 type Hub interface {
 	Bind(*Server, Config, Deps)
-	Start(context.Context)
+	DeviceConfig() *netshape.Config
+	Start(context.Context) error
 	Routes(*http.ServeMux)
 	TCPCaller(addr string, clientOutputs bool) Caller
 	Gate(LeaseMode, http.HandlerFunc) http.HandlerFunc

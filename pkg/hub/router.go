@@ -145,6 +145,10 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.acquire(w, r, fwd)
 	case path == "/v1/devices" && r.Method == http.MethodGet && wide:
 		rt.listDevices(w, r)
+	case path == "/v1/devices" && r.Method == http.MethodGet:
+		lr := r.Clone(r.Context())
+		rt.stripLease(lr)
+		rt.serveLocal(w, lr)
 	case path == "/v1/leases" && r.Method == http.MethodGet && wide:
 		rt.listLeases(w, r)
 	case path == "/v1/events" && r.Method == http.MethodGet:
@@ -809,14 +813,21 @@ func (c *fanoutCache) drop(hub string) {
 // fanout asks every linked peer for path (scope=local) in parallel, each
 // within FanoutTimeout; answers are cached for CacheFor.
 func (m *Mesh) fanout(ctx context.Context, path, query string) []fanoutResult {
+	return m.fanoutWithLease(ctx, path, query, "", "")
+}
+
+func (m *Mesh) fanoutWithLease(ctx context.Context, path, query, lease, owner string) []fanoutResult {
 	links := m.linked()
 	out := make([]fanoutResult, len(links))
 	var wg sync.WaitGroup
 	for i, l := range links {
 		key := l.peer + " " + path + "?" + query
-		if res, ok := m.cache.get(key, m.cfg.CacheFor); ok {
-			out[i] = res
-			continue
+		private := lease != "" && owner == l.peer
+		if !private {
+			if res, ok := m.cache.get(key, m.cfg.CacheFor); ok {
+				out[i] = res
+				continue
+			}
 		}
 		wg.Add(1)
 		go func(i int, l *Link, key string) {
@@ -824,7 +835,11 @@ func (m *Mesh) fanout(ctx context.Context, path, query string) []fanoutResult {
 			res := fanoutResult{hub: l.peer}
 			cctx, cancel := context.WithTimeout(ctx, m.cfg.FanoutTimeout)
 			defer cancel()
-			resp, err := l.RoundTrip(cctx, Request{Method: http.MethodGet, Path: path, Query: query, Header: m.peerHeaders(nil),
+			headers := m.peerHeaders(nil)
+			if private {
+				headers.Set(daemon.HeaderLease, lease)
+			}
+			resp, err := l.RoundTrip(cctx, Request{Method: http.MethodGet, Path: path, Query: query, Header: headers,
 				Principal: "hub " + m.cfg.Name})
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -841,7 +856,7 @@ func (m *Mesh) fanout(ctx context.Context, path, query string) []fanoutResult {
 			}
 			res.err = err
 			out[i] = res
-			if err == nil {
+			if err == nil && !private {
 				m.cache.put(key, res)
 			}
 		}(i, l, key)
@@ -967,6 +982,12 @@ func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
 	q.Del("location")
 	lr := r.Clone(r.Context())
 	lr.URL.RawQuery = q.Encode()
+	lease, owner := splitID(r.Header.Get(daemon.HeaderLease))
+	if owner != "" && owner != rt.m.cfg.Name {
+		lr.Header.Del(daemon.HeaderLease)
+	} else {
+		rt.stripLease(lr)
+	}
 	rec := rt.localCapture(lr)
 	var out daemon.DevicesResult
 	if rec.status != http.StatusOK || json.Unmarshal(rec.buf.Bytes(), &out) != nil {
@@ -974,7 +995,7 @@ func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Set("scope", "local")
-	for _, res := range rt.m.fanout(r.Context(), "/v1/devices", q.Encode()) {
+	for _, res := range rt.m.fanoutWithLease(r.Context(), "/v1/devices", q.Encode(), lease, owner) {
 		var devs daemon.DevicesResult
 		if res.err == nil {
 			if err := json.Unmarshal(res.body, &devs); err != nil {

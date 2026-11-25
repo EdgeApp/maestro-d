@@ -64,6 +64,8 @@ export interface RequestOptions {
   body?: unknown
   accept?: string
   signal?: AbortSignal
+  /** Credential for a single device collection request. */
+  collectionLease?: string
   /** Milliseconds; 0 = none. */
   timeout?: number
   /** Sent as X-Maestro-Request-Id, and kept across retries. */
@@ -301,6 +303,7 @@ export class Transport {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     if (opts.requestId) headers[REQUEST_ID_HEADER] = opts.requestId
+    if (opts.collectionLease) headers[LEASE_HEADER] = opts.collectionLease
     this.leaseHeader(path, headers)
     // On a hub this client names its output files and fetches them back.
     if (this.hub && method === 'POST') headers[CLIENT_OUTPUTS_HEADER] = '1'

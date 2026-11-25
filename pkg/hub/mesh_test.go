@@ -936,7 +936,7 @@ func TestMesh_BootAndCatalogRouteByHub(t *testing.T) {
 
 func TestMesh_ShareDeviceAcrossTheMesh(t *testing.T) {
 	setupHome(t)
-	a := startHub(t, "hub-a", testDevices("a"), withShare("a2"))
+	a := startHub(t, "hub-a", testDevices("a"), withShare(t, "a2"))
 	b := startHub(t, "hub-b", nil, withPeers(a.addr))
 	waitLinked(t, b, "hub-a")
 	res, err := b.client().DeviceList(context.Background(), "")
