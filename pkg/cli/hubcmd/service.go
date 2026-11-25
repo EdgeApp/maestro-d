@@ -141,7 +141,7 @@ var hubServiceUninstallFlags = common.FlagSet(outputFlags, []dflag{
 
 var hubServiceStatusFlags = common.FlagSet(outputFlags)
 
-func serviceCommand(withArgs actionFactory) *cli.Command {
+func serviceCommand(withArgs, withConfig actionFactory) *cli.Command {
 	return &cli.Command{
 		Name:  "service",
 		Usage: "Run the hub as a launchd LaunchAgent (macOS): install, uninstall, status",
@@ -159,7 +159,7 @@ daemon.log.
 
   maestro-d-hub service install --name lab-a --token-file ~/.hub-token --peer-token-file ~/.peer-token`, hubStartFlags),
 				SkipFlagParsing: true,
-				Action:          withArgs(hubStartFlags, runServiceInstall),
+				Action:          withConfig(hubStartFlags, runServiceInstall),
 			},
 			{
 				Name:            "uninstall",

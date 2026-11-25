@@ -191,7 +191,7 @@ func withCloud(max int) hubOpt {
 }
 
 func withShare(ids ...string) hubOpt {
-	return func(_ *Config, d *daemon.Config) { d.ShareDevices = ids }
+	return func(_ *Config, d *daemon.Config) { d.ShareConfig = ids }
 }
 
 func testDevices(prefix string) []daemon.DeviceInfo {
@@ -231,11 +231,11 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 	for _, o := range opts {
 		o(&mcfg, &dcfg)
 	}
-	if dcfg.ShareDevices == nil && dcfg.ShareConfig == nil {
+	if dcfg.ShareConfig == nil {
 		// A hub shares only what it names: by default a test hub shares
 		// the devices it was started with.
 		for _, d := range devs {
-			dcfg.ShareDevices = append(dcfg.ShareDevices, d.ID)
+			dcfg.ShareConfig = append(dcfg.ShareConfig, d.ID)
 		}
 	}
 	h := &testHub{t: t, name: name, done: make(chan error, 1)}

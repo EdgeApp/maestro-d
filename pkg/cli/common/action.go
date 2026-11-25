@@ -8,7 +8,9 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
-func Action[T any](flags []Flag[T], parse func([]string, []Flag[T], map[string]string) (*T, *ParsedArgs, error), fn func(context.Context, *T, []string) error, jsonOutput func(*T) bool) cli.ActionFunc {
+type ArgParser[T any] func([]string, []Flag[T], map[string]string) (*T, *ParsedArgs, error)
+
+func Action[T any](flags []Flag[T], parse ArgParser[T], fn func(context.Context, *T, []string) error, jsonOutput func(*T) bool) cli.ActionFunc {
 	return func(c *cli.Context) error {
 		args := c.Args().Slice()
 		for _, a := range args {
