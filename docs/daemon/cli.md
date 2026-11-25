@@ -148,10 +148,11 @@ in `maestro-d tapOn --target-hub Login`, `Login` is still the text to tap
 
 ```sh
 # on the device's machine
-maestro-d serve --daemon shared --http 0.0.0.0:7433 --token "$T" &
+maestro-d-hub start --token "$T" --peer-token "$PEER_TOKEN"
 # anywhere on the network
 export MAESTRO_D_TOKEN=$T
 maestro-d device list --target-hub=192.168.64.1
+maestro-d lease --device "$UDID" --target-hub=192.168.64.1
 maestro-d launchApp com.apple.Preferences --target-hub=192.168.64.1 --device "$UDID"
 maestro-d get screenshot --target-hub=192.168.64.1 --device "$UDID" --out shot.png
 ```
@@ -213,8 +214,8 @@ A **hub** is a daemon that shares this machine's devices with clients on the
 network. It lends each device to one client at a time, with a **lease**.
 
 ```sh
-# on the device's machine (the token file must be mode 0600)
-maestro-d hub start --token-file ~/.maestro-d/hub-token --share-device "iPhone 16"
+# on the device host, list the device ID in config.json and use mode 0600 for the token files
+maestro-d-hub start --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
 # anywhere on the network
 export MAESTRO_D_TOKEN=$(cat hub-token)
 maestro-d device list --target-hub=192.168.64.1          # LEASE: holder and time left, next reservation, or available
@@ -228,10 +229,10 @@ maestro-d claim --lease "$LEASE" --target-hub=192.168.64.1          # from its s
 
 | command | |
 | --- | --- |
-| `hub start [--name NAME] [--daemon NAME] [--listen ADDR] [--advertise HOST:PORT] [--peer HOST[:PORT] …] [--no-mdns] --token T \| --token-file F --peer-token P \| --peer-token-file F [--tls-cert F --tls-key F] [--peer-ca F] [--share-device ID\|NAME …] [--lease-max [DEVICE=]DURATION …] [--reservation-lead DURATION] [--allow-remote-shell] [--pass-env NAME …] [--config F] [--foreground]` | start a hub (the daemon `hub` unless `--daemon` names another) in the background, with no idle timeout. `--name` is its name in the mesh (default: the short host name). `--listen` defaults to `:7433` and, unlike `--http`, binds every interface. Both tokens are required; the `-file` forms read a file only its owner can read, and the detached hub gets them through its environment, never its command line. At launch it advertises itself with mDNS, browses 3 s and dials every hub found plus every `--peer` (`--no-mdns` skips the LAN); it reports ready once every `--peer` answered, or after 10 s, and exits 5 when every `--peer` refused it (`HUB_NAME_TAKEN` for the peer's own name, `HUB_VERSION`). `--share-device` (repeatable) puts those devices, by id or name (a running emulator's AVD name), in the pool, as do `--share-tv` and the [config.json](config.md)'s `hubDevices`; a hub shares only what they name, and nothing when they name nothing. `--lease-max` sets the longest lease window: `DURATION` (`8h`, `90m`, or seconds) for the whole hub (default 8h), `DEVICE=DURATION` (repeatable) for one device by id or name, matched like `--share-device`. `--reservation-lead` is how far ahead a reservation may start (default 24h). `--config` names the [device config](config.md) (default `<home>/config.json`, else `<home>/network.json`; `--network-config` names an older network.json). `--foreground` runs it in this process, for a supervisor. See [hub.md](hub.md) |
-| `hub stop [--daemon NAME]` | stop the hub: its leases end, its devices are detached and its peer links close (through launchd when the service is installed) |
-| `hub status [--daemon NAME] [--target-hub…] [--json]` | the hub's name, version and listener, and for each peer its address, link state, direction, RTT and device count (`GET /v1/hub`) |
-| `hub service install [hub start flags]` / `uninstall [--purge]` / `status` | macOS: run the hub as the LaunchAgent `app.edge.maestro-d.hub` (one per home and `--daemon` name; starts at login, restarts after a crash, not after `hub stop`; tokens in `<home>/hub/secrets`, or `<home>/hub/daemons/<daemon>/secrets` for another daemon name, never in the plist). While installed, `hub start` kickstarts it. `--purge` also deletes the tokens |
+| `maestro-d-hub start [--name NAME] [--listen ADDR] [--advertise HOST:PORT] [--peer HOST[:PORT] …] [--no-mdns] --token T \| --token-file F --peer-token P \| --peer-token-file F [--tls-cert F --tls-key F] [--peer-ca F] [--lease-max [DEVICE=]DURATION …] [--reservation-lead DURATION] [--allow-remote-shell] [--pass-env NAME …] [--config F] [--foreground]` | start this machine’s hub in the background, with no idle timeout. `--name` is its name in the mesh (default: the short host name). `--listen` defaults to `:7433` and, unlike `--http`, binds every interface. Both tokens are required; the `-file` forms read a file only its owner can read, and the detached hub gets them through its environment, never its command line. At launch it advertises itself with mDNS, browses 3 s and dials every hub found plus every `--peer` (`--no-mdns` skips the LAN); it reports ready once every `--peer` answered, or after 10 s, and exits 5 when every `--peer` refused it (`HUB_NAME_TAKEN` for the peer's own name, `HUB_VERSION`). List each shared device's ID in [config.json](config.md). `--lease-max` sets the longest lease window: `DURATION` (`8h`, `90m`, or seconds) for the whole hub (default 8h), `DEVICE=DURATION` (repeatable) for one device by id or name. `--reservation-lead` is how far ahead a reservation may start (default 24h). `--config` names the [device config](config.md) (default `<home>/config.json`). `--foreground` runs it in this process, for a supervisor. See [hub.md](hub.md) |
+| `maestro-d-hub stop` | stop the hub: its leases end, its devices are detached and its peer links close (through launchd when the service is installed) |
+| `maestro-d-hub status [--target-hub…] [--json]` | the hub's name, version and listener, and for each peer its address, link state, direction, RTT and device count (`GET /v1/hub`) |
+| `maestro-d-hub service install [hub start flags]` / `uninstall [--purge]` / `status` | macOS: run the hub as the LaunchAgent `app.edge.maestro-d.hub` (one per machine; starts at login, restarts after a crash, not after `hub stop`; tokens in `<home>/hub/secrets`, never in the plist). While installed, `hub start` kickstarts it. `--purge` also deletes the tokens |
 | `lease [--device ID \| --platform P --kind K --name N --os V --hub H [--boot]] [--ttl DURATION] [--holder H] [--no-attach] [attach flags] [--json]` | lease a device, by id or by selector, and attach it (`--no-attach` only reserves it). `--ttl` is the window, a duration (`2h`, `90m`) or seconds; default 8h, or the device's maximum when that is shorter, and over the maximum is `USAGE` (exit 2) naming it. A selector takes the first free match: ready, neither leased nor attached; with `--boot`, else a shut-down simulator or AVD, which the hub boots and shuts down again when the lease ends. With `--device` while this client already holds a live lease on it, it prints that lease instead. `--json` prints `{lease: {id, device, holder, startsAt, expiresAt, state, ttlSec, maxSec}, device}`. A reservation on file for the device does not stand in for a lease: the hub is asked, and a window that reaches a reservation is `DEVICE_IN_USE` naming `nextStartsAt` |
 | `reserve (--device ID \| --platform P --kind K --name N --os V --os-min V --os-max V --hub H) --start-at TIME [--ttl DURATION] [--holder H] [--json]` | reserve a device for a window that starts later (`POST /v1/reservations`). `--start-at` is an RFC 3339 time or a duration from now (`90m`, `2h`), by this machine's clock, which must be within 60 s of the hub's (`USAGE` with `reason: clock-skew` otherwise); at most the hub's lead ahead (24h by default). `--ttl` as for `lease`. A selector takes the first device free for the whole window, ready now. The reservation is recorded in `leases.json`; before its start a command on the device is `LEASE_NOT_STARTED` (exit 5), and from it the command sends it and attaches the device. A hub that predates reservations is `USAGE` "does not take reservations" |
 | `claim --lease ID [--no-attach] [attach flags] [--json]` | take a lease by its id, from any machine: a reservation once it has started, or a lease handed over. It records it in `leases.json` and attaches the device (`--no-attach` only records it). A reservation that has not started is `LEASE_NOT_STARTED` (exit 5), and nothing is recorded |
@@ -300,7 +301,7 @@ curl -H "Authorization: Bearer $T" -H "X-Maestro-Lease: $LEASE" \
 | command | |
 | --- | --- |
 | `start [--http ADDR --token T] [--idle-timeout N] [attach flags]` | start the named daemon in the background if it is not running; with `--device` also attach |
-| `serve [--http ADDR --token T] [--tls-cert F --tls-key F] [--pass-env NAME …] [--config F]` | run the daemon in the foreground (what `start` spawns; useful under a supervisor). `--tls-cert`/`--tls-key` serve HTTPS on `--http`. `--config` names the [device config](config.md) (default `<home>/config.json`, else `<home>/network.json`; `MAESTRO_D_CONFIG` reaches a daemon `start` spawns; the deprecated `--network-config` names an older network.json). An `--http` address beyond loopback needs `--token`, and sessions then import none of this process's environment except each `--pass-env NAME` |
+| `serve [--http ADDR --token T] [--config F]` | Run the local daemon in the foreground. `--http` must name a loopback address. `--config` or `MAESTRO_D_CONFIG` selects the [device config](config.md), which defaults to `<home>/config.json`. |
 | `status` | daemon pid, version, socket, report dir, idle deadline and its devices; exit 3 when not running |
 | `ps` | every daemon of this user (running or stale) with the devices it holds |
 | `stop [--all] [--timeout N]` | detach every device, shut down the simulators/emulators the daemon booted, exit |
@@ -427,7 +428,7 @@ maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/
 | `MAESTRO_D_HUB` | default `--target-hub` (a TCP daemon or hub to talk to instead of the local one) |
 | `MAESTRO_D_TOKEN` | default `--token` |
 | `MAESTRO_D_CA` | default `--ca` |
-| `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `serve`/`hub start` `--tls-cert`/`--tls-key` |
+| `MAESTRO_D_TLS_CERT`, `MAESTRO_D_TLS_KEY` | default `maestro-d-hub start` `--tls-cert`/`--tls-key` |
 | `MAESTRO_D_LISTEN` | default `hub start --listen` |
 | `MAESTRO_D_MOCK_DEVICES` | tests only: `mock-1,mock-2` lists those mock-driver devices as ready, so leases and selectors see them (the mock driver attaches any id but lists none) |
 | `MAESTRO_D_HOUSEKEEPING_INTERVAL` | how often a running daemon sweeps its home (a Go duration, default `1h`) |

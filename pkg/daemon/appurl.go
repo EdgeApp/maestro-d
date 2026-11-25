@@ -156,7 +156,7 @@ func (r *refusedRedirect) Error() string { return "redirect to " + r.host + " is
 // goes) for a local caller of a daemon without one. A remote caller of a
 // daemon without one is refused.
 func (s *Server) installAllowHosts(ctx context.Context, u *url.URL) (*netshape.InstallApp, *Error) {
-	cfg, _, err := s.deviceConfig().Load()
+	cfg, err := netshape.LoadConfig(DeviceConfigPath(s.cfg.DeviceConfig))
 	if err != nil {
 		return nil, Errorf(CodeInternal, "install: device config: %v", err)
 	}

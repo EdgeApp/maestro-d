@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"github.com/devicelab-dev/maestro-runner/pkg/aicheck"
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
 // AIJevURL and AIAnthropicURL override the AI checks' endpoints (tests).
@@ -27,7 +28,7 @@ func (s *Server) aiChecker(attach *AttachAI) *aicheck.Checker {
 		JevURL:       AIJevURL,
 		AnthropicURL: AIAnthropicURL,
 		Keys: func() (aicheck.Keys, error) {
-			cfg, _, err := s.deviceConfig().Load()
+			cfg, err := netshape.LoadConfig(DeviceConfigPath(s.cfg.DeviceConfig))
 			if err != nil {
 				return aicheck.Keys{}, err
 			}

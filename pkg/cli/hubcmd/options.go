@@ -11,13 +11,13 @@ import (
 )
 
 type daemonOpts struct {
-	Name, DeviceConfig, NetworkConfig, HTTPAddr, Token, TLSCert, TLSKey string
-	JSON, Verbose                                                       bool
-	StartTimeout                                                        int
-	PassEnv                                                             []string
-	explicit                                                            map[string]bool
-	hub                                                                 hubOpts
-	deps                                                                func() daemon.Deps
+	Name, DeviceConfig, HTTPAddr, Token, TLSCert, TLSKey string
+	JSON, Verbose                                        bool
+	StartTimeout                                         int
+	PassEnv                                              []string
+	explicit                                             map[string]bool
+	hub                                                  hubOpts
+	deps                                                 func() daemon.Deps
 }
 type dflag = common.Flag[daemonOpts]
 
@@ -25,8 +25,6 @@ type dflag = common.Flag[daemonOpts]
 type hubOpts struct {
 	name      string
 	tokenFile string
-	share     []string
-	shareTV   []string
 	// configShare is the hubDevices of the config the hub starts with.
 	configShare []string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
@@ -68,9 +66,9 @@ func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (
 
 type actionFactory func([]dflag, func(context.Context, *daemonOpts, []string) error) cli.ActionFunc
 
-func actions(deps func() daemon.Deps) actionFactory {
+func actions(deps func() daemon.Deps, parse common.ArgParser[daemonOpts]) actionFactory {
 	return func(flags []dflag, run func(context.Context, *daemonOpts, []string) error) cli.ActionFunc {
-		return common.Action(flags, parseDaemonArgs, func(ctx context.Context, o *daemonOpts, args []string) error {
+		return common.Action(flags, parse, func(ctx context.Context, o *daemonOpts, args []string) error {
 			o.deps = deps
 			return run(ctx, o, args)
 		}, func(o *daemonOpts) bool { return o.JSON })

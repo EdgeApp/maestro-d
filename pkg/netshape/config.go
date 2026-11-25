@@ -2,9 +2,7 @@
 // network through the HTTP calls it holds. <home>/config.json lists the
 // hub's devices: each one's id, optional description, and optional pair of
 // traffic-shaping calls, one that sets the shape and one that resets it.
-// <home>/network.json, the older format, holds only the calls. maestro-d
-// fills in the shape's values and makes the call; it knows nothing about
-// the shaper behind it.
+// maestro-d fills in the shape's values and makes the configured HTTP request.
 package netshape
 
 import (
@@ -12,20 +10,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // ConfigFileName is the config's name in the daemon's home.
 const ConfigFileName = "config.json"
-
-// FileName is the older traffic-shaping-only config's name in the daemon's
-// home, read when there is no config.json.
-const FileName = "network.json"
 
 // Command names, as the config keys them and the steps are called.
 const (
@@ -80,8 +75,7 @@ type Call struct {
 }
 
 // Device holds one device's entry: its description, which device listings
-// report, and its two traffic-shaping calls, all optional. The JSON tags
-// are network.json's; config.json is read through hubDevice.
+// report, and its two traffic-shaping calls, all optional.
 type Device struct {
 	Description string `json:"-"`
 	// Capabilities is config.json's capabilities for the device: any JSON
@@ -95,85 +89,20 @@ type Device struct {
 // calls.
 func (d Device) Shapeable() bool { return d.Set != nil && d.Reset != nil }
 
-// Config is a host's device config, from either file.
+// Config is a host's device config, from config.json.
 type Config struct {
-	Devices map[string]Device `json:"devices"`
+	Devices map[string]Device
 	// Shared lists config.json's hub devices, in file order: the devices a
-	// hub shares. network.json has none.
-	Shared []string `json:"-"`
-	// AI is config.json's ai block, nil without one (network.json has
-	// none).
-	AI *AI `json:"-"`
+	// hub shares.
+	Shared []string
+	// AI is config.json's ai block, nil without one.
+	AI *AI
 	// InstallApp is config.json's installApp block, nil without one.
-	InstallApp *InstallApp `json:"-"`
+	InstallApp *InstallApp
 }
 
-// Source is where a daemon reads its device config. Config (--config) is
-// read as config.json and Legacy (--network-config) as network.json, each
-// with no fallback; otherwise Home/config.json is read when it exists, and
-// Home/network.json when it does not. Never both.
-type Source struct {
-	Config, Legacy, Home string
-}
-
-// Resolve names the file Load reads, and whether it is network.json.
-func (s Source) Resolve() (path string, legacy bool) {
-	switch {
-	case s.Config != "":
-		return s.Config, false
-	case s.Legacy != "":
-		return s.Legacy, true
-	}
-	path = filepath.Join(s.Home, ConfigFileName)
-	// Any answer but "does not exist" means config.json is there: a file
-	// that cannot be read is the error Load reports, not a fallback.
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		return path, false
-	}
-	return filepath.Join(s.Home, FileName), true
-}
-
-// Unread lists the <home> config files that exist but that Resolve
-// passes over. One may hold what its operator meant to be read: a
-// config.json beside a --network-config, or a network.json beside the
-// config.json that replaced it.
-func (s Source) Unread() []string {
-	path, _ := s.Resolve()
-	var out []string
-	for _, p := range []string{filepath.Join(s.Home, ConfigFileName), filepath.Join(s.Home, FileName)} {
-		if filepath.Clean(p) == filepath.Clean(path) {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// Load reads the file Resolve names, and returns its path.
-func (s Source) Load() (*Config, string, error) {
-	path, legacy := s.Resolve()
-	if legacy {
-		cfg, err := Load(path)
-		return cfg, path, err
-	}
-	cfg, err := LoadConfig(path)
-	return cfg, path, err
-}
-
-// Load reads and validates a network.json at path. A missing file is an
-// empty config. Any other problem is a *ConfigError.
-func Load(path string) (*Config, error) {
-	return load(path, Parse)
-}
-
-// LoadConfig reads and validates a config.json at path, like Load.
+// LoadConfig reads config.json. A missing file starts with an empty device list.
 func LoadConfig(path string) (*Config, error) {
-	return load(path, ParseConfig)
-}
-
-func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Config{}, nil
@@ -190,7 +119,7 @@ func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 	if err != nil {
 		return nil, &ConfigError{Path: path, Err: err}
 	}
-	cfg, err := parse(data)
+	cfg, err := ParseConfig(data)
 	if err != nil {
 		var ce *ConfigError
 		if errors.As(err, &ce) {
@@ -216,7 +145,7 @@ func decode(data []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if dec.More() {
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return errors.New("trailing data after the JSON object")
 	}
 	return nil
@@ -240,13 +169,19 @@ type hubDevice struct {
 // and trafficShaping needs both calls. The optional ai and installApp
 // blocks are validated too (ai.go, installapp.go).
 func ParseConfig(data []byte) (*Config, error) {
-	var file struct {
+	if !utf8.Valid(data) {
+		return nil, errors.New("device config must be valid UTF-8")
+	}
+	var file *struct {
 		HubDevices []hubDevice `json:"hubDevices"`
 		AI         *AI         `json:"ai"`
 		InstallApp *InstallApp `json:"installApp"`
 	}
 	if err := decode(data, &file); err != nil {
 		return nil, err
+	}
+	if file == nil {
+		return nil, errors.New("device config must be a JSON object")
 	}
 	if file.AI != nil {
 		if err := file.AI.validate(); err != nil {
@@ -281,26 +216,6 @@ func ParseConfig(data []byte) (*Config, error) {
 		cfg.Shared = append(cfg.Shared, id)
 	}
 	return cfg, nil
-}
-
-// Parse decodes and validates a network.json: {"devices": {id: {calls}}}.
-func Parse(data []byte) (*Config, error) {
-	var cfg Config
-	if err := decode(data, &cfg); err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(cfg.Devices))
-	for id := range cfg.Devices {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		d := cfg.Devices[id]
-		if err := validateCalls(d); err != nil {
-			return nil, &ConfigError{Device: id, Err: err}
-		}
-	}
-	return &cfg, nil
 }
 
 // Lookup returns a device's calls. ok is false when it has no entry.

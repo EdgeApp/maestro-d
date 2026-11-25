@@ -784,7 +784,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"resetTrafficShape": {Name: "resetTrafficShape", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Removes the device's network shape through the call its host's config.json (or older network.json) configures for it.", Fields: []FieldSpec{
+	"resetTrafficShape": {Name: "resetTrafficShape", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Removes the device's network shape through the call its host's config.json configures for it.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -957,7 +957,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "time", Type: "string", Doc: "The clock demo mode shows, H:MM (default 9:41)"},
 		{Key: "battery", Type: "*int", Doc: "The battery level demo mode shows, 0–100 (default 100)"},
 	}},
-	"setTrafficShape": {Name: "setTrafficShape", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.", Fields: []FieldSpec{
+	"setTrafficShape": {Name: "setTrafficShape", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the device's whole network shape through the call its host's config.json configures for it.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
