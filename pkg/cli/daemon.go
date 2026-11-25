@@ -451,7 +451,7 @@ func withArgs(flags []dflag, fn func(context.Context, *daemonOpts, []string) err
 
 // localDaemonAction gives the migration hint for flags removed from start and serve.
 func localDaemonAction(flags []dflag, fn func(context.Context, *daemonOpts, []string) error) cli.ActionFunc {
-	run := withArgs(flags, fn)
+	run := common.Action(flags, common.ConfigParser(parseDaemonArgs, daemonDeps), fn, func(o *daemonOpts) bool { return o.JSON })
 	return func(c *cli.Context) error {
 		for _, arg := range c.Args().Slice() {
 			key, _, _ := strings.Cut(arg, "=")
@@ -507,10 +507,8 @@ API (--http), or to attach a device up front:
 }
 
 var serveFlags = common.FlagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
-	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
-	common.StringFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
-		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
 })
 
 var daemonServeCommand = &cli.Command{
@@ -538,20 +536,19 @@ var daemonServeCommand = &cli.Command{
 			fmt.Fprintf(os.Stderr, "warning: cannot open daemon.log: %v\n", err)
 		}
 		defer logger.Close()
-		if err := common.CheckConfigFlags(&o.DeviceConfig, &o.NetworkConfig, o.explicit); err != nil {
+		if err := common.CheckConfigPath(o.DeviceConfig, o.explicit); err != nil {
 			return err
 		}
 		srv := daemon.New(daemon.Config{
 
-			Name:          o.Name,
-			HTTPAddr:      o.HTTPAddr,
-			Token:         o.Token,
-			IdleTimeout:   idle,
-			ReportsDir:    daemon.ReportsDir(o.Name),
-			DeviceConfig:  o.DeviceConfig,
-			NetworkConfig: o.NetworkConfig,
-			StartArgs:     os.Args[1:],
-			Ready:         os.Stdout,
+			Name:         o.Name,
+			HTTPAddr:     o.HTTPAddr,
+			Token:        o.Token,
+			IdleTimeout:  idle,
+			ReportsDir:   daemon.ReportsDir(o.Name),
+			DeviceConfig: o.DeviceConfig,
+			StartArgs:    os.Args[1:],
+			Ready:        os.Stdout,
 		}, daemonDeps())
 		if err := srv.Run(context.Background()); err != nil {
 			logger.Error("daemon exited: %v", err)

@@ -23,6 +23,7 @@ func TestE2E_HubStream(t *testing.T) {
 	e := newE2E(t)
 	homeA, homeB, homeC := filepath.Join(e.cwd, "home-a"), filepath.Join(e.cwd, "home-b"), filepath.Join(e.cwd, "home-c")
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-9"}
+	writeSharedMocks(t, homeB, "mock-1")
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-1"}
 	t.Cleanup(func() {
 		e.runEnv(envB, "maestro-d-hub", "stop")
@@ -39,7 +40,7 @@ func TestE2E_HubStream(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--share-device", "mock-1"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b"}, mesh...)...))
 	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--peer", b.HTTPAddr}, mesh...)...))
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + a.HTTPAddr, "MAESTRO_D_TOKEN=hs-tok"}
 	out := filepath.Join(e.cwd, "hub-stream.mp4")
