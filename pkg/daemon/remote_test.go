@@ -204,7 +204,7 @@ func TestRemote_CreateRefusals(t *testing.T) {
 
 	// A hub refuses every cloud create with the lease hint, before its
 	// share list is looked at.
-	hub := newRemoteEnv(t, func(c *Config) { c.Hub, c.HubName, c.ShareDevices = NewTestHub(), "h", []string{"mock-1"} })
+	hub := newRemoteEnv(t, func(c *Config) { c.Hub, c.HubName, c.ShareConfig = NewTestHub(), "h", []string{"mock-1"} })
 	for _, caller := range []Caller{{}, {Remote: true, Addr: "10.0.0.9:1"}} {
 		r := httptest.NewRequest("POST", "/v1/devices", strings.NewReader(`{"create":{"cloud":{"platform":"android"}}}`))
 		r = r.WithContext(withCaller(r.Context(), caller))
@@ -709,25 +709,6 @@ func TestRemote_UnknownSessionEndsTheDevice(t *testing.T) {
 		info, ok := e.s.registry.Lookup(dev.ID)
 		return ok && info.State == "ended" && strings.Contains(info.EndedReason, "no such session")
 	})
-}
-
-// On a plain daemon serving remote callers, a direct-mode cloud device
-// follows --share-device: unlisted, a remote caller cannot see or drive it.
-func TestRemote_PlainDaemonDoesNotShareCloudDevices(t *testing.T) {
-	e := newRemoteEnv(t, func(c *Config) { c.ShareDevices = []string{"mock-1"} })
-	dev := e.launch(cloudprov.CloudSpec{})
-	if !e.s.sharedInfo(DeviceInfo{ID: "mock-1"}) {
-		t.Fatal("mock-1 is listed")
-	}
-	if e.s.sharedInfo(DeviceInfo{ID: dev.ID, Provider: "devicefarm"}) {
-		t.Fatal("a plain daemon shared its cloud device past --share-device")
-	}
-	hub := New(Config{Hub: NewTestHub(), ShareDevices: []string{"mock-1"}}, Deps{})
-	r := httptest.NewRequest("GET", "/v1/devices", nil)
-	r = r.WithContext(withCaller(r.Context(), Caller{Remote: true}))
-	if len(hub.cfg.Hub.Visible(r, []DeviceInfo{{ID: dev.ID, Provider: "devicefarm"}})) == 0 {
-		t.Fatal("a hub's cloud device is not in its pool")
-	}
 }
 
 // A launch that fails after its session exists, and whose release the

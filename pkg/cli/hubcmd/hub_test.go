@@ -70,7 +70,7 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	t.Setenv("ANDROID_HOME", "/opt/android")
 	t.Setenv("MAESTRO_TEAM_ID", "TEAM123")
 	t.Setenv(daemon.EnvHubBin, "/opt/maestro-d/bin/maestro-d-hub")
-	o := hubFlags(t, "--name", "lab-a", "--listen", ":7433", "--share-device", "phone", "--share-tv", "Lab TV", "--token", "s3cret-client", "--peer-token", "s3cret-peer", "--no-mdns")
+	o := hubFlags(t, "--name", "lab-a", "--listen", ":7433", "--token", "s3cret-client", "--peer-token", "s3cret-peer", "--no-mdns")
 	if err := runServiceInstall(context.Background(), o, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestHubService_InstallPlistAndSecrets(t *testing.T) {
 	home := os.Getenv(daemon.EnvHome)
 	secrets := filepath.Join(home, "hub", "secrets")
 	for _, want := range []string{"/opt/maestro-d/bin/maestro-d-hub start --foreground --name lab-a --listen :7433",
-		"--no-mdns", "--share-device phone", "--share-tv Lab TV", "--token-file " + filepath.Join(secrets, "token"), "--peer-token-file " + filepath.Join(secrets, "peer-token")} {
+		"--no-mdns", "--token-file " + filepath.Join(secrets, "token"), "--peer-token-file " + filepath.Join(secrets, "peer-token")} {
 		if !strings.Contains(args, want) {
 			t.Errorf("ProgramArguments %q lack %q", args, want)
 		}

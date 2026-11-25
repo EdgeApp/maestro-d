@@ -313,10 +313,10 @@ func TestE2E_DeviceFarmPending(t *testing.T) {
 	fake.Hold("PENDING_CONCURRENCY")
 	cmd := exec.Command(e.bin, append([]string{"device", "create", "--provider", "devicefarm", "--platform", "android", "--name", "Google Pixel 8"}, d...)...)
 	cmd.Dir, cmd.Env = e.cwd, e.env(env...)
+	created := len(fake.CreatedSessions())
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	created := len(fake.CreatedSessions())
 	deadline := time.Now().Add(10 * time.Second)
 	for len(fake.CreatedSessions()) == created && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
@@ -324,14 +324,20 @@ func TestE2E_DeviceFarmPending(t *testing.T) {
 	time.Sleep(time.Second)
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
-	killed := time.Now()
-	for !allStopped(fake) && time.Since(killed) < 5*time.Second {
+	// The provider acknowledges Stop before it settles final device minutes
+	// and removes the launch from the daemon's ledger.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(filepath.Join(e.home, "run", "cloud.json"))
+		if allStopped(fake) && os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("(d): cleanup after 5 s: all stopped=%t, ledger=%v", allStopped(fake), ledgerRefs(t, e))
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	logLedger(t, "(d) client killed", fake)
-	if !allStopped(fake) {
-		t.Fatalf("(d): a session outlived its killed client by 5 s")
-	}
 	fake.Hold("")
 
 	// (e) The provider ends a held session: the next step answers
@@ -400,7 +406,16 @@ func TestE2E_DeviceFarmIdle(t *testing.T) {
 	e.mustOK(env, "device", "list", "--daemon", "dfidle")
 	events := watchEvents(t, e, "dfidle")
 	dev := dfLaunch(t, e, env, "--platform", "ios", "--name", "Apple iPhone 15", "--idle-release", "3s", "--daemon", "dfidle")
-	start := time.Now()
+	// The idle interval is already running when the create command returns.
+	started := func(id string) time.Time {
+		t.Helper()
+		session, ok := fake.Session(id)
+		if !ok || session.Started.IsZero() {
+			t.Fatalf("no provider launch time for %s", id)
+		}
+		return session.Started
+	}
+	start := started(dev.ProviderRef)
 	for released(events(), dev.ID) == nil && time.Since(start) < 15*time.Second {
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -408,7 +423,7 @@ func TestE2E_DeviceFarmIdle(t *testing.T) {
 	if ev == nil || ev.Message != "idle" || ev.DeviceMinutes == nil {
 		t.Fatalf("(a) no idle release: %+v", events())
 	}
-	t.Logf("(a) %s: device.released reason=%s deviceMinutes=%+v, %s after the create answered (the idle clock starts at launch)",
+	t.Logf("(a) %s: device.released reason=%s deviceMinutes=%+v, %s after the session started",
 		dev.ID, ev.Message, *ev.DeviceMinutes, time.Since(start).Round(100*time.Millisecond))
 	if took := time.Since(start); took < 2*time.Second {
 		t.Fatalf("(a) released after %s, before its 3 s", took)
@@ -422,8 +437,8 @@ func TestE2E_DeviceFarmIdle(t *testing.T) {
 	// exits only once the device is released.
 	idleEnv := append(append([]string{}, env...), "MAESTRO_D_IDLE_TIMEOUT=2")
 	dev = dfLaunch(t, e, idleEnv, "--platform", "android", "--name", "Google Pixel 8", "--idle-release", "6s", "--daemon", "dfidle2")
-	start = time.Now()
-	time.Sleep(4 * time.Second)
+	start = started(dev.ProviderRef)
+	time.Sleep(time.Until(start.Add(4 * time.Second)))
 	t.Setenv(daemon.EnvHome, e.home)
 	if info, _ := daemon.LiveInfo("dfidle2"); info == nil {
 		t.Fatalf("(b) the daemon exited at 4 s with a device held")
