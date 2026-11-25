@@ -98,7 +98,7 @@ func wantErrCode(t *testing.T, err error, code Code) *Error {
 }
 
 func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), ShareConfig: []string{"mock-1", "mock-2"}})
 	env.lease(t, "mock-1")
 	ctx := context.Background()
 	if _, err := env.local.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -125,7 +125,7 @@ func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
 }
 
 func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: NewTestHub(), ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: NewTestHub(), ShareConfig: []string{"mock-1", "mock-2"}})
 	ctx := context.Background()
 	env.lease(t, "mock-1")
 	if _, err := env.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -138,7 +138,7 @@ func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
 		t.Fatalf("unix socket on a hub: %v", err)
 	}
 	// AllowRemoteShell lets remote callers through.
-	allowed := newCallerEnv(t, Config{Hub: NewTestHub(), ShareDevices: []string{"mock-1"}, AllowRemoteShell: true})
+	allowed := newCallerEnv(t, Config{Hub: NewTestHub(), ShareConfig: []string{"mock-1"}, AllowRemoteShell: true})
 	allowed.lease(t, "mock-1")
 	if _, err := allowed.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
 }
 
 func TestCaller_RemoteHostDirectoriesRefusedAtTheRoute(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), ShareConfig: []string{"mock-1", "mock-2"}})
 	env.lease(t, "mock-1")
 	ctx := context.Background()
 	if _, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -185,7 +185,7 @@ func TestCaller_RemoteHostDirectoriesRefusedAtTheRoute(t *testing.T) {
 }
 
 func TestCaller_RemoteAttachRefusals(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, ShareConfig: []string{"mock-1", "mock-2"}})
 	ctx := context.Background()
 	cases := map[string]AttachConfig{
 		"web":           {Platform: "web"},
@@ -228,8 +228,8 @@ func TestCaller_EnvironmentStaysOnTheHost(t *testing.T) {
 		cfg     Config
 		imports bool
 	}{
-		{"hub", Config{Hub: NewTestHub(), HTTPAddr: ":7433", Token: "t", ShareDevices: []string{"mock-1", "mock-2"}}, false},
-		{"hub with pass-env", Config{Hub: NewTestHub(), ShareDevices: []string{"mock-1"}, HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
+		{"hub", Config{Hub: NewTestHub(), HTTPAddr: ":7433", Token: "t", ShareConfig: []string{"mock-1", "mock-2"}}, false},
+		{"hub with pass-env", Config{Hub: NewTestHub(), ShareConfig: []string{"mock-1"}, HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
 		{"loopback serve", Config{HTTPAddr: "127.0.0.1:7433"}, true},
 		{"socket only", Config{}, true},
 	} {
@@ -383,7 +383,7 @@ func TestCallerHelpers(t *testing.T) {
 // A unix-socket caller attaches with Appium as today: the route never
 // applies the remote check to it.
 func TestCaller_LocalAppiumAttach(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, ShareConfig: []string{"mock-1", "mock-2"}})
 	ctx := context.Background()
 	var got AttachConfig
 	next := env.s.deps.NewDriver

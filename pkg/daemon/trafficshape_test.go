@@ -15,9 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
 // shaperServer records every call a daemon's traffic shaper makes.
@@ -47,19 +50,16 @@ func (ss *shaperServer) calls() []string {
 	return append([]string(nil), ss.reqs...)
 }
 
-// writeNetworkConfig configures mock-1 (only) against the shaper server.
-func writeNetworkConfig(t *testing.T, path, base string) {
+// writeShapingConfig configures mock-1 (only) against the shaper server.
+func writeShapingConfig(t *testing.T, path, base string) {
 	t.Helper()
-	cfg := map[string]any{"devices": map[string]any{"mock-1": map[string]any{
+	cfg := map[string]any{"mock-1": map[string]any{
 		"setTrafficShape": map[string]any{"method": "POST", "url": base + "/shape/${deviceId}",
 			"body":            map[string]any{"mbit": "${mbit}", "lossPct": "${lossPct}", "latencyMs": "${latencyMs}", "jitterMs": "${jitterMs}", "direction": "${direction}"},
 			"directionValues": map[string]string{"download": "down", "upload": "up"}},
 		"resetTrafficShape": map[string]any{"method": "DELETE", "url": base + "/shape/${deviceId}"},
-	}}}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	}}
+	data := hubDevicesJSON(t, cfg)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,8 @@ func writeNetworkConfig(t *testing.T, path, base string) {
 func TestServer_TrafficShaping(t *testing.T) {
 	env := newTestEnv(t, 0)
 	ss := newShaperServer(t)
-	cfgPath := filepath.Join(Home(), "network.json")
-	writeNetworkConfig(t, cfgPath, ss.URL)
+	cfgPath := filepath.Join(Home(), "config.json")
+	writeShapingConfig(t, cfgPath, ss.URL)
 	ctx := context.Background()
 
 	info := env.attach("mock-1")
@@ -125,7 +125,7 @@ func TestServer_TrafficShaping(t *testing.T) {
 
 	// The file is read on every call: an edit takes effect, and a broken
 	// file is USAGE naming it.
-	if err := os.WriteFile(cfgPath, []byte(`{"devices":`), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"hubDevices":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	res, err = env.c.Command(ctx, "mock-1", "setTrafficShape", nil, true)
@@ -146,14 +146,14 @@ func TestServer_TrafficShaping(t *testing.T) {
 	}
 }
 
-func TestServer_NetworkConfigFlag(t *testing.T) {
+func TestServer_DeviceConfigFlag(t *testing.T) {
 	env := newTestEnv(t, 0)
 	ss := newShaperServer(t)
 	path := filepath.Join(t.TempDir(), "shapes.json")
-	writeNetworkConfig(t, path, ss.URL)
-	env.s.cfg.NetworkConfig = path
-	if got, legacy := env.s.deviceConfig().Resolve(); got != path || !legacy {
-		t.Fatalf("path = %s, legacy %v", got, legacy)
+	writeShapingConfig(t, path, ss.URL)
+	env.s.cfg.DeviceConfig = path
+	if got := DeviceConfigPath(env.s.cfg.DeviceConfig); got != path {
+		t.Fatalf("path = %s", got)
 	}
 	env.attach("mock-1")
 	if _, err := env.c.Command(context.Background(), "mock-1", "resetTrafficShape", nil, true); err != nil {
@@ -191,7 +191,7 @@ func TestServer_SessionEndResetIsBounded(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	writeNetworkConfig(t, filepath.Join(Home(), "network.json"), srv.URL)
+	writeShapingConfig(t, filepath.Join(Home(), "config.json"), srv.URL)
 	env.attach("mock-1")
 	if _, err := env.c.Command(context.Background(), "mock-1", "setTrafficShape", nil, true); err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func (d *airplaneDriver) got() []bool {
 
 // A listing logs an unusable config once per problem, not once per poll.
 func TestWarnShapingOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "network.json")
+	path := filepath.Join(t.TempDir(), "config.json")
 	if !warnShapingOnce(path, "mode 0644") || warnShapingOnce(path, "mode 0644") {
 		t.Fatal("the same problem logged twice")
 	}
@@ -263,7 +263,7 @@ func TestServer_AttachWaitsForTheDetachCleanup(t *testing.T) {
 		mu.Unlock()
 	}))
 	t.Cleanup(srv.Close)
-	writeNetworkConfig(t, filepath.Join(Home(), "network.json"), srv.URL)
+	writeShapingConfig(t, filepath.Join(Home(), "config.json"), srv.URL)
 	ctx := context.Background()
 	env.attach("mock-1")
 	if _, err := env.c.Command(ctx, "mock-1", "setTrafficShape", map[string]any{"lossPct": 100}, true); err != nil {
@@ -409,7 +409,7 @@ func TestServer_DeviceDescription(t *testing.T) {
 	}
 
 	// A broken file lists no descriptions.
-	if err := os.WriteFile(cfgPath, []byte(`{"devices":`), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"hubDevices":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if d, err := env.c.Device(ctx, "mock-2"); err != nil || d.Description != "" {
@@ -533,5 +533,33 @@ func TestServer_AVDEntryShapesTheRunningEmulator(t *testing.T) {
 	sh.Alias = avdEntryID(devs[0])
 	if _, err := sh.Device(); err != nil {
 		t.Errorf("shaper: %v", err)
+	}
+}
+
+func TestLegacyNetworkConfigIgnored(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	path := filepath.Join(Home(), "network.json")
+	legacy := `{"devices":{"mock-1":{"setTrafficShape":{"method":"POST","url":"https://example.test"},"resetTrafficShape":{"method":"DELETE","url":"https://example.test"}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(Home(), "daemon.log")
+	if err := logger.Init(logPath); err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+	s := New(Config{}, Deps{})
+	s.logDeviceConfig()
+	devices := []DeviceInfo{{ID: "mock-1"}}
+	for range 3 {
+		s.ApplyDeviceConfig(devices)
+		_, err := s.trafficShaper("mock-1").Device()
+		if devices[0].TrafficShaping || !errors.Is(err, netshape.ErrNotConfigured) {
+			t.Fatalf("legacy config shaped device: %+v %v", devices, err)
+		}
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(log), "network.json is no longer read (4.0)") != 1 {
+		t.Fatalf("migration log %s: %v", log, err)
 	}
 }

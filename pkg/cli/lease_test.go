@@ -136,7 +136,7 @@ func leaseHubListing(t *testing.T, extra *atomic.Bool) (*daemon.Server, string) 
 			return devs
 		},
 	}
-	s := daemon.New(daemon.Config{Name: "lh", Hub: &hubd.Server{}, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), ShareDevices: []string{"mock-1", "mock-7"}}, deps)
+	s := daemon.New(daemon.Config{Name: "lh", Hub: &hubd.Server{}, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), ShareConfig: []string{"mock-1", "mock-7"}}, deps)
 	hs := httptest.NewServer(s.TCPHandler())
 	t.Cleanup(hs.Close)
 	return s, hs.URL
