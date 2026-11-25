@@ -12,7 +12,7 @@ export type { ClaimOptions, ConnectOptions, DeviceAttachOptions, LeaseOptions, R
 export { MaestroDevice, buildValue } from './device.js'
 export type { CallOptions, CommandMethod, CommandMethods, FlowOptions, RunOptions, Scalar, ScreenshotOptions } from './device.js'
 export { MaestroError, isMaestroError, codeFromStatus, EXIT_CODES, HTTP_STATUS } from './errors.js'
-export { binaryPath, PACKAGE_BY_TARGET } from './binary.js'
+export { binaryPath, hubBinary, PACKAGE_BY_TARGET } from './binary.js'
 export { fetchBundleOutputs, pack, packFlow, upload, uploadBundle, uploadPath } from './pack.js'
 export type { BundleManifest, FlowBundle, PackFlowOptions, PackUnit } from './pack.js'
 export { resolveName, home, runDir, liveInfo, readInfo, ENV_NAME, ENV_HOME, ENV_DEVICE, ENV_BIN, DEFAULT_NAME } from './runfiles.js'

@@ -76,6 +76,7 @@ export type ErrorCode =
   | 'INTERNAL'
   | 'FORBIDDEN'
   | 'PEER_UNAVAILABLE'
+  | 'HUB_RUNNING'
   | 'HUB_NAME_TAKEN'
   | 'HUB_VERSION'
   | 'LEASE_REQUIRED'

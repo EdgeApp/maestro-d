@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"syscall"
+
 	"time"
 )
 
@@ -78,6 +78,16 @@ func RunRoot() string { return filepath.Join(Home(), "run") }
 // RunDir is the run directory for a daemon name.
 func RunDir(name string) string { return filepath.Join(RunRoot(), name) }
 
+// HubRunDir holds the singleton hub's record, separate from all named daemons.
+func HubRunDir() string { return filepath.Join(Home(), "hub", "run") }
+
+func (cfg Config) RunDir() string {
+	if cfg.HubProcess {
+		return HubRunDir()
+	}
+	return RunDir(cfg.Name)
+}
+
 // SocketPath is the unix socket path for a daemon name. macOS limits unix
 // socket paths to 104 bytes, so a long home directory falls back to a
 // short path under the temp dir; daemon.json records whichever was used.
@@ -107,23 +117,32 @@ func ReportsDir(name string) string { return filepath.Join(RunDir(name), reports
 // ReadInfo reads daemon.json. os.ErrNotExist when the daemon never
 // started or cleaned up.
 func ReadInfo(name string) (*Info, error) {
-	data, err := os.ReadFile(InfoPath(name))
+	return readInfoAt(RunDir(name))
+}
+
+func readInfoAt(dir string) (*Info, error) {
+	path := filepath.Join(dir, infoFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var info Info
 	if err := json.Unmarshal(data, &info); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", InfoPath(name), err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &info, nil
 }
 
 // WriteInfo writes daemon.json atomically.
 func WriteInfo(info *Info) error {
-	if err := os.MkdirAll(RunDir(info.Name), 0o700); err != nil {
+	dir := info.RunDir
+	if dir == "" {
+		dir = RunDir(info.Name)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return atomicWriteJSON(InfoPath(info.Name), info)
+	return atomicWriteJSON(filepath.Join(dir, infoFile), info)
 }
 
 // RemoveRunFiles deletes the socket, daemon.json and devices.json. The
@@ -142,15 +161,7 @@ func PIDAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	if err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	return !procExited(pid)
+	return processAlive(pid)
 }
 
 // procOS and procStat are seams over runtime.GOOS and reading
@@ -266,15 +277,38 @@ func ReadDevicesFile(name string) ([]DeviceInfo, error) {
 	return devs, nil
 }
 
+// otherProcesses returns every live registry in this home except the caller's.
+func otherProcesses(selfDir string) []DaemonEntry {
+	named, _ := ListDaemons()
+	var others []DaemonEntry
+	for _, d := range named {
+		if d.Alive && RunDir(d.Name) != selfDir {
+			others = append(others, d)
+		}
+	}
+	dir := HubRunDir()
+	if dir != selfDir {
+		if info, err := readInfoAt(dir); err == nil && PIDAlive(info.PID) {
+			others = append(others, DaemonEntry{Name: info.Name, Info: info, Alive: true, Devices: readDevicesAt(dir)})
+		}
+	}
+	return others
+}
+
 // FindDeviceOwner scans every other live daemon's registry for a device
 // that is attached there. It returns the owning daemon's entry or nil.
 func FindDeviceOwner(deviceID, exceptName string) *DaemonEntry {
-	daemons, _ := ListDaemons()
+	return findDeviceOwner(deviceID, RunDir(exceptName))
+}
+
+func (cfg Config) FindDeviceOwner(deviceID string) *DaemonEntry {
+	return findDeviceOwner(deviceID, cfg.RunDir())
+}
+
+func findDeviceOwner(deviceID, exceptDir string) *DaemonEntry {
+	daemons := otherProcesses(exceptDir)
 	for i := range daemons {
 		d := &daemons[i]
-		if d.Name == exceptName || !d.Alive {
-			continue
-		}
 		for _, dev := range d.Devices {
 			if dev.ID == deviceID && dev.Attached {
 				return d

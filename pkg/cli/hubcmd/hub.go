@@ -1,16 +1,11 @@
 package hubcmd
 
-// hub.go: `maestro-d hub start|stop|status|service`. A hub is a named
-// daemon (`hub` unless --daemon names another) that shares this machine's
-// devices with clients on the network: it listens on every interface,
-// needs a token, treats every TCP caller as remote, and leases its devices
-// (see pkg/daemon/leases.go). It has no idle timeout. Hubs link into a
-// mesh (pkg/hub): they find each other with mDNS once, at launch, and dial
-// every --peer; any hub then serves every hub's devices.
+// The standalone hub runtime and its local administration commands.
 
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,22 +21,17 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
+	"github.com/devicelab-dev/maestro-runner/pkg/fsage"
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
 
-// DefaultHubDaemon is the daemon name a hub runs under.
+// DefaultHubDaemon identifies the standalone server in its runtime record.
 const DefaultHubDaemon = "hub"
 
-// hubDaemonFlag names the hub's daemon. Unlike --daemon elsewhere it does
-// not read MAESTRO_D: a shell set up for one local daemon still starts the
-// hub under its own name.
-var hubDaemonFlag = common.StringFlag("daemon", "Daemon name the hub runs under (default hub)", nil,
-	func(o *daemonOpts, v string) { o.Name = v }, "n")
-
-var hubStartFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
+var hubStartFlags = common.FlagSet(outputFlags, []dflag{
 	common.StringFlag("name", "The hub's name in the mesh: [a-z0-9-]{1,32} (default: the short host name, lowercased)", []string{"MAESTRO_D_HUB_NAME"},
 		func(o *daemonOpts, v string) { o.hub.name = v }),
 	common.StringFlag("listen", "Address of the client and peer listener (default :7433, every interface)", []string{"MAESTRO_D_LISTEN"},
@@ -98,23 +88,20 @@ var hubStartFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dfl
 		func(o *daemonOpts, v int) { o.StartTimeout = v }),
 })
 
-var hubStopFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
+var hubStopFlags = common.FlagSet(outputFlags, []dflag{
 	common.IntFlag("timeout", "Seconds to wait for the hub to exit (default 30)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 })
 
-var hubStatusFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, targetFlags)
+var hubStatusFlags = outputFlags
 
-func Command(deps func() daemon.Deps) *cli.Command {
+func Commands(deps func() daemon.Deps) []*cli.Command {
 	withArgs := actions(deps)
-	return &cli.Command{
-		Name:  "hub",
-		Usage: "Share this machine's devices with clients on the network, in a mesh of hubs (hub start|stop|status|service)",
-		Subcommands: []*cli.Command{
-			{
-				Name:      "start",
-				Usage:     "Start a hub: a daemon that shares this machine's devices, leases them to clients and links with other hubs",
-				ArgsUsage: " ",
-				Description: common.FlagHelp(`A hub listens on every interface (--listen, default :7433) and needs a
+	return []*cli.Command{
+		{
+			Name:      "start",
+			Usage:     "Start a hub: a daemon that shares this machine's devices, leases them to clients and links with other hubs",
+			ArgsUsage: " ",
+			Description: common.FlagHelp(`A hub listens on every interface (--listen, default :7433) and needs a
 client token and a peer token. Every TCP caller is remote, loopback
 included: it may not use this machine's paths or runShell (unless
 --allow-remote-shell), and sessions import none of this machine's
@@ -128,42 +115,28 @@ and dials every hub it found plus every --peer; after that it never
 searches again. Each hub passes its peers on, so the mesh fills from one
 seed. Any hub lists and drives every hub's devices: <id>@<hub>.
 
-  maestro-d hub start --name lab-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
-  maestro-d hub start --no-mdns --peer https://hub-b.example.com:7433 --token T --peer-token P --tls-cert hub.pem --tls-key hub-key.pem`, hubStartFlags),
-				SkipFlagParsing: true,
-				Action:          withArgs(hubStartFlags, runHubStart),
-			},
-			{
-				Name:            "stop",
-				Usage:           "Stop the hub: its leases end, its devices are detached and its peer links close",
-				ArgsUsage:       " ",
-				Description:     common.FlagHelp("", hubStopFlags),
-				SkipFlagParsing: true,
-				Action: withArgs(hubStopFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-					hubName(o)
-					return common.StopDaemons(ctx, []string{o.Name}, "hub", o.StartTimeout, o.JSON, false)
-				}),
-			},
-			{
-				Name:      "status",
-				Usage:     "Show the hub's name and version, and each peer's address, link state, RTT and device count",
-				ArgsUsage: " ",
-				Description: common.FlagHelp(`Without --target-hub it asks the local hub over its unix socket.
-
-  maestro-d hub status
-  maestro-d hub status --target-hub=hub-b.local --token T --json`, hubStatusFlags),
-				SkipFlagParsing: true,
-				Action:          withArgs(hubStatusFlags, runHubStatus),
-			},
-			serviceCommand(withArgs),
+  maestro-d-hub start --name lab-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
+  maestro-d-hub start --no-mdns --peer https://hub-b.example.com:7433 --token T --peer-token P --tls-cert hub.pem --tls-key hub-key.pem`, hubStartFlags),
+			SkipFlagParsing: true,
+			Action:          withArgs(hubStartFlags, runHubStart),
 		},
-	}
-}
-
-// hubName defaults the daemon name to hub when --daemon was not given.
-func hubName(o *daemonOpts) {
-	if !o.explicit["daemon"] {
-		o.Name = DefaultHubDaemon
+		{
+			Name:            "stop",
+			Usage:           "Stop the hub: its leases end, its devices are detached and its peer links close",
+			ArgsUsage:       " ",
+			Description:     common.FlagHelp("", hubStopFlags),
+			SkipFlagParsing: true,
+			Action:          withArgs(hubStopFlags, runHubStop),
+		},
+		{
+			Name:            "status",
+			Usage:           "Show the hub's name and version, and each peer's address, link state, RTT and device count",
+			ArgsUsage:       " ",
+			Description:     common.FlagHelp("Show this home's hub over its unix socket.", hubStatusFlags),
+			SkipFlagParsing: true,
+			Action:          withArgs(hubStatusFlags, runHubStatus),
+		},
+		serviceCommand(withArgs),
 	}
 }
 
@@ -222,7 +195,7 @@ func hubPeerToken(o *daemonOpts) (string, error) {
 
 // checkHubFlags validates hub start's flags and fills the defaults.
 func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
-	hubName(o)
+	o.Name = DefaultHubDaemon
 	if o.HTTPAddr == "" {
 		o.HTTPAddr = fmt.Sprintf(":%d", hub.DefaultPort)
 	}
@@ -315,7 +288,7 @@ func configShare(o *daemonOpts) ([]string, error) {
 // tokens, which travel in its environment so they are in no process
 // listing.
 func hubChildArgs(o *daemonOpts) []string {
-	args := []string{"hub", "start", "--foreground", "--daemon", o.Name, "--name", o.hub.name, "--listen", o.HTTPAddr}
+	args := []string{"start", "--foreground", "--name", o.hub.name, "--listen", o.HTTPAddr}
 	abs := func(p string) string {
 		a, _ := filepath.Abs(p)
 		return a
@@ -394,9 +367,28 @@ func redactArgs(args []string) []string {
 	return out
 }
 
-func runHubStart(ctx context.Context, o *daemonOpts, args []string) error {
-	hubName(o)
-	if !o.hub.foreground && ServiceInstalled(o.Name) {
+func runHubStart(ctx context.Context, o *daemonOpts, args []string) (startErr error) {
+	if o.hub.foreground {
+		defer func() {
+			if e, ok := startErr.(*daemon.Error); ok {
+				fmt.Fprintf(os.Stdout, "FAILED pid=%d code=%s %s\n", os.Getpid(), e.Code, e.Message)
+			}
+		}()
+	}
+	o.Name = DefaultHubDaemon
+	// An initial probe catches a starting hub before its ready record exists.
+	probe, err := fsage.TryHubLock(daemon.Home())
+	if errors.Is(err, fsage.ErrLocked) {
+		e := daemon.Errorf(daemon.CodeHubRunning, "a hub is already running in %s", daemon.Home())
+		return e
+	}
+	if err != nil {
+		return daemon.WrapErr(daemon.CodeDaemonUnavailable, err)
+	}
+	fsage.UnlockFile(probe)
+	warnLegacyService()
+
+	if !o.hub.foreground && ServiceInstalled() {
 		// The service owns the hub process: start it through launchd.
 		return kickstartService(ctx, o)
 	}
@@ -407,20 +399,12 @@ func runHubStart(ctx context.Context, o *daemonOpts, args []string) error {
 	if o.hub.foreground {
 		return serveHub(o, token, peerToken)
 	}
-	if c, err := daemon.Dial(o.Name); err != nil {
-		return err
-	} else if c != nil {
-		if c.Info.Hub == "" {
-			return daemon.Errorf(daemon.CodeUsage, "daemon %q is running and is not a hub; stop it first (maestro-d stop --daemon %s)", o.Name, o.Name)
-		}
-		return printHub(o, c.Info, "already running")
-	}
 	timeout := 30 * time.Second
 	if o.StartTimeout > 0 {
 		timeout = time.Duration(o.StartTimeout) * time.Second
 	}
 	c, err := daemon.Spawn(ctx, o.Name, daemon.SpawnOptions{
-		Args:         hubChildArgs(o),
+		Hub: true, Args: hubChildArgs(o),
 		Env:          []string{"MAESTRO_D_TOKEN=" + token, "MAESTRO_D_PEER_TOKEN=" + peerToken},
 		StartTimeout: timeout,
 		Log: func(format string, args ...any) {
@@ -476,7 +460,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	if err != nil {
 		return err
 	}
-	runDir := daemon.RunDir(o.Name)
+	runDir := daemon.HubRunDir()
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return daemon.WrapErr(daemon.CodeDaemonUnavailable, err)
 	}
@@ -484,6 +468,9 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		fmt.Fprintf(os.Stderr, "warning: cannot open daemon.log: %v\n", err)
 	}
 	defer logger.Close()
+	if dir := filepath.Join(daemon.Home(), "hub", "daemons"); isDirectory(dir) {
+		logger.Warn("legacy per-daemon hub state at %s is ignored", dir)
+	}
 	deps, err := hubDeps(o)
 	if err != nil {
 		return err
@@ -502,7 +489,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return err
 	}
 	srv := daemon.New(daemon.Config{
-		KeepRunDir:       ServiceInstalled,
+		HubProcess:       true,
 		Name:             o.Name,
 		HTTPAddr:         o.HTTPAddr,
 		Token:            token,
@@ -519,13 +506,13 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		Advertise:        o.hub.advertise,
 		AllowRemoteShell: o.hub.remoteShell,
 		PassEnv:          o.PassEnv,
-		ReportsDir:       daemon.ReportsDir(o.Name),
-		DeviceConfig:     o.DeviceConfig,
-		NetworkConfig:    o.NetworkConfig,
-		StartArgs:        redactArgs(os.Args[1:]),
-		Ready:            os.Stdout,
-		Mesh:             mesh,
-		CloudMaxDevices:  o.hub.cloudMax,
+
+		DeviceConfig:    o.DeviceConfig,
+		NetworkConfig:   o.NetworkConfig,
+		StartArgs:       redactArgs(os.Args[1:]),
+		Ready:           os.Stdout,
+		Mesh:            mesh,
+		CloudMaxDevices: o.hub.cloudMax,
 	}, deps)
 	if err := srv.Run(context.Background()); err != nil {
 		logger.Error("hub exited: %v", err)
@@ -582,6 +569,8 @@ func hubDeviceFarm(opts devicefarm.Options) (*devicefarm.Provider, error) {
 // Device Farm's default concurrency per account.
 const defaultCloudMaxDevices = 2
 
+func isDirectory(dir string) bool { st, err := os.Stat(dir); return err == nil && st.IsDir() }
+
 // providerNames lists deps' cloud providers, sorted, for the hub's hello.
 func providerNames(deps daemon.Deps) []string {
 	var out []string
@@ -592,21 +581,38 @@ func providerNames(deps daemon.Deps) []string {
 	return out
 }
 
-// hubClient connects hub status to its hub: --target-hub, else the local
-// hub's unix socket (never spawning one).
+// hubClient reads the local hub record without starting a server.
 func hubClient(ctx context.Context, o *daemonOpts) (*daemon.Client, error) {
-	if o.Target != "" {
-		return common.ConnectTarget(o.Target, o.CAFile, o.Token, o.Verbose)
-	}
-	hubName(o)
-	c, err := daemon.Dial(o.Name)
+	c, err := daemon.DialHub()
 	if err != nil {
 		return nil, err
 	}
 	if c == nil {
-		return nil, daemon.Errorf(daemon.CodeDaemonUnavailable, "hub %q is not running (maestro-d hub start)", o.Name)
+		return nil, daemon.Errorf(daemon.CodeDaemonUnavailable, "hub %q is not running (maestro-d-hub start)", o.Name)
 	}
 	return c, nil
+}
+
+func runHubStop(ctx context.Context, o *daemonOpts, _ []string) error {
+	c, err := hubClient(ctx, o)
+	if err != nil {
+		return err
+	}
+	if _, err = c.Hub(ctx); err != nil {
+		return err
+	}
+	if err = c.Shutdown(ctx); err != nil {
+		return err
+	}
+	if !daemon.WaitForExit(c.Info, startTimeout(o)) {
+		return daemon.Errorf(daemon.CodeDaemonUnavailable, "hub pid %d did not exit", c.Info.PID)
+	}
+	if o.JSON {
+		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "stopped": []string{DefaultHubDaemon}})
+	} else {
+		fmt.Println("hub stopped")
+	}
+	return nil
 }
 
 func runHubStatus(ctx context.Context, o *daemonOpts, args []string) error {

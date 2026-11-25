@@ -60,9 +60,18 @@ export function pidAlive(pid: number): boolean {
 
 /** daemon.json for the name, or undefined when there is none. */
 export function readInfo(name: string): DaemonInfo | undefined {
+  return readRecord(infoPath(name))
+}
+
+/** The local hub's recorded socket may be outside its run directory. */
+export function readHubInfo(): DaemonInfo | undefined {
+  return readRecord(path.join(home(), 'hub', 'run', 'daemon.json'))
+}
+
+function readRecord(file: string): DaemonInfo | undefined {
   let data: string
   try {
-    data = fs.readFileSync(infoPath(name), 'utf8')
+    data = fs.readFileSync(file, 'utf8')
   } catch {
     return undefined
   }

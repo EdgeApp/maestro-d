@@ -20,6 +20,7 @@ const repoRoot = path.resolve(here, '..', '..', '..')
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-df-'))
 const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
+const hubBin = process.env.MAESTRO_D_TEST_HUB_BIN ?? path.join(path.dirname(bin), 'maestro-d-hub')
 const fake = new FakeDeviceFarm()
 const execFileAsync = promisify(execFile)
 
@@ -28,7 +29,10 @@ let md
 
 before(async () => {
   if (!process.env.MAESTRO_D_TEST_BIN) {
-    execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+    execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
+  }
+  if (!process.env.MAESTRO_D_TEST_BIN && !process.env.MAESTRO_D_TEST_HUB_BIN) {
+    execFileSync('go', ['build', '-o', hubBin, './cmd/maestro-d-hub'], { cwd: repoRoot, stdio: 'inherit' })
   }
   const url = await fake.start()
   // The daemon this file spawns inherits this environment: the fake's
@@ -227,7 +231,7 @@ describe('hub mode', () => {
   // Asynchronously: hub-b's start check calls the fake, which runs in this
   // process's event loop.
   const start = async (name, extra) => {
-    const { stdout } = await execFileAsync(bin, ['hub', 'start', '--daemon', `jsdf-${name}`, '--name', `hub-${name}`, '--listen', '127.0.0.1:0',
+    const { stdout } = await execFileAsync(hubBin, ['start', '--name', `hub-${name}`, '--listen', '127.0.0.1:0',
       '--no-mdns', '--token', 'jsdf-tok', '--peer-token', 'jsdf-peer', '--json', ...extra], { env: hubEnv(name) })
     return JSON.parse(stdout).daemon.httpAddr
   }
@@ -249,7 +253,7 @@ describe('hub mode', () => {
 
   after(async () => {
     for (const name of ['b', 'a']) {
-      await execFileAsync(bin, ['hub', 'stop', '--daemon', `jsdf-${name}`], { env: hubEnv(name) }).catch(() => undefined)
+      await execFileAsync(hubBin, ['stop'], { env: hubEnv(name) }).catch(() => undefined)
     }
   })
 

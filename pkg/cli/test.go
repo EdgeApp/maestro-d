@@ -16,9 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloud"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
 	appiumdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/appium"
 	cdpdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/browser/cdp"
@@ -72,6 +74,9 @@ Examples:
   # Custom output directory
   maestro-runner test --output ./my-reports --flatten flows/`,
 	Flags: []cli.Flag{
+		&cli.StringFlag{Name: "target-hub", Usage: "Run the flows on a leased device on a hub (--target-hub[=HOST[:PORT]])", EnvVars: []string{"MAESTRO_D_HUB"}},
+		&cli.StringFlag{Name: "token", Usage: "Bearer token for the target hub", EnvVars: []string{"MAESTRO_D_TOKEN"}},
+		&cli.StringFlag{Name: "ca", Usage: "Trust this PEM certificate for the target hub", EnvVars: []string{"MAESTRO_D_CA"}},
 		// Configuration
 		&cli.StringFlag{
 			Name:  "config",
@@ -672,6 +677,16 @@ func runTest(c *cli.Context) error {
 		return c.StringSlice(name)
 	}
 
+	if getString("target-hub") != "" {
+		// A remote test uses the device's lease and the driver on its hub.
+		// Reject local driver, browser and boot controls before opening any files.
+		for _, flag := range []string{"appium-url", "appium-session-file", "caps", "new-command-timeout", "headed", "browser", "user-data-dir", "window-size", "start-emulator", "start-simulator", "auto-start-emulator", "shutdown-after", "boot-timeout"} {
+			if c.IsSet(flag) {
+				return common.FinishErr(daemon.Errorf(daemon.CodeUsage, "--%s is unavailable with test --target-hub", flag), false)
+			}
+		}
+	}
+
 	// Parse environment variables
 	env := parseEnvVars(getStringSlice("env"))
 
@@ -815,6 +830,21 @@ func runTest(c *cli.Context) error {
 		}
 	}
 
+	if target := getString("target-hub"); target != "" {
+		ctx, cancel := common.SignalContext()
+		defer cancel()
+		opts := daemonOpts{Target: target, Token: getString("token"), CAFile: getString("ca"), Verbose: cfg.Verbose}
+		opts.Attach = hubTestAttachConfig(cfg, getString("artifacts"))
+		if c.IsSet("driver") {
+			opts.Attach.Driver = cfg.Driver
+		}
+		err := runHubTest(ctx, cfg, opts)
+		var remoteErr *daemon.Error
+		if errors.As(err, &remoteErr) {
+			return common.FinishErr(remoteErr, false)
+		}
+		return err
+	}
 	return executeTest(cfg)
 }
 
@@ -1047,18 +1077,8 @@ func executeTest(cfg *RunConfig) error {
 		fmt.Printf("  %s⚠%s Warning: failed to generate HTML report: %v\n", color(colorYellow), color(colorReset), err)
 	}
 
-	junitGenerated := true
-	if err := report.GenerateJUnit(cfg.OutputDir); err != nil {
-		junitGenerated = false
-		fmt.Printf("  %s⚠%s Warning: failed to generate JUnit report: %v\n", color(colorYellow), color(colorReset), err)
-	}
-
+	junitGenerated, allureGenerated := generateCIReports(cfg.OutputDir)
 	allurePath := filepath.Join(cfg.OutputDir, "allure-results")
-	allureGenerated := true
-	if err := report.GenerateAllure(cfg.OutputDir); err != nil {
-		allureGenerated = false
-		fmt.Printf("  %s⚠%s Warning: failed to generate Allure report: %v\n", color(colorYellow), color(colorReset), err)
-	}
 
 	// Report result to cloud provider (if detected)
 	if cfg.CloudProvider != nil {
@@ -1123,6 +1143,22 @@ func executeTest(cfg *RunConfig) error {
 	}
 
 	return nil
+}
+
+func generateCIReports(dir string) (junitGenerated, allureGenerated bool) {
+	junitGenerated = true
+	if err := report.GenerateJUnit(dir); err != nil {
+		junitGenerated = false
+		fmt.Printf("  %s⚠%s Warning: failed to generate JUnit report: %v\n", color(colorYellow), color(colorReset), err)
+	}
+
+	allureGenerated = true
+	if err := report.GenerateAllure(dir); err != nil {
+		allureGenerated = false
+		fmt.Printf("  %s⚠%s Warning: failed to generate Allure report: %v\n", color(colorYellow), color(colorReset), err)
+	}
+
+	return junitGenerated, allureGenerated
 }
 
 // validateAndParseFlows validates and parses all flow files.

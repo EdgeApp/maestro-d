@@ -12,7 +12,7 @@ import { MaestroError } from './errors.js'
 import { MaestroDevice, anySignal } from './device.js'
 import { currentLease, dropLease, findLease, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
 import { uploadPath } from './pack.js'
-import { ENV_DEVICE, resolveName } from './runfiles.js'
+import { ENV_DEVICE, readHubInfo, pidAlive, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
 import { Transport } from './transport.js'
 import type {
@@ -60,6 +60,8 @@ export interface ConnectOptions extends SpawnOptions {
    * hub is another machine. Default `$MAESTRO_D_HUB`.
    */
   hub?: string | true
+  /** Connect through this home’s local hub socket. Never starts a process. */
+  hubSocket?: boolean
   /**
    * Connect to a daemon's TCP listener (`http://host:7788`) instead of the
    * local unix socket. Nothing is spawned in this mode. Unlike `hub`, calls
@@ -208,6 +210,14 @@ export class MaestroD {
    * background when it is not running (pass `spawn: false` to refuse).
    */
   static async connect(opts: ConnectOptions = {}): Promise<MaestroD> {
+    if (opts.hubSocket) {
+      const info = readHubInfo()
+      if (!info || !pidAlive(info.pid)) throw MaestroError.of('DAEMON_UNAVAILABLE', 'the local hub is not running')
+      const transport = new Transport({ socketPath: info.socketPath })
+      const local = new MaestroD(info.name, transport, false, 'unix:hub/run', info, opts.signal)
+      await local.hubStatus()
+      return local
+    }
     const name = resolveName(opts.name)
     const hub = opts.hub ?? (opts.url ? undefined : process.env[ENV_HUB] || undefined)
     if (hub !== undefined || opts.url) {
