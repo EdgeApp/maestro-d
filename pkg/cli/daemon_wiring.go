@@ -159,6 +159,9 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	if v, ok := cfg.Extra["androidTcpForward"].(bool); ok {
 		rc.AndroidTCPForward = v
 	}
+	if v, ok := cfg.Extra["noFlutterFallback"].(bool); ok {
+		rc.NoFlutterFallback = v
+	}
 	if v, ok := cfg.Extra["capsFile"].(string); ok {
 		rc.CapsFile = v
 	}

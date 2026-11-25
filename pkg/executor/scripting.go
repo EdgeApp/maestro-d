@@ -895,3 +895,29 @@ func (se *ScriptEngine) expandSelector(sel *flow.Selector) *flow.Selector {
 	}
 	return &expanded
 }
+
+// applyFlowVariables resolves appId against the invocation before applying the flow header.
+func (se *ScriptEngine) applyFlowVariables(cfg *flow.Config) {
+	// Apply flow config variables (takes precedence over CLI env)
+	// Expand the appId first so that `appId: ${APP_ID}` resolves using CLI -e values
+	if cfg.AppID != "" {
+		expanded := se.ExpandVariables(cfg.AppID)
+		cfg.AppID = expanded
+	}
+	if appID := cfg.EffectiveAppID(); appID != "" {
+		se.SetVariable("APP_ID", appID)
+	}
+	// Expand flow config env values to support ${VAR || "default"} syntax
+	for k, v := range cfg.Env {
+		se.SetVariable(k, se.ExpandVariables(v))
+	}
+}
+
+// FlowEnvironment resolves variables for the client packing a flow's file references.
+func FlowEnvironment(cfg flow.Config, invocation map[string]string) map[string]string {
+	script := NewScriptEngine()
+	defer script.Close()
+	script.SetVariables(invocation)
+	script.applyFlowVariables(&cfg)
+	return script.variables
+}

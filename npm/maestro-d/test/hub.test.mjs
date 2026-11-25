@@ -75,7 +75,7 @@ const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
 process.env.MAESTRO_D_BIN = bin
 
 before(async () => {
-  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
   server = http.createServer(handler)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   addr = `127.0.0.1:${server.address().port}`
@@ -221,7 +221,7 @@ describe('error codes', () => {
     COMMAND_FAILED: [1, 422], USAGE: [2, 400], DAEMON_UNAVAILABLE: [3, 503], DEVICE_ERROR: [4, 502], BUSY: [5, 409],
     DEVICE_EXTERNAL: [5, 409], DEVICE_IN_USE: [5, 409], DEVICE_NOT_FOUND: [4, 404], DEVICE_NOT_ATTACHED: [2, 404],
     INTERRUPTED: [130, 499], INTERNAL: [4, 500], FORBIDDEN: [2, 403], PEER_UNAVAILABLE: [3, 503], HUB_NAME_TAKEN: [5, 409],
-    HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409], LEASE_NOT_STARTED: [5, 409], CAPTURE_UNAVAILABLE: [4, 503],
+    HUB_RUNNING: [2, 409], HUB_VERSION: [5, 409], LEASE_REQUIRED: [5, 409], LEASE_EXPIRED: [5, 409], LEASE_NOT_STARTED: [5, 409], CAPTURE_UNAVAILABLE: [4, 503],
     UNSUPPORTED: [2, 501],
   }
   test('EXIT_CODES and HTTP_STATUS agree with the daemon for every code', () => {

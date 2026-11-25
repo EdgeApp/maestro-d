@@ -71,7 +71,7 @@ func slowCommandEnv(t *testing.T, delay, grace time.Duration) (*Server, string) 
 	t.Helper()
 	t.Setenv(EnvHome, t.TempDir())
 	var n int32
-	s := New(Config{Name: "idem", ReportsDir: t.TempDir(), HTTPAddr: "0.0.0.0:7433", Token: "t"}, testDeps(&n, delay))
+	s := New(Config{Name: "idem", ReportsDir: t.TempDir(), Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"}, testDeps(&n, delay))
 	if grace > 0 {
 		s.idemGrace = grace
 	}

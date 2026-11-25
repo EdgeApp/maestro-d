@@ -11,6 +11,7 @@ type Hub interface {
 	Bind(*Server, Config, Deps)
 	Start(context.Context)
 	Routes(*http.ServeMux)
+	TCPCaller(addr string, clientOutputs bool) Caller
 	Gate(LeaseMode, http.HandlerFunc) http.HandlerFunc
 	Visible(*http.Request, []DeviceInfo) []DeviceInfo
 	EventsHandler(http.ResponseWriter, *http.Request)

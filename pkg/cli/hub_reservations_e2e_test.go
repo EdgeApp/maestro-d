@@ -27,8 +27,8 @@ func startTwoHubs(t *testing.T, e *e2e, prefix string, extraA ...string) (daemon
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", prefix+"-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", prefix+"-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "res-tok", "--peer-token", "res-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -41,9 +41,9 @@ func startTwoHubs(t *testing.T, e *e2e, prefix string, extraA ...string) (daemon
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append(append([]string{"hub", "start", "--daemon", prefix + "-a", "--name", "hub-a",
+	a := started(e.runEnv(envA, append(append([]string{"maestro-d-hub", "start", "--name", "hub-a",
 		"--share-device", "mock-1", "--share-device", "mock-2"}, extraA...), mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", prefix + "-b", "--name", "hub-b", "--peer", a.HTTPAddr,
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr,
 		"--share-device", "mock-3"}, mesh...)...))
 	return a, b, envA, envB
 }
@@ -132,10 +132,10 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	e := newE2E(t)
 	home := filepath.Join(e.cwd, "restart-home")
 	env := []string{daemon.EnvHome + "=" + home, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
-	t.Cleanup(func() { e.runEnv(env, "hub", "stop", "--daemon", "rst") })
+	t.Cleanup(func() { e.runEnv(env, "maestro-d-hub", "stop") })
 	start := func() daemon.Info {
 		t.Helper()
-		r := e.runEnv(env, "hub", "start", "--daemon", "rst", "--name", "hub-r", "--share-device", "mock-1", "--share-device", "mock-2",
+		r := e.runEnv(env, "maestro-d-hub", "start", "--name", "hub-r", "--share-device", "mock-1", "--share-device", "mock-2",
 			"--listen", "127.0.0.1:0", "--no-mdns", "--token", "rst-tok", "--peer-token", "rst-peer", "--json")
 		var out struct {
 			Daemon daemon.Info `json:"daemon"`
@@ -161,10 +161,10 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := e.runEnv(env, "hub", "stop", "--daemon", "rst"); r.code != 0 {
+	if r := e.runEnv(env, "maestro-d-hub", "stop"); r.code != 0 {
 		t.Fatalf("hub stop: %s%s", r.stdout, r.stderr)
 	}
-	path := filepath.Join(home, "hub", "daemons", "rst", "scheduled-leases.json")
+	path := filepath.Join(home, "hub", "scheduled-leases.json")
 	fi, err := os.Stat(path)
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("%s: %v %v", path, fi, err)

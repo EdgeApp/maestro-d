@@ -295,7 +295,7 @@ func (s *Server) launchCloud(ctx context.Context, spec cloudprov.CloudSpec, rese
 			s.events.Publish(Event{Type: "device.allocating", Device: id, Message: state})
 		},
 		Created: func(ref string) error {
-			return addLedgerEntry(CloudEntry{Daemon: s.cfg.Name, PID: pid, ID: id, Provider: spec.Provider, ProviderRef: ref, StartedAt: nowRFC3339()})
+			return addLedgerEntry(CloudEntry{Daemon: s.cfg.Name, Hub: s.cfg.HubProcess, PID: pid, ID: id, Provider: spec.Provider, ProviderRef: ref, StartedAt: nowRFC3339()})
 		},
 		Abandoned: func(ref string) {
 			if err := removeLedgerEntry(ref); err != nil {
@@ -706,7 +706,7 @@ func (s *Server) selfRelease() {
 	}
 	pid := os.Getpid()
 	for _, e := range entries {
-		if e.Daemon != s.cfg.Name || e.PID == pid {
+		if e.Daemon != s.cfg.Name || e.Hub != s.cfg.HubProcess || e.PID == pid {
 			continue
 		}
 		if _, ok := s.deps.Providers[e.Provider]; !ok {

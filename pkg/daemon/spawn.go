@@ -3,16 +3,20 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
 	"time"
 )
 
 // SpawnOptions control how EnsureDaemon starts a daemon that isn't running.
 type SpawnOptions struct {
+	// Hub starts the standalone hub binary and waits for its dedicated record.
+	Hub bool
 	// NoSpawn fails with DAEMON_UNAVAILABLE instead of starting one.
 	NoSpawn bool
 	// IdleTimeout in seconds; 0 keeps the daemon's default, -1 disables.
@@ -88,18 +92,37 @@ func Spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 
 func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error) {
 	bin, err := Binary()
+	dir := RunDir(name)
+	if opts.Hub {
+		bin, err = HubExecutable()
+		dir = HubRunDir()
+	}
 	if err != nil {
 		return nil, WrapErr(CodeDaemonUnavailable, err)
 	}
-	if err := os.MkdirAll(RunDir(name), 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, WrapErr(CodeDaemonUnavailable, err)
 	}
-	logPath := StartupLogPath(name)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	logPath := filepath.Join(dir, startupLogFile)
+	mode := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if opts.Hub {
+		mode = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	logFile, err := os.OpenFile(logPath, mode, 0o600)
 	if err != nil {
 		return nil, WrapErr(CodeDaemonUnavailable, err)
 	}
 	defer logFile.Close()
+	var startOffset int64
+	if opts.Hub {
+		// Detached starts in one home may overlap. Each appends diagnostics;
+		// the parent accepts only its own child PID after this offset.
+		st, err := logFile.Stat()
+		if err != nil {
+			return nil, err
+		}
+		startOffset = st.Size()
+	}
 
 	args := []string{"serve", "--daemon", name}
 	switch {
@@ -125,7 +148,7 @@ func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 	cmd.Stdin = nil
 	cmd.Env = append(os.Environ(), opts.Env...)
 	// Own session so a Ctrl-C in the caller's terminal doesn't kill it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	detachProcess(cmd)
 	if opts.Log != nil {
 		opts.Log("Starting daemon %q: %s %s", name, bin, strings.Join(args, " "))
 	}
@@ -144,7 +167,13 @@ func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 	for {
 		select {
 		case werr := <-exited:
-			if e := failedLine(logPath); e != nil {
+			var failure *Error
+			if opts.Hub {
+				failure = readStartupFailure(logPath, startOffset, fmt.Sprintf("FAILED pid=%d code=", pid))
+			} else {
+				failure = failedLine(logPath)
+			}
+			if e := failure; e != nil {
 				return nil, e
 			}
 			return nil, Errorf(CodeDaemonUnavailable, "daemon %q (pid %d) exited during startup: %v\n%s",
@@ -154,7 +183,7 @@ func spawn(ctx context.Context, name string, opts SpawnOptions) (*Client, error)
 			return nil, WrapErr(CodeInterrupted, ctx.Err())
 		case <-time.After(100 * time.Millisecond):
 		}
-		if info, _ := ReadInfo(name); info != nil && info.PID == pid {
+		if info, _ := readInfoAt(dir); info != nil && info.PID == pid {
 			c := NewUnixClient(info.SocketPath)
 			c.Name = name
 			c.Info = info
@@ -188,12 +217,24 @@ func WaitForExit(info *Info, timeout time.Duration) bool {
 // failedLine reads a child's "FAILED code=CODE message" startup line (a
 // hub whose peers refused it), so the parent exits with the same code.
 func failedLine(path string) *Error {
-	data, err := os.ReadFile(path)
+	return readStartupFailure(path, 0, "FAILED code=")
+}
+
+func readStartupFailure(path string, offset int64, prefix string) *Error {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		return nil
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		rest, ok := strings.CutPrefix(line, "FAILED code=")
+		rest, ok := strings.CutPrefix(line, prefix)
 		if !ok {
 			continue
 		}
