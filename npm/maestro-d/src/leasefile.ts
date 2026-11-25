@@ -58,8 +58,10 @@ export function loadLeases(): LeaseRecord[] {
   } catch {
     return []
   }
+  if (!Array.isArray(recs)) return []
   const cutoff = Date.now() - STALE_AFTER_MS
   return recs.filter((r) => {
+    if (!r || typeof r.device !== 'string' || typeof r.id !== 'string' || typeof r.hub !== 'string') return false
     const t = r.expiresAt ? Date.parse(r.expiresAt) : NaN
     return Number.isNaN(t) || t >= cutoff
   })
