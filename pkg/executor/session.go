@@ -392,6 +392,22 @@ func (s *Session) ExecuteAll(ctx context.Context, steps []flow.Step, continueOnE
 // onFlowStart hooks, steps and onFlowComplete hooks run inside the session
 // (sharing variables), and each nested step lands in SubSteps.
 func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
+	return s.runFlow(ctx, f, nil)
+}
+
+// TestFlowOptions are the invocation settings for a full Maestro test on a leased device.
+type TestFlowOptions struct {
+	Env       map[string]string `json:"env,omitempty"`
+	StepDelay int               `json:"stepDelay,omitempty"`
+	Artifacts ArtifactMode      `json:"artifacts,omitempty"`
+}
+
+// RunTestFlow executes a top-level test with its own variables and report entries.
+func (s *Session) RunTestFlow(ctx context.Context, f flow.Flow, opts TestFlowOptions) *StepOutcome {
+	return s.runFlow(ctx, f, &opts)
+}
+
+func (s *Session) runFlow(ctx context.Context, f flow.Flow, opts *TestFlowOptions) *StepOutcome {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ended() {
@@ -399,10 +415,10 @@ func (s *Session) RunFlow(ctx context.Context, f flow.Flow) *StepOutcome {
 	}
 	ctx, call, done := s.beginPolicy(ctx)
 	defer done()
-	return s.applyDenial(s.withOutputs(s.runFlowLocked(ctx, f), call), call)
+	return s.applyDenial(s.withOutputs(s.runFlowLocked(ctx, f, opts), call), call)
 }
 
-func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
+func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow, opts *TestFlowOptions) *StepOutcome {
 	fr := s.fr
 	name := f.Config.Name
 	if name == "" && f.SourcePath != "" {
@@ -411,7 +427,7 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 	if name == "" {
 		name = "inline"
 	}
-	if f.Config.AppID != "" {
+	if opts == nil && f.Config.AppID != "" {
 		f.Config.AppID = fr.script.ExpandVariables(f.Config.AppID)
 	}
 	desc := "runFlow: " + name
@@ -431,7 +447,11 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 				result = &core.CommandResult{Success: false, Error: fmt.Errorf("driver panic: %v", r), Message: fmt.Sprintf("driver panic: %v", r)}
 			}
 		}()
-		result = s.runFlowSteps(f)
+		if opts != nil {
+			result, fr.subCommands = s.runTestCase(ctx, f, idx, *opts)
+		} else {
+			result = s.runFlowSteps(f)
+		}
 	}()
 	fr.depth--
 	restore()
@@ -442,6 +462,39 @@ func (s *Session) runFlowLocked(ctx context.Context, f flow.Flow) *StepOutcome {
 		result = &core.CommandResult{Success: false, Error: fmt.Errorf("no result"), Message: "no result"}
 	}
 	return s.finishStep(ctx, idx, desc, string(flow.StepRunFlow), false, result, start, panicked, subs, report.CommandArtifacts{})
+}
+
+// runTestCase uses the same top-level dispatcher as a local test. The session
+// supplies the device and caller policy, and keeps responsibility for cleanup.
+func (s *Session) runTestCase(ctx context.Context, f flow.Flow, idx int, opts TestFlowOptions) (*core.CommandResult, []report.Command) {
+	_, details, err := report.BuildSkeleton([]flow.Flow{f}, report.BuilderConfig{})
+	if err != nil {
+		return &core.CommandResult{Error: err, Message: err.Error()}, nil
+	}
+	parent := s.fr
+	script := NewScriptEngine()
+	defer script.Close()
+	script.SetVariables(parent.script.variables)
+	script.policy = parent.script.policy
+	cfg := parent.config
+	cfg.Env, cfg.StepDelay, cfg.Artifacts = opts.Env, opts.StepDelay, opts.Artifacts
+	detail := &details[0]
+	detail.ID = fmt.Sprintf("test-%d", idx)
+	runner := FlowRunner{
+		ctx: ctx, flow: f, detail: detail, driver: parent.driver, config: cfg,
+		indexWriter: parent.indexWriter, totalFlows: 1, shaper: parent.shaper,
+		undo: parent.undo, rec: stepRecording{inReport: true},
+	}
+	defer func() { parent.undo = runner.undo }()
+	run := runner.runWithScript(script)
+	if run.Status != report.StatusPassed {
+		message := run.Error
+		if message == "" {
+			message = string(run.Status)
+		}
+		return &core.CommandResult{Error: fmt.Errorf("%s", message), Message: message}, detail.Commands
+	}
+	return &core.CommandResult{Success: true}, detail.Commands
 }
 
 // runFlowSteps runs a flow's hooks and steps through the nested dispatcher.

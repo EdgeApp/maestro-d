@@ -7,6 +7,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,13 +52,13 @@ func newE2E(t *testing.T) *e2e {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "maestro-d")
-	args := []string{"build", "-o", bin, "."}
+	args := []string{"build", "-o", dir + string(os.PathSeparator), "./cmd/maestro-d", "./cmd/maestro-d-hub"}
 	coverDir := os.Getenv(envE2ECoverDir)
 	if coverDir != "" {
 		if err := os.MkdirAll(coverDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		args = []string{"build", "-cover", "-o", bin, "."}
+		args = []string{"build", "-cover", "-o", dir + string(os.PathSeparator), "./cmd/maestro-d", "./cmd/maestro-d-hub"}
 	}
 	build := exec.Command("go", args...)
 	build.Dir = root
@@ -119,7 +120,12 @@ func (e *e2e) run(args ...string) result {
 // runEnv is run with extra environment variables.
 func (e *e2e) runEnv(extra []string, args ...string) result {
 	e.t.Helper()
-	cmd := exec.Command(e.bin, args...)
+	bin := e.bin
+	if len(args) > 0 && args[0] == "maestro-d-hub" {
+		bin = filepath.Join(filepath.Dir(e.bin), "maestro-d-hub")
+		args = args[1:]
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = e.cwd
 	cmd.Env = e.env(extra...)
 	var out, errb bytes.Buffer
@@ -132,7 +138,7 @@ func (e *e2e) runEnv(extra []string, args ...string) result {
 	} else if err != nil {
 		e.t.Fatalf("run %v: %v", args, err)
 	}
-	e.t.Logf("$ maestro-d %s\n%s%s(exit %d)", strings.Join(args, " "), out.String(), errb.String(), code)
+	e.t.Logf("$ %s %s\n%s%s(exit %d)", filepath.Base(bin), strings.Join(args, " "), out.String(), errb.String(), code)
 	return result{stdout: out.String(), stderr: errb.String(), code: code}
 }
 
@@ -568,19 +574,19 @@ func TestE2E_Leases(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No token, or a token file others can read: refused before starting.
-	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh"); r.code != 2 || !strings.Contains(r.stderr, "needs --token") {
+	if r := e.runEnv(mocks, "maestro-d-hub", "start"); r.code != 2 || !strings.Contains(r.stderr, "needs --token") {
 		t.Fatalf("no token: exit %d\n%s", r.code, r.stderr)
 	}
-	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "chmod 600") {
+	if r := e.runEnv(mocks, "maestro-d-hub", "start", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "chmod 600") {
 		t.Fatalf("readable token file: exit %d\n%s", r.code, r.stderr)
 	}
 	_ = os.Chmod(tokenFile, 0o600)
-	if r := e.runEnv(mocks, "hub", "start", "--daemon", "lh", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "needs --peer-token") {
+	if r := e.runEnv(mocks, "maestro-d-hub", "start", "--token-file", tokenFile); r.code != 2 || !strings.Contains(r.stderr, "needs --peer-token") {
 		t.Fatalf("no peer token: exit %d\n%s", r.code, r.stderr)
 	}
 	mesh := []string{"--name", "lh-hub", "--no-mdns", "--peer-token", "lease-peer", "--lease-max", "1h", "--lease-max", "mock-2=8s",
 		"--share-device", "mock-1", "--share-device", "mock-2"}
-	r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, mesh...)...)
+	r := e.runEnv(mocks, append([]string{"maestro-d-hub", "start", "--listen", "127.0.0.1:0", "--token-file", tokenFile, "--json"}, mesh...)...)
 	if r.code != 0 {
 		t.Fatalf("hub start: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
@@ -596,7 +602,7 @@ func TestE2E_Leases(t *testing.T) {
 			t.Fatalf("the token reached the hub's command line: %v", started.Daemon.StartArgs)
 		}
 	}
-	if r := e.runEnv(mocks, append([]string{"hub", "start", "--daemon", "lh", "--token", "lease-token"}, mesh...)...); r.code != 0 || !strings.Contains(r.stdout, "already running") {
+	if r := e.runEnv(mocks, append([]string{"maestro-d-hub", "start", "--token", "lease-token"}, mesh...)...); r.code != 2 || !strings.Contains(r.stderr, "HUB_RUNNING") {
 		t.Fatalf("second hub start: exit %d\n%s", r.code, r.stdout)
 	}
 	hub := []string{"MAESTRO_D_HUB=" + addr, "MAESTRO_D_TOKEN=lease-token"}
@@ -740,17 +746,23 @@ func TestE2E_Leases(t *testing.T) {
 	}
 	e.ok("release", "--device", "mock-2", "--target-hub="+addr, "--token", "lease-token")
 
-	// Over the hub's unix socket the CLI needs a lease the same way.
-	r = e.runEnv(mocks, "tapOn", "Local", "--daemon", "lh", "--device", "mock-2")
-	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeLeaseRequired {
-		t.Fatalf("unix socket without a lease: exit %d\n%s", r.code, r.stderr)
+	// The hub's recorded unix socket enforces leases for local device commands too.
+	local := daemon.NewUnixClient(started.Daemon.SocketPath)
+	ctx := context.Background()
+	if _, err := local.Command(ctx, "mock-2", "tapOn", "Local", true); !isCode(err, daemon.CodeLeaseRequired) {
+		t.Fatalf("local command without lease: %v", err)
 	}
-	e.okEnv(mocks, "lease", "--daemon", "lh", "--device", "mock-2")
-	r = e.runEnv(mocks, "tapOn", "Local", "--daemon", "lh", "--device", "mock-2")
-	if r.code != 0 || !strings.Contains(leaseFile(e.home), "unix:lh") {
-		t.Fatalf("unix socket: exit %d\n%s\n%s", r.code, r.stderr, leaseFile(e.home))
+	grant, err := local.AcquireLease(ctx, daemon.LeaseRequest{Device: "mock-2", Attach: &daemon.AttachConfig{Platform: "mock"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	e.ok("release", "--all", "--daemon", "lh")
+	local.SetLease("mock-2", grant.Lease.ID)
+	if _, err = local.Command(ctx, "mock-2", "tapOn", "Local", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = local.ReleaseLease(ctx, grant.Lease.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	// Reservations: reserve records one; before its start commands carry it
 	// and get LEASE_NOT_STARTED, and another home cannot claim it; after it,
@@ -805,11 +817,11 @@ func TestE2E_Leases(t *testing.T) {
 	// ...and a plain daemon still attaches without a lease.
 	e.ok("tapOn", "Plain", "--device", "mock-1", "--platform", "mock", "--target-hub="+plain, "--token", "plain-token")
 
-	r = e.ok("hub", "stop", "--daemon", "lh")
+	r = e.ok("maestro-d-hub", "stop")
 	if !strings.Contains(r.stdout, "stopped") {
 		t.Fatalf("hub stop: %s", r.stdout)
 	}
-	e.fails(3, "hub", "stop", "--daemon", "lh")
+	e.fails(3, "maestro-d-hub", "stop")
 }
 
 func regexpMatch(pattern, s string) bool {

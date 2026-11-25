@@ -219,6 +219,17 @@ func TestHousekeepLoopSweepsTheHome(t *testing.T) {
 	writeFile(t, blob, "x")
 	ageTree(t, blob, 2*hkDay)
 
+	hubDir := HubRunDir()
+	liveReport := filepath.Join(hubDir, "reports", "dev", "live")
+	idleReport := filepath.Join(hubDir, "reports", "dev", "idle")
+	for _, dir := range []string{liveReport, idleReport} {
+		writeFile(t, filepath.Join(dir, "report.json"), "{}")
+		ageTree(t, dir, 8*hkDay)
+	}
+	devices, _ := json.Marshal([]DeviceInfo{{ID: "dev", ReportDir: liveReport, Attached: true}})
+	writeFile(t, filepath.Join(hubDir, devicesFile), string(devices))
+	info, _ := json.Marshal(Info{PID: os.Getpid()})
+	writeFile(t, filepath.Join(hubDir, infoFile), string(info))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { (&Server{}).housekeep(ctx); close(done) }()
@@ -229,6 +240,9 @@ func TestHousekeepLoopSweepsTheHome(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let the ticker fire once more
 	cancel()
 	<-done
+	if sweepRunDirs && (present(idleReport) || !present(liveReport)) {
+		t.Error("periodic sweep did not preserve only the live hub report")
+	}
 	if present(blob) {
 		t.Error("the housekeeping loop never swept the old blob")
 	}

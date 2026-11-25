@@ -6,6 +6,7 @@ package cli
 // credentials, and (from M4) cloud leases.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm/dftest"
 )
@@ -39,8 +41,8 @@ func startDFHubs(t *testing.T, extraB ...string) *dfHubs {
 	h.envB = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-b"), "MAESTRO_D_MOCK_DEVICES=mock-b", "MAESTRO_D_TEST_MACHINE=machine-b",
 		"AWS_SHARED_CREDENTIALS_FILE="+creds)
 	t.Cleanup(func() {
-		e.runEnv(h.envB, "hub", "stop", "--daemon", "dfhub-b")
-		e.runEnv(h.envA, "hub", "stop", "--daemon", "dfhub-a")
+		e.runEnv(h.envB, "maestro-d-hub", "stop")
+		e.runEnv(h.envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "df-tok", "--peer-token", "df-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -53,13 +55,13 @@ func startDFHubs(t *testing.T, extraB ...string) *dfHubs {
 		}
 		return out.Daemon
 	}
-	h.a = started(e.runEnv(h.envA, append([]string{"hub", "start", "--daemon", "dfhub-a", "--name", "hub-a", "--share-device", "mock-a"}, mesh...)...))
-	h.b = started(e.runEnv(h.envB, append(append([]string{"hub", "start", "--daemon", "dfhub-b", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm", "--share-device", "mock-b"}, extraB...), mesh...)...))
+	h.a = started(e.runEnv(h.envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a", "--share-device", "mock-a"}, mesh...)...))
+	h.b = started(e.runEnv(h.envB, append(append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", h.a.HTTPAddr, "--devicefarm", "--share-device", "mock-b"}, extraB...), mesh...)...))
 	h.client = append(append([]string{}, aws...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c"), "MAESTRO_D_TEST_MACHINE=machine-a",
 		"MAESTRO_D_HUB="+h.a.HTTPAddr, "MAESTRO_D_TOKEN=df-tok")
 	// Wait for the link: hub status through a names b, linked.
 	for i := 0; i < 50; i++ {
-		r := e.runEnv(h.client, "hub", "status", "--json")
+		r := e.runEnv(h.envA, "maestro-d-hub", "status", "--json")
 		var st daemon.HubStatusResult
 		if json.Unmarshal([]byte(r.stdout), &st) == nil && len(st.Hub.Peers) == 1 && st.Hub.Peers[0].State == "linked" {
 			if strings.Join(st.Hub.Peers[0].Cloud, ",") != "devicefarm" {
@@ -126,7 +128,7 @@ func TestE2E_HubDeviceFarmLocations(t *testing.T) {
 		t.Fatalf("catalog at a: exit %d\n%s", r.code, r.stderr)
 	}
 	// b's own status lists its provider and cap.
-	r = e.runEnv(h.envB, "hub", "status", "--daemon", "dfhub-b", "--json")
+	r = e.runEnv(h.envB, "maestro-d-hub", "status", "--json")
 	var st daemon.HubStatusResult
 	if json.Unmarshal([]byte(r.stdout), &st) != nil || len(st.Hub.Cloud) != 1 || st.Hub.Cloud[0].MaxDevices != 2 {
 		t.Fatalf("b's status: %s%s", r.stdout, r.stderr)
@@ -167,7 +169,7 @@ func TestE2E_HubDeviceFarmLease(t *testing.T) {
 	if d := listed.Devices[0]; d.ID != dev || d.Location != daemon.LocationCloud || d.Hub != "hub-b" || d.Provider != "devicefarm" || d.Available {
 		t.Fatalf("listed: %+v", d)
 	}
-	r = e.runEnv(h.client, "hub", "status", "--json")
+	r = e.runEnv(h.envA, "maestro-d-hub", "status", "--json")
 	if !strings.Contains(r.stdout, `"cloud"`) {
 		t.Fatalf("hub status: %s", r.stdout)
 	}
@@ -260,17 +262,13 @@ func TestE2E_HubDeviceFarmRefusals(t *testing.T) {
 	}
 	// device create with a cloud spec on a hub: FORBIDDEN with the lease
 	// hint, for a remote client and on the hub's own machine.
-	for _, env := range [][]string{h.client, h.envB} {
-		args := []string{"device", "create", "--provider", "devicefarm", "--platform", "android"}
-		if strings.Contains(strings.Join(env, " "), "MAESTRO_D_HUB=") {
-			args = append(args, "--target-hub="+h.b.HTTPAddr)
-		} else {
-			args = append(args, "--daemon", "dfhub-b")
-		}
-		r := e.runEnv(env, args...)
-		if r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeForbidden || !strings.Contains(r.stderr, "lease --location cloud") {
-			t.Fatalf("create on a hub: exit %d\n%s", r.code, r.stderr)
-		}
+	args := []string{"device", "create", "--provider", "devicefarm", "--platform", "android", "--target-hub=" + h.b.HTTPAddr}
+	if r := e.runEnv(h.client, args...); r.code == 0 || envelopeCode(t, r.stderr) != daemon.CodeForbidden {
+		t.Fatalf("create on a hub: %s", r.stderr)
+	}
+	local := daemon.NewUnixClient(h.b.SocketPath)
+	if _, err := local.CreateDevice(context.Background(), daemon.BootRequest{Platform: "android", Create: &daemon.CreateSpec{Cloud: &cloudprov.CloudSpec{Provider: "devicefarm"}}}); !isCode(err, daemon.CodeForbidden) {
+		t.Fatalf("local create: %v", err)
 	}
 	// A hub refuses to start with a credentials file others can read.
 	loose := filepath.Join(t.TempDir(), "creds")
@@ -278,20 +276,20 @@ func TestE2E_HubDeviceFarmRefusals(t *testing.T) {
 	if err := os.Chmod(loose, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+	r := e.runEnv(append(append([]string{}, h.envB...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c")), "maestro-d-hub", "start", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
 		"--peer-token", "y", "--devicefarm", "--devicefarm-credentials-file", loose)
 	if r.code == 0 || !strings.Contains(r.stderr, "mode 0644") {
 		t.Fatalf("a loose credentials file: exit %d\n%s", r.code, r.stderr)
 	}
 	// And the Device Farm flags need --devicefarm.
-	r = e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+	r = e.runEnv(append(append([]string{}, h.envB...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c")), "maestro-d-hub", "start", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
 		"--peer-token", "y", "--cloud-max-devices", "3")
 	if r.code == 0 || !strings.Contains(r.stderr, "need --devicefarm") {
 		t.Fatalf("flags without --devicefarm: exit %d\n%s", r.code, r.stderr)
 	}
 	// A start check that fails stops the hub, redacted.
 	h.fake.FailOp("GetAccountSettings", "AccessDeniedException", "User is not authorized to perform: devicefarm:GetAccountSettings")
-	r = e.runEnv(h.envB, "hub", "start", "--daemon", "dfhub-c", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
+	r = e.runEnv(append(append([]string{}, h.envB...), daemon.EnvHome+"="+filepath.Join(e.cwd, "home-c")), "maestro-d-hub", "start", "--name", "hub-c", "--listen", "127.0.0.1:0", "--no-mdns", "--token", "x",
 		"--peer-token", "y", "--devicefarm")
 	if r.code == 0 || !strings.Contains(r.stdout+r.stderr, "GetAccountSettings") {
 		t.Fatalf("a failing start check: exit %d\n%s%s", r.code, r.stdout, r.stderr)

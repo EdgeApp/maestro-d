@@ -180,7 +180,7 @@ Examples:
 	}
 	app.Commands = append(app.Commands, daemonCommands()...) // maestro-d
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.Run(hubTestArgs(os.Args, allFlags)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
