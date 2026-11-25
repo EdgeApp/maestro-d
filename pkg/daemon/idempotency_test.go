@@ -366,7 +366,7 @@ func TestRetryClassification(t *testing.T) {
 // lease ending cancels its context. Its client is still connected: it gets
 // the running attempt's outcome, never an empty 200.
 func TestLeases_JoinedRetryAnsweredWhenTheLeaseEnds(t *testing.T) {
-	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", ShareDevices: []string{"mock-1"}})
+	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", ShareConfig: []string{"mock-1"}})
 	var cleanups int32
 	driver := testDeps(&cleanups, 0).NewDriver
 	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {

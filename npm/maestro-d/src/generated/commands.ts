@@ -981,7 +981,7 @@ export interface ResetPermissionsParams {
   platform?: string
 }
 
-/** Removes the device's network shape through the call its host's config.json (or older network.json) configures for it. */
+/** Removes the device's network shape through the call its host's config.json configures for it. */
 export interface ResetTrafficShapeParams {
   optional?: boolean
   label?: string
@@ -1232,7 +1232,7 @@ export interface SetPermissionsParams {
   permissions?: Record<string, string>
 }
 
-/** Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. */
+/** Sets the device's whole network shape through the call its host's config.json configures for it. */
 export interface SetTrafficShapeParams {
   optional?: boolean
   label?: string
@@ -1647,7 +1647,7 @@ export const COMMANDS = {
   removeMedia: { name: 'removeMedia', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },
-  resetTrafficShape: { name: 'resetTrafficShape', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Removes the device\'s network shape through the call its host\'s config.json (or older network.json) configures for it.' },
+  resetTrafficShape: { name: 'resetTrafficShape', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Removes the device\'s network shape through the call its host\'s config.json configures for it.' },
   retry: { name: 'retry', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Retries steps on failure.', files: { file: { kind: 'flow' } } },
   runBrowserScript: { name: 'runBrowserScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in the browser page context.', files: { file: { kind: 'path' } } },
   runFlow: { name: 'runFlow', scalar: 'file', bareField: 'file', valueLess: false, compound: true, doc: 'Runs another flow.', files: { file: { kind: 'flow' }, else: { kind: 'flow' } } },
@@ -1666,7 +1666,7 @@ export const COMMANDS = {
   setNetworkConditions: { name: 'setNetworkConditions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Simulates network throttling or offline mode.' },
   setOrientation: { name: 'setOrientation', scalar: 'orientation', bareField: 'orientation', valueLess: false, compound: false, doc: 'Sets device orientation.' },
   setPermissions: { name: 'setPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all' },
-  setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s config.json (or older network.json) configures for it.' },
+  setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s config.json configures for it.' },
   startRecording: { name: 'startRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Starts recording.' },
   stopApp: { name: 'stopApp', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Stops an app.' },
   stopRecording: { name: 'stopRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Stops recording.' },
