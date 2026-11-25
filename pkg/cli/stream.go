@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -24,19 +25,19 @@ type streamOpts struct {
 	duration int // seconds; 0 = until interrupted or the stream ends
 }
 
-var streamFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), attachFlags, targetFlags, []dflag{
-	intFlag("fps", "Requested frame rate, 3 to 60 (default 15): a ceiling on Android, advisory on iOS", nil,
+var streamFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), attachFlags, targetFlags, []dflag{
+	common.IntFlag("fps", "Requested frame rate, 3 to 60 (default 15): a ceiling on Android, advisory on iOS", nil,
 		func(o *daemonOpts, v int) { o.stream.fps = v }),
-	boolFlag("audio", "Include the device's audio when it has any", nil, func(o *daemonOpts, v bool) { o.stream.audio = v }),
-	intFlag("duration", "Stop after this many seconds (default: until Ctrl-C or the stream ends)", nil,
+	common.BoolFlag("audio", "Include the device's audio when it has any", nil, func(o *daemonOpts, v bool) { o.stream.audio = v }),
+	common.IntFlag("duration", "Stop after this many seconds (default: until Ctrl-C or the stream ends)", nil,
 		func(o *daemonOpts, v int) { o.stream.duration = v }),
-	strFlag("out", "Write the stream to this file ('-' or none: stdout)", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
+	common.StringFlag("out", "Write the stream to this file ('-' or none: stdout)", nil, func(o *daemonOpts, v string) { o.outPath = v }, "o"),
 })
 
 var daemonStreamCommand = &cli.Command{
 	Name:  "stream",
 	Usage: "Stream the device's screen as fragmented MP4 (stdout or -o FILE)",
-	Description: flagsDoc(`  maestro-d stream --duration 10 -o screen.mp4
+	Description: common.FlagHelp(`  maestro-d stream --duration 10 -o screen.mp4
   maestro-d stream --fps 30 --audio > screen.mp4
   maestro-d stream | ffplay -
 Ctrl-C (or --duration) ends the stream cleanly: the file ends on a whole
@@ -108,7 +109,7 @@ func runStream(ctx context.Context, o *daemonOpts) error {
 	}
 	abs, _ := filepath.Abs(o.outPath)
 	if o.JSON {
-		printJSON(streamStdout(), map[string]any{"ok": true, "exitCode": 0, "path": abs, "bytes": cw.n})
+		common.PrintJSON(streamStdout(), map[string]any{"ok": true, "exitCode": 0, "path": abs, "bytes": cw.n})
 	} else {
 		fmt.Fprintln(streamStdout(), abs)
 	}

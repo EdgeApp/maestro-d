@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
+	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
+
 	"bytes"
 	"context"
 	"errors"
@@ -53,53 +56,6 @@ func TestLeaseFile_RecordFindDropPrune(t *testing.T) {
 	_ = os.WriteFile(leasesPath(), []byte("{"), 0o600)
 	if loadLeases() != nil {
 		t.Fatal("bad JSON")
-	}
-}
-
-func TestHubStart_Helpers(t *testing.T) {
-	o := &daemonOpts{Name: "hub", HTTPAddr: ":7433", TLSCert: "c.pem", TLSKey: "k.pem", PassEnv: []string{"A"},
-		hub: hubOpts{name: "lab-a", share: []string{"x", "y"}, remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
-			advertise: "10.0.0.1:7433", peerCA: "ca.pem", peerToken: "p3er"}}
-	args := strings.Join(hubChildArgs(o), " ")
-	for _, want := range []string{"hub start --foreground --daemon hub --name lab-a --listen :7433", "--share-device x --share-device y",
-		"--allow-remote-shell", "--pass-env A", "--tls-cert /", "--peer hub-b:7433", "--no-mdns", "--advertise 10.0.0.1:7433", "--peer-ca /"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("child args %q lack %q", args, want)
-		}
-	}
-	if strings.Contains(args, "token") {
-		t.Fatalf("child args carry a token: %s", args)
-	}
-	got := redactArgs([]string{"hub", "start", "--token", "s3cret", "--token=s3cret", "--peer-token", "s3cret", "--peer-token=s3cret", "--listen", ":1"})
-	if strings.Contains(strings.Join(got, " "), "s3cret") {
-		t.Fatalf("redact: %v", got)
-	}
-
-	dir := t.TempDir()
-	f := filepath.Join(dir, "tok")
-	_ = os.WriteFile(f, []byte(" tok\n"), 0o600)
-	o = &daemonOpts{hub: hubOpts{tokenFile: f}, explicit: map[string]bool{}}
-	if tok, err := hubToken(o); err != nil || tok != "tok" {
-		t.Fatalf("token file: %q %v", tok, err)
-	}
-	o.explicit["token"] = true
-	if _, err := hubToken(o); err == nil {
-		t.Fatal("--token and --token-file together")
-	}
-	o = &daemonOpts{hub: hubOpts{tokenFile: filepath.Join(dir, "missing")}}
-	if _, err := hubToken(o); err == nil {
-		t.Fatal("missing token file")
-	}
-	if _, err := hubToken(&daemonOpts{}); err == nil {
-		t.Fatal("no token")
-	}
-	o = &daemonOpts{explicit: map[string]bool{}}
-	hubName(o)
-	if o.Name != DefaultHubDaemon {
-		t.Fatal(o.Name)
-	}
-	if err := runHubStart(context.Background(), &daemonOpts{Token: "t", TLSCert: "c", explicit: map[string]bool{}}, nil); err == nil {
-		t.Fatal("--tls-cert without --tls-key")
 	}
 }
 
@@ -180,7 +136,7 @@ func leaseHubListing(t *testing.T, extra *atomic.Bool) (*daemon.Server, string) 
 			return devs
 		},
 	}
-	s := daemon.New(daemon.Config{Name: "lh", Hub: true, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), ShareDevices: []string{"mock-1", "mock-7"}}, deps)
+	s := daemon.New(daemon.Config{Name: "lh", Hub: &hubd.Server{}, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), ShareDevices: []string{"mock-1", "mock-7"}}, deps)
 	hs := httptest.NewServer(s.TCPHandler())
 	t.Cleanup(hs.Close)
 	return s, hs.URL
@@ -313,42 +269,26 @@ func TestUploadBlob_LeaseRefusalsOnTheBodylessHEAD(t *testing.T) {
 
 func TestLeaseDurations(t *testing.T) {
 	for in, want := range map[string]time.Duration{"600": 10 * time.Minute, "8h": 8 * time.Hour, " 90m ": 90 * time.Minute, "1h30m": 90 * time.Minute, "1.5s": 2 * time.Second} {
-		if got, err := parseLeaseDuration("ttl", in); err != nil || got != want {
+		if got, err := common.ParseLeaseDuration("ttl", in); err != nil || got != want {
 			t.Errorf("%q: %v %v, want %v", in, got, err, want)
 		}
 	}
 	for _, bad := range []string{"", "0", "-5", "soon", "500ms"} {
-		if _, err := parseLeaseDuration("ttl", bad); err == nil {
+		if _, err := common.ParseLeaseDuration("ttl", bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	hubMax, devs, err := parseLeaseMax([]string{"2h", "emulator-5554=10m", "Pixel 8=1800", "4h"})
-	if err != nil || hubMax != 4*time.Hour || len(devs) != 2 || devs[0] != (daemon.LeaseMax{Device: "emulator-5554", Max: 10 * time.Minute}) ||
-		devs[1] != (daemon.LeaseMax{Device: "Pixel 8", Max: 30 * time.Minute}) {
-		t.Fatalf("lease-max: %v %+v %v", hubMax, devs, err)
-	}
-	for _, bad := range []string{"=10m", "x=", "x=never", "never"} {
-		if _, _, err := parseLeaseMax([]string{bad}); err == nil {
-			t.Errorf("--lease-max %q accepted", bad)
-		}
-	}
 	o := &daemonOpts{}
-	if err := ttlFlag("").apply(o, "2h"); err != nil || o.lease.ttl != 7200 {
+	if err := ttlFlag("").Apply(o, "2h"); err != nil || o.lease.ttl != 7200 {
 		t.Fatalf("--ttl 2h: %d %v", o.lease.ttl, err)
 	}
-	if err := ttlFlag("").apply(o, "x"); err == nil {
+	if err := ttlFlag("").Apply(o, "x"); err == nil {
 		t.Fatal("--ttl x")
 	}
 	if secs(0) != "?" || secs(90) != "1m30s" {
 		t.Fatal("secs")
 	}
-	args := strings.Join(hubChildArgs(&daemonOpts{hub: hubOpts{leaseMax: []string{"1h", "a=5m"}}}), " ")
-	if !strings.Contains(args, "--lease-max 1h --lease-max a=5m") {
-		t.Fatalf("child args: %s", args)
-	}
-	if _, _, err := checkHubFlags(&daemonOpts{Token: "t", hub: hubOpts{peerToken: "p", leaseMax: []string{"x=y"}}, explicit: map[string]bool{}}); err == nil {
-		t.Fatal("a bad --lease-max starts a hub")
-	}
+
 }
 
 // leaseHelperEnv makes the test binary a helper process that records

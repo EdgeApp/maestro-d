@@ -162,7 +162,7 @@ func TestServer_NetworkConfigFlag(t *testing.T) {
 	if len(ss.calls()) != 1 {
 		t.Fatalf("calls: %v", ss.calls())
 	}
-	env.s.applyDeviceConfig(nil) // nothing to mark is not an error
+	env.s.ApplyDeviceConfig(nil) // nothing to mark is not an error
 }
 
 const resetCall = "DELETE /shape/mock-1"
@@ -175,130 +175,6 @@ func countCalls(ss *shaperServer, call string) int {
 		}
 	}
 	return n
-}
-
-// Every way a session ends sends the shaped device's reset exactly once.
-func TestServer_SessionEndResetsTheShape(t *testing.T) {
-	ctx := context.Background()
-	shape := func(t *testing.T, c *Client) {
-		t.Helper()
-		if _, err := c.Command(ctx, "mock-1", "setTrafficShape", map[string]any{"lossPct": 100}, true); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Run("detach", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		env.attach("mock-1")
-		shape(t, env.c)
-		if err := env.c.Detach(ctx, "mock-1"); err != nil {
-			t.Fatal(err)
-		}
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d (%v)", n, ss.calls())
-		}
-	})
-	t.Run("a session that reset last sends nothing more", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		env.attach("mock-1")
-		shape(t, env.c)
-		if _, err := env.c.Command(ctx, "mock-1", "resetTrafficShape", nil, true); err != nil {
-			t.Fatal(err)
-		}
-		if err := env.c.Detach(ctx, "mock-1"); err != nil {
-			t.Fatal(err)
-		}
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d", n)
-		}
-	})
-	t.Run("an unshaped session sends nothing", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		env.attach("mock-1")
-		if err := env.c.Detach(ctx, "mock-1"); err != nil {
-			t.Fatal(err)
-		}
-		if len(ss.calls()) != 0 {
-			t.Fatalf("calls: %v", ss.calls())
-		}
-	})
-	t.Run("daemon stop", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		env.attach("mock-1")
-		shape(t, env.c)
-		env.s.detachAll()
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d", n)
-		}
-	})
-	hub := func(t *testing.T) (*hubEnv, *shaperServer) {
-		env := newHubEnv(t, Config{})
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		return env, ss
-	}
-	t.Run("lease release", func(t *testing.T) {
-		env, ss := hub(t)
-		res := env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
-		shape(t, env.remote)
-		if _, err := env.remote.ReleaseLease(ctx, res.Lease.ID); err != nil {
-			t.Fatal(err)
-		}
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d", n)
-		}
-	})
-	t.Run("lease expiry", func(t *testing.T) {
-		env, ss := hub(t)
-		env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 30, Attach: &AttachConfig{Platform: "mock"}})
-		shape(t, env.remote)
-		env.clock.advance(31 * time.Second)
-		env.sweep()
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d", n)
-		}
-	})
-	t.Run("hub shutdown", func(t *testing.T) {
-		env, ss := hub(t)
-		env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
-		shape(t, env.remote)
-		env.s.Shutdown("test")
-		waitFor(t, func() bool { return countCalls(ss, resetCall) == 1 })
-	})
-	// A lease that ends mid-step: the step unwinds (it honours its
-	// context), then the teardown resets the shape and closes the driver.
-	t.Run("lease expiry during a step", func(t *testing.T) {
-		env, ss := hub(t)
-		env.mu.Lock()
-		env.stepDelay = 30 * time.Second
-		env.mu.Unlock()
-		env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 5, Attach: &AttachConfig{Platform: "mock"}})
-		shape(t, env.remote)
-		done := make(chan error, 1)
-		go func() {
-			_, err := env.remote.Command(ctx, "mock-1", "tapOn", "slow", true)
-			done <- err
-		}()
-		waitFor(t, func() bool {
-			devs, _ := env.local.Devices(ctx, "mock")
-			return len(devs) > 0 && devs[0].Busy
-		})
-		env.clock.advance(6 * time.Second)
-		env.s.sweepLeases()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the step outlived its lease")
-		}
-		waitFor(t, func() bool { return countCalls(ss, resetCall) == 1 && atomic.LoadInt32(&env.cleanups) == 1 })
-	})
 }
 
 // A reset that never answers holds the teardown for its bound only.
@@ -352,84 +228,6 @@ func (d *airplaneDriver) got() []bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]bool(nil), d.seen...)
-}
-
-// The session that turned airplane mode on turns it off as it ends, and
-// sends the reset, through the daemon's own teardown: on detach, and on a
-// hub shutdown within its lease-shutdown wait.
-func TestServer_SessionEndTurnsAirplaneModeOff(t *testing.T) {
-	ctx := context.Background()
-	record := func(s *Server) *airplaneDriver {
-		d := &airplaneDriver{Driver: mock.New(mock.Config{Platform: "android", DeviceID: "mock-1"})}
-		base := s.deps.NewDriver
-		s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
-			_, info, cleanup, err := base(ctx, id, cfg)
-			return d, info, cleanup, err
-		}
-		return d
-	}
-	t.Run("detach", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		d := record(env.s)
-		env.attach("mock-1")
-		if _, err := env.c.Command(ctx, "mock-1", "setAirplaneMode", "enabled", true); err != nil {
-			t.Fatal(err)
-		}
-		if err := env.c.Detach(ctx, "mock-1"); err != nil {
-			t.Fatal(err)
-		}
-		if got := d.got(); len(got) != 2 || !got[0] || got[1] {
-			t.Fatalf("airplane values: %v", got)
-		}
-		if len(ss.calls()) != 0 {
-			t.Fatalf("an unshaped session reset: %v", ss.calls())
-		}
-	})
-	t.Run("untouched", func(t *testing.T) {
-		env := newTestEnv(t, 0)
-		d := record(env.s)
-		env.attach("mock-1")
-		if err := env.c.Detach(ctx, "mock-1"); err != nil {
-			t.Fatal(err)
-		}
-		if got := d.got(); len(got) != 0 {
-			t.Fatalf("airplane values: %v", got)
-		}
-	})
-	t.Run("hub shutdown", func(t *testing.T) {
-		env := newHubEnv(t, Config{})
-		ss := newShaperServer(t)
-		writeNetworkConfig(t, filepath.Join(Home(), "network.json"), ss.URL)
-		d := record(env.s)
-		env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
-		if _, err := env.remote.Command(ctx, "mock-1", "setAirplaneMode", "enabled", true); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := env.remote.Command(ctx, "mock-1", "setTrafficShape", map[string]any{"lossPct": 100}, true); err != nil {
-			t.Fatal(err)
-		}
-		started := time.Now()
-		env.s.Shutdown("test")
-		// The process exits when done closes: after the lease teardowns
-		// finish, or leaseShutdownWait runs out beside them. Both undos must
-		// be done by then.
-		select {
-		case <-env.s.done:
-		case <-time.After(2 * leaseShutdownWait):
-			t.Fatal("the hub did not stop")
-		}
-		if took := time.Since(started); took > leaseShutdownWait {
-			t.Fatalf("shutdown took %s", took)
-		}
-		if got := d.got(); len(got) != 2 || got[1] {
-			t.Fatalf("airplane values: %v", got)
-		}
-		if n := countCalls(ss, resetCall); n != 1 {
-			t.Fatalf("resets = %d", n)
-		}
-	})
 }
 
 // A listing logs an unusable config once per problem, not once per poll.
@@ -501,7 +299,7 @@ func TestServer_DetachPanicReleasesTheDevice(t *testing.T) {
 	a.release = func() { panic("release") }
 	func() {
 		defer func() { _ = recover() }()
-		env.s.detachForStop("mock-1")
+		env.s.DetachForStop("mock-1")
 	}()
 	env.s.mu.Lock()
 	_, reserved := env.s.attaching["mock-1"]
@@ -632,20 +430,6 @@ func writeDescriptions(t *testing.T, descriptions map[string]string) {
 	}
 }
 
-// A lease's answer, attached or not, carries the device's description.
-func TestLeases_AnswerCarriesTheDescription(t *testing.T) {
-	env := newHubEnv(t, Config{})
-	writeDescriptions(t, map[string]string{"mock-1": "Lab phone A", "mock-2": "Lab phone B"})
-	res := env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 30, Attach: &AttachConfig{Platform: "mock"}})
-	if res.Device == nil || res.Device.Description != "Lab phone A" || !res.Device.Attached {
-		t.Fatalf("attached lease answer: %+v", res.Device)
-	}
-	res = env.lease(env.remote, LeaseRequest{Device: "mock-2", TTLSec: 30})
-	if res.Device == nil || res.Device.Description != "Lab phone B" {
-		t.Fatalf("lease answer: %+v", res.Device)
-	}
-}
-
 // An AVD keyed avd:<name> keeps its description once it boots and is
 // listed under its serial; the boot and create answers carry descriptions,
 // and an AVD entry without calls shapes nothing.
@@ -702,7 +486,7 @@ func TestServer_DescriptionPrecedenceAndBlanks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(Home(), "config.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.s.applyDeviceConfig(devs)
+	env.s.ApplyDeviceConfig(devs)
 	if d := devs[0]; d.Description != "Pixel 9 AVD" || !d.TrafficShaping {
 		t.Errorf("emulator-5554: %+v", d)
 	}
@@ -738,7 +522,7 @@ func TestServer_AVDEntryShapesTheRunningEmulator(t *testing.T) {
 		{ID: "emulator-5554", Platform: "android", Kind: "emulator", Name: "pix"},
 		{ID: "PHONE-B", Platform: "android", Kind: "device", Name: "Lab Pixel"},
 	}
-	env.s.applyDeviceConfig(devs)
+	env.s.ApplyDeviceConfig(devs)
 	if d := devs[0]; d.Description != "Pixel 9 AVD" || !d.TrafficShaping {
 		t.Errorf("emulator-5554: %+v", d)
 	}

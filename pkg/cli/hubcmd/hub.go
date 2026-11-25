@@ -1,4 +1,4 @@
-package cli
+package hubcmd
 
 // hub.go: `maestro-d hub start|stop|status|service`. A hub is a named
 // daemon (`hub` unless --daemon names another) that shares this machine's
@@ -11,7 +11,6 @@ package cli
 import (
 	"context"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,11 +22,14 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
+	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
 
 // DefaultHubDaemon is the daemon name a hub runs under.
@@ -36,81 +38,83 @@ const DefaultHubDaemon = "hub"
 // hubDaemonFlag names the hub's daemon. Unlike --daemon elsewhere it does
 // not read MAESTRO_D: a shell set up for one local daemon still starts the
 // hub under its own name.
-var hubDaemonFlag = strFlag("daemon", "Daemon name the hub runs under (default hub)", nil,
+var hubDaemonFlag = common.StringFlag("daemon", "Daemon name the hub runs under (default hub)", nil,
 	func(o *daemonOpts, v string) { o.Name = v }, "n")
 
-var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
-	strFlag("name", "The hub's name in the mesh: [a-z0-9-]{1,32} (default: the short host name, lowercased)", []string{"MAESTRO_D_HUB_NAME"},
+var hubStartFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
+	common.StringFlag("name", "The hub's name in the mesh: [a-z0-9-]{1,32} (default: the short host name, lowercased)", []string{"MAESTRO_D_HUB_NAME"},
 		func(o *daemonOpts, v string) { o.hub.name = v }),
-	strFlag("listen", "Address of the client and peer listener (default :7433, every interface)", []string{"MAESTRO_D_LISTEN"},
+	common.StringFlag("listen", "Address of the client and peer listener (default :7433, every interface)", []string{"MAESTRO_D_LISTEN"},
 		func(o *daemonOpts, v string) { o.HTTPAddr = v }),
-	strFlag("advertise", "HOST:PORT peers are told to dial (default: the address each peer reaches this hub at)", nil,
+	common.StringFlag("advertise", "HOST:PORT peers are told to dial (default: the address each peer reaches this hub at)", nil,
 		func(o *daemonOpts, v string) { o.hub.advertise = v }),
-	{name: "peer", kind: kindSlice, usage: "A hub to link with, HOST[:PORT] (https:// for TLS); repeatable",
-		apply: func(o *daemonOpts, v string) error { o.hub.peers = append(o.hub.peers, v); return nil }},
-	boolFlag("no-mdns", "Skip LAN discovery: link only with --peer hubs and the hubs that dial this one", nil,
+	{Name: "peer", Kind: common.Slice, Usage: "A hub to link with, HOST[:PORT] (https:// for TLS); repeatable",
+		Apply: func(o *daemonOpts, v string) error { o.hub.peers = append(o.hub.peers, v); return nil }},
+	common.BoolFlag("no-mdns", "Skip LAN discovery: link only with --peer hubs and the hubs that dial this one", nil,
 		func(o *daemonOpts, v bool) { o.hub.noMDNS = v }),
-	strFlag("token", "Client bearer token (required, or --token-file)", []string{"MAESTRO_D_TOKEN"},
+	common.StringFlag("token", "Client bearer token (required, or --token-file)", []string{"MAESTRO_D_TOKEN"},
 		func(o *daemonOpts, v string) { o.Token = v }),
-	strFlag("token-file", "Read the client token from this file (mode 0600)", nil,
+	common.StringFlag("token-file", "Read the client token from this file (mode 0600)", nil,
 		func(o *daemonOpts, v string) { o.hub.tokenFile = v }),
-	strFlag("peer-token", "The mesh's shared secret, sent on every peer link (required, or --peer-token-file)", []string{"MAESTRO_D_PEER_TOKEN"},
+	common.StringFlag("peer-token", "The mesh's shared secret, sent on every peer link (required, or --peer-token-file)", []string{"MAESTRO_D_PEER_TOKEN"},
 		func(o *daemonOpts, v string) { o.hub.peerToken = v }),
-	strFlag("peer-token-file", "Read the peer token from this file (mode 0600)", nil,
+	common.StringFlag("peer-token-file", "Read the peer token from this file (mode 0600)", nil,
 		func(o *daemonOpts, v string) { o.hub.peerTokenFile = v }),
-	strFlag("tls-cert", "Serve HTTPS and WSS with this PEM certificate (with --tls-key)", []string{"MAESTRO_D_TLS_CERT"},
+	common.StringFlag("tls-cert", "Serve HTTPS and WSS with this PEM certificate (with --tls-key)", []string{"MAESTRO_D_TLS_CERT"},
 		func(o *daemonOpts, v string) { o.TLSCert = v }),
-	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
+	common.StringFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
-	strFlag("peer-ca", "PEM trust root for peers' TLS (default: the system roots)", nil,
+	common.StringFlag("peer-ca", "PEM trust root for peers' TLS (default: the system roots)", nil,
 		func(o *daemonOpts, v string) { o.hub.peerCA = v }),
-	{name: "share-device", kind: kindSlice, usage: "Share this device, by id or name (a running emulator's AVD name); repeatable. A hub shares only the devices named here, with --share-tv or in config.json's hubDevices: none by default",
-		apply: func(o *daemonOpts, v string) error { o.hub.share = append(o.hub.share, v); return nil }},
-	{name: "share-tv", kind: kindSlice, usage: "Share this Apple TV, by id or name; repeatable. A TV pairs with several Macs, so name each TV on one hub only. Default: none",
-		apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
-	{name: "lease-max", kind: kindSlice, value: "8h", usage: "The longest lease window, DURATION (8h, 90m, or seconds) for the whole hub, or DEVICE=DURATION for one device by id or name; repeatable",
-		apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
-	strFlag("reservation-lead", "How far ahead a reservation may start, DURATION (24h, 90m, or seconds); default 24h", nil,
+	{Name: "share-device", Kind: common.Slice, Usage: "Share this device, by id or name (a running emulator's AVD name); repeatable. A hub shares only the devices named here, with --share-tv or in config.json's hubDevices: none by default",
+		Apply: func(o *daemonOpts, v string) error { o.hub.share = append(o.hub.share, v); return nil }},
+	{Name: "share-tv", Kind: common.Slice, Usage: "Share this Apple TV, by id or name; repeatable. A TV pairs with several Macs, so name each TV on one hub only. Default: none",
+		Apply: func(o *daemonOpts, v string) error { o.hub.shareTV = append(o.hub.shareTV, v); return nil }},
+	{Name: "lease-max", Kind: common.Slice, Value: "8h", Usage: "The longest lease window, DURATION (8h, 90m, or seconds) for the whole hub, or DEVICE=DURATION for one device by id or name; repeatable",
+		Apply: func(o *daemonOpts, v string) error { o.hub.leaseMax = append(o.hub.leaseMax, v); return nil }},
+	common.StringFlag("reservation-lead", "How far ahead a reservation may start, DURATION (24h, 90m, or seconds); default 24h", nil,
 		func(o *daemonOpts, v string) { o.hub.reservationLead = v }),
-	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
+	common.BoolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
-	strFlag("config", "The device config: config.json's hubDevices, each with an id and an optional description, capabilities and trafficShaping calls, and its optional ai block (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+	common.StringFlag("config", "The device config: config.json's hubDevices, each with an id and an optional description, capabilities and trafficShaping calls, and its optional ai block (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
-	strFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
+	common.StringFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),
-	boolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
+	common.BoolFlag("devicefarm", "Launch AWS Device Farm devices for this mesh's cloud leases, with this hub's AWS credentials", nil,
 		func(o *daemonOpts, v bool) { o.hub.devicefarm = v }),
-	strFlag("devicefarm-credentials-file", "With --devicefarm: an AWS shared credentials file (a regular file, mode 0600 or stricter)", nil,
+	common.StringFlag("devicefarm-credentials-file", "With --devicefarm: an AWS shared credentials file (a regular file, mode 0600 or stricter)", nil,
 		func(o *daemonOpts, v string) { o.hub.dfOpts.CredentialsFile = v }),
-	strFlag("devicefarm-profile", "With --devicefarm: the AWS profile to use", nil,
+	common.StringFlag("devicefarm-profile", "With --devicefarm: the AWS profile to use", nil,
 		func(o *daemonOpts, v string) { o.hub.dfOpts.Profile = v }),
-	strFlag("devicefarm-project", "With --devicefarm: the Device Farm project, by name or ARN (default maestro-d)", nil,
+	common.StringFlag("devicefarm-project", "With --devicefarm: the Device Farm project, by name or ARN (default maestro-d)", nil,
 		func(o *daemonOpts, v string) { o.hub.dfOpts.Project = v }),
-	intFlag("cloud-max-devices", "With --devicefarm: how many cloud devices the hub holds at once, 0-20 (default 2, Device Farm's concurrency)", nil,
+	common.IntFlag("cloud-max-devices", "With --devicefarm: how many cloud devices the hub holds at once, 0-20 (default 2, Device Farm's concurrency)", nil,
 		func(o *daemonOpts, v int) { o.hub.cloudMax, o.hub.cloudMaxSet = v, true }),
-	{name: "pass-env", kind: kindSlice, usage: "A variable of this process's environment that sessions may import (repeatable); no other one is imported",
-		apply: func(o *daemonOpts, v string) error { o.PassEnv = append(o.PassEnv, v); return nil }},
-	boolFlag("foreground", "Run in the foreground instead of detaching (for launchd or another supervisor)", nil,
+	{Name: "pass-env", Kind: common.Slice, Usage: "A variable of this process's environment that sessions may import (repeatable); no other one is imported",
+		Apply: func(o *daemonOpts, v string) error { o.PassEnv = append(o.PassEnv, v); return nil }},
+	common.BoolFlag("foreground", "Run in the foreground instead of detaching (for launchd or another supervisor)", nil,
 		func(o *daemonOpts, v bool) { o.hub.foreground = v }),
-	intFlag("start-timeout", "Seconds to wait for the detached hub to become ready (default 30)", nil,
+	common.IntFlag("start-timeout", "Seconds to wait for the detached hub to become ready (default 30)", nil,
 		func(o *daemonOpts, v int) { o.StartTimeout = v }),
 })
 
-var hubStopFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
-	intFlag("timeout", "Seconds to wait for the hub to exit (default 30)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
+var hubStopFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
+	common.IntFlag("timeout", "Seconds to wait for the hub to exit (default 30)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 })
 
-var hubStatusFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], targetFlags)
+var hubStatusFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, targetFlags)
 
-var hubCommand = &cli.Command{
-	Name:  "hub",
-	Usage: "Share this machine's devices with clients on the network, in a mesh of hubs (hub start|stop|status|service)",
-	Subcommands: []*cli.Command{
-		{
-			Name:      "start",
-			Usage:     "Start a hub: a daemon that shares this machine's devices, leases them to clients and links with other hubs",
-			ArgsUsage: " ",
-			Description: flagsDoc(`A hub listens on every interface (--listen, default :7433) and needs a
+func Command(deps func() daemon.Deps) *cli.Command {
+	withArgs := actions(deps)
+	return &cli.Command{
+		Name:  "hub",
+		Usage: "Share this machine's devices with clients on the network, in a mesh of hubs (hub start|stop|status|service)",
+		Subcommands: []*cli.Command{
+			{
+				Name:      "start",
+				Usage:     "Start a hub: a daemon that shares this machine's devices, leases them to clients and links with other hubs",
+				ArgsUsage: " ",
+				Description: common.FlagHelp(`A hub listens on every interface (--listen, default :7433) and needs a
 client token and a peer token. Every TCP caller is remote, loopback
 included: it may not use this machine's paths or runShell (unless
 --allow-remote-shell), and sessions import none of this machine's
@@ -126,33 +130,34 @@ seed. Any hub lists and drives every hub's devices: <id>@<hub>.
 
   maestro-d hub start --name lab-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
   maestro-d hub start --no-mdns --peer https://hub-b.example.com:7433 --token T --peer-token P --tls-cert hub.pem --tls-key hub-key.pem`, hubStartFlags),
-			SkipFlagParsing: true,
-			Action:          withArgs(hubStartFlags, runHubStart),
-		},
-		{
-			Name:            "stop",
-			Usage:           "Stop the hub: its leases end, its devices are detached and its peer links close",
-			ArgsUsage:       " ",
-			Description:     flagsDoc("", hubStopFlags),
-			SkipFlagParsing: true,
-			Action: withArgs(hubStopFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
-				hubName(o)
-				return stopDaemons(ctx, o, []string{o.Name}, "hub")
-			}),
-		},
-		{
-			Name:      "status",
-			Usage:     "Show the hub's name and version, and each peer's address, link state, RTT and device count",
-			ArgsUsage: " ",
-			Description: flagsDoc(`Without --target-hub it asks the local hub over its unix socket.
+				SkipFlagParsing: true,
+				Action:          withArgs(hubStartFlags, runHubStart),
+			},
+			{
+				Name:            "stop",
+				Usage:           "Stop the hub: its leases end, its devices are detached and its peer links close",
+				ArgsUsage:       " ",
+				Description:     common.FlagHelp("", hubStopFlags),
+				SkipFlagParsing: true,
+				Action: withArgs(hubStopFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
+					hubName(o)
+					return common.StopDaemons(ctx, []string{o.Name}, "hub", o.StartTimeout, o.JSON, false)
+				}),
+			},
+			{
+				Name:      "status",
+				Usage:     "Show the hub's name and version, and each peer's address, link state, RTT and device count",
+				ArgsUsage: " ",
+				Description: common.FlagHelp(`Without --target-hub it asks the local hub over its unix socket.
 
   maestro-d hub status
   maestro-d hub status --target-hub=hub-b.local --token T --json`, hubStatusFlags),
-			SkipFlagParsing: true,
-			Action:          withArgs(hubStatusFlags, runHubStatus),
+				SkipFlagParsing: true,
+				Action:          withArgs(hubStatusFlags, runHubStatus),
+			},
+			serviceCommand(withArgs),
 		},
-		hubServiceCommand,
-	},
+	}
 }
 
 // hubName defaults the daemon name to hub when --daemon was not given.
@@ -162,22 +167,6 @@ func hubName(o *daemonOpts) {
 	}
 }
 
-// readSecretFile reads a token file that must not be readable by others.
-func readSecretFile(flag, path string) (string, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return "", daemon.Errorf(daemon.CodeUsage, "--%s: %v", flag, err)
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return "", daemon.Errorf(daemon.CodeUsage, "--%s %s is readable by others (mode %04o); chmod 600 it", flag, path, st.Mode().Perm())
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", daemon.Errorf(daemon.CodeUsage, "--%s: %v", flag, err)
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
 // hubToken resolves the client token: --token-file (which must not be
 // readable by others), else --token / MAESTRO_D_TOKEN.
 func hubToken(o *daemonOpts) (string, error) {
@@ -185,7 +174,7 @@ func hubToken(o *daemonOpts) (string, error) {
 		if o.explicit["token"] {
 			return "", daemon.Errorf(daemon.CodeUsage, "give --token or --token-file, not both")
 		}
-		t, err := readSecretFile("token-file", o.hub.tokenFile)
+		t, err := common.ReadSecretFile("token-file", o.hub.tokenFile)
 		if err != nil {
 			return "", err
 		}
@@ -203,7 +192,7 @@ func hubPeerToken(o *daemonOpts) (string, error) {
 		if o.explicit["peer-token"] {
 			return "", daemon.Errorf(daemon.CodeUsage, "give --peer-token or --peer-token-file, not both")
 		}
-		t, err := readSecretFile("peer-token-file", o.hub.peerTokenFile)
+		t, err := common.ReadSecretFile("peer-token-file", o.hub.peerTokenFile)
 		if err != nil {
 			return "", err
 		}
@@ -292,7 +281,7 @@ func checkCloudFlags(o *daemonOpts) error {
 // network.json shares nothing and is not read here; its problems reach
 // the shaping commands, as before.
 func configShare(o *daemonOpts) ([]string, error) {
-	if err := checkConfigFlags(o); err != nil {
+	if err := common.CheckConfigFlags(&o.DeviceConfig, &o.NetworkConfig, o.explicit); err != nil {
 		return nil, err
 	}
 	src := daemon.DeviceConfigSource(o.DeviceConfig, o.NetworkConfig)
@@ -304,37 +293,6 @@ func configShare(o *daemonOpts) ([]string, error) {
 		return nil, daemon.Errorf(daemon.CodeUsage, "%v", err)
 	}
 	return cfg.Shared, nil
-}
-
-// checkConfigFlags settles which device config file is read: only one
-// ever is. A flag on the command line wins over the other's environment
-// variable; the two flags together, or the two variables, are USAGE. A
-// --config file that does not exist is USAGE too, so a mistyped path does
-// not start a daemon that shares and describes nothing.
-func checkConfigFlags(o *daemonOpts) error {
-	if o.DeviceConfig != "" && o.NetworkConfig != "" {
-		switch c, n := o.explicit["config"], o.explicit["network-config"]; {
-		case c && !n:
-			o.NetworkConfig = ""
-		case n && !c:
-			o.DeviceConfig = ""
-		case c && n:
-			return daemon.Errorf(daemon.CodeUsage, "--config and --network-config name one file each; give one (--network-config is the older format)")
-		default:
-			return daemon.Errorf(daemon.CodeUsage, "MAESTRO_D_CONFIG and MAESTRO_D_NETWORK_CONFIG name one file each; unset one (MAESTRO_D_NETWORK_CONFIG is the older format)")
-		}
-	}
-	if o.DeviceConfig == "" {
-		return nil
-	}
-	if _, err := os.Stat(o.DeviceConfig); errors.Is(err, os.ErrNotExist) {
-		from := "--config"
-		if !o.explicit["config"] {
-			from = "MAESTRO_D_CONFIG"
-		}
-		return daemon.Errorf(daemon.CodeUsage, "%s %s does not exist", from, o.DeviceConfig)
-	}
-	return nil
 }
 
 // hubChildArgs is the command line of the detached hub: every flag but the
@@ -422,7 +380,7 @@ func redactArgs(args []string) []string {
 
 func runHubStart(ctx context.Context, o *daemonOpts, args []string) error {
 	hubName(o)
-	if !o.hub.foreground && serviceInstalled(o.Name) {
+	if !o.hub.foreground && ServiceInstalled(o.Name) {
 		// The service owns the hub process: start it through launchd.
 		return kickstartService(ctx, o)
 	}
@@ -451,7 +409,7 @@ func runHubStart(ctx context.Context, o *daemonOpts, args []string) error {
 		StartTimeout: timeout,
 		Log: func(format string, args ...any) {
 			if o.Verbose {
-				progress(format, args...)
+				common.Progress(format, args...)
 			}
 		},
 	})
@@ -463,7 +421,7 @@ func runHubStart(ctx context.Context, o *daemonOpts, args []string) error {
 
 func printHub(o *daemonOpts, info *daemon.Info, state string) error {
 	if o.JSON {
-		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "daemon": info})
+		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "daemon": info})
 		return nil
 	}
 	scheme := "http"
@@ -510,9 +468,6 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		fmt.Fprintf(os.Stderr, "warning: cannot open daemon.log: %v\n", err)
 	}
 	defer logger.Close()
-	// Read this host's TVs before serving, so the hub knows them (and keeps
-	// them private unless --share-tv names them) from its first request.
-	cachedTVs()
 	deps, err := hubDeps(o)
 	if err != nil {
 		return err
@@ -523,7 +478,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	}
 	mesh := newMesh(hub.Config{
 		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
-		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: Version, Cloud: providerNames(deps), ReservationLead: lead,
+		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: version.Version, Cloud: providerNames(deps), ReservationLead: lead,
 		Logf: func(format string, args ...any) { logger.Info(format, args...) },
 	})
 	leaseMax, leaseMaxDevices, err := parseLeaseMax(o.hub.leaseMax)
@@ -531,13 +486,13 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return err
 	}
 	srv := daemon.New(daemon.Config{
-		KeepRunDir:       serviceInstalled,
+		KeepRunDir:       ServiceInstalled,
 		Name:             o.Name,
 		HTTPAddr:         o.HTTPAddr,
 		Token:            token,
 		TLSCert:          o.TLSCert,
 		TLSKey:           o.TLSKey,
-		Hub:              true,
+		Hub:              &hubd.Server{},
 		HubName:          o.hub.name,
 		ShareDevices:     o.hub.share,
 		ShareTVs:         o.hub.shareTV,
@@ -570,7 +525,10 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 // provider only when the hub was started with its credentials, so a hub
 // never spends its operator's ambient AWS credentials by accident.
 func hubDeps(o *daemonOpts) (daemon.Deps, error) {
-	deps := daemonDeps()
+	deps := daemon.Deps{}
+	if o.deps != nil {
+		deps = o.deps()
+	}
 	deps.Providers = nil
 	if !o.hub.devicefarm {
 		return deps, nil
@@ -622,7 +580,7 @@ func providerNames(deps daemon.Deps) []string {
 // hub's unix socket (never spawning one).
 func hubClient(ctx context.Context, o *daemonOpts) (*daemon.Client, error) {
 	if o.Target != "" {
-		return connectTarget(o)
+		return common.ConnectTarget(o.Target, o.CAFile, o.Token, o.Verbose)
 	}
 	hubName(o)
 	c, err := daemon.Dial(o.Name)
@@ -645,7 +603,7 @@ func runHubStatus(ctx context.Context, o *daemonOpts, args []string) error {
 		return err
 	}
 	if o.JSON {
-		printJSON(os.Stdout, st)
+		common.PrintJSON(os.Stdout, st)
 		return nil
 	}
 	printHubStatus(os.Stdout, st.Hub)

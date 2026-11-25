@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,185 +13,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
-	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
-	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
-
-// fakeRemoteDriver is a held cloud driver: a mock driver (without its
-// screen capture) with counted keepalives, restarts and closes.
-type fakeRemoteDriver struct {
-	core.Driver
-	pings, restarts, closes atomic.Int32
-	pingErr, restartErr     atomic.Pointer[error]
-	// pingStarted, when set, is closed by the first ping.
-	inPing atomic.Bool
-	// installChecks counts AppInstalled calls; the first notYet of them
-	// answer false (a negative notYet: always), and checkErr fails them.
-	installChecks, notYet atomic.Int32
-	checkErr              atomic.Pointer[error]
-	// restartFails makes that many restarts fail first; restartDelay
-	// makes each restart take that long.
-	restartFails atomic.Int32
-	restartDelay atomic.Int64
-	restartedAt  atomic.Int64 // when the last restart finished (UnixNano)
-}
-
-func (d *fakeRemoteDriver) Keepalive() error {
-	d.inPing.Store(true)
-	defer d.inPing.Store(false)
-	d.pings.Add(1)
-	if p := d.pingErr.Load(); p != nil {
-		return *p
-	}
-	return nil
-}
-func (d *fakeRemoteDriver) RestartSession() error {
-	d.restarts.Add(1)
-	time.Sleep(time.Duration(d.restartDelay.Load()))
-	defer func() { d.restartedAt.Store(time.Now().UnixNano()) }()
-	if p := d.restartErr.Load(); p != nil {
-		return *p
-	}
-	if d.restartFails.Add(-1) >= 0 {
-		return errors.New("UiAutomation not connected")
-	}
-	return nil
-}
-func (d *fakeRemoteDriver) AppInstalled(string) (bool, error) {
-	n := d.installChecks.Add(1)
-	if p := d.checkErr.Load(); p != nil {
-		return false, *p
-	}
-	ny := d.notYet.Load()
-	return ny >= 0 && n > ny, nil
-}
-func (d *fakeRemoteDriver) Close() error { d.closes.Add(1); return nil }
-
-// Execute answers recording steps as the Appium driver does: it has no
-// screen capture.
-func (d *fakeRemoteDriver) Execute(step flow.Step) *core.CommandResult {
-	switch step.(type) {
-	case *flow.StartRecordingStep, *flow.StopRecordingStep:
-		err := fmt.Errorf("unsupported step type: %T", step)
-		return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
-	}
-	return d.Driver.Execute(step)
-}
-
-// cloudFake is an in-process provider whose Allocate runs the hooks and
-// records what it did.
-type cloudFake struct {
-	*fakeProvider
-	mu         sync.Mutex
-	refs       []string
-	released   []string
-	abandoned  []string
-	state      string // Refresh's answer (default RUNNING)
-	refreshErr error  // Refresh's error, when set
-	expires    time.Duration
-	allocErr   error
-	releaseFn  func(ref string) error
-	// failAfterCreated fails Allocate after the session was recorded,
-	// without stopping it (a stop the provider refused); hold, when set,
-	// blocks Allocate after recording until it is closed or the request
-	// is cancelled.
-	failAfterCreated error
-	hold             chan struct{}
-}
-
-func newCloudFake() *cloudFake {
-	return &cloudFake{fakeProvider: newFakeProvider(), state: "RUNNING", expires: 150 * time.Minute}
-}
-
-func (f *cloudFake) Allocate(ctx context.Context, spec cloudprov.CloudSpec, h cloudprov.AllocateHooks) (*cloudprov.Allocation, error) {
-	f.call("Allocate")
-	if f.allocErr != nil {
-		return nil, f.allocErr
-	}
-	ref := "arn:aws:devicefarm:us-west-2:1:session:p/" + h.DeviceID + "/00000"
-	if h.Progress != nil {
-		h.Progress("PENDING")
-	}
-	if err := h.Created(ref); err != nil {
-		f.mu.Lock()
-		f.released = append(f.released, ref)
-		f.mu.Unlock()
-		h.Abandoned(ref)
-		return nil, cloudprov.Errorf(cloudprov.Other, "cannot record the cloud session; it was stopped (%v)", err)
-	}
-	f.mu.Lock()
-	f.refs = append(f.refs, ref)
-	f.mu.Unlock()
-	if f.failAfterCreated != nil {
-		return nil, f.failAfterCreated
-	}
-	if f.hold != nil {
-		select {
-		case <-f.hold:
-		case <-ctx.Done():
-		}
-	}
-	if ctx.Err() != nil {
-		h.Abandoned(ref)
-		return nil, cloudprov.Errorf(cloudprov.Other, "cancelled")
-	}
-	now := time.Now()
-	return &cloudprov.Allocation{Ref: ref, Endpoint: "https://example.invalid/remote-endpoint/SECRETTOKEN/wd/hub",
-		Caps: map[string]any{"platformName": "Android"}, Started: now, Expires: now.Add(f.expires),
-		Device: cloudprov.DeviceDesc{Model: "Google Pixel 8", Platform: spec.Platform, OSVersion: "14", FormFactor: "phone", Manufacturer: "Google",
-			DashboardURL: "https://console.aws.amazon.com/devicefarm/home#/x", AppiumVersion: "2"}}, nil
-}
-
-func (f *cloudFake) Refresh(context.Context, *cloudprov.Allocation) (string, string, error) {
-	f.call("Refresh")
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.refreshErr != nil {
-		return "", "", f.refreshErr
-	}
-	return f.state, "", nil
-}
-
-func (f *cloudFake) Release(_ context.Context, a *cloudprov.Allocation) (*cloudprov.ReleaseResult, error) {
-	f.call("Release")
-	if f.releaseFn != nil {
-		if err := f.releaseFn(a.Ref); err != nil {
-			return nil, err
-		}
-	}
-	f.mu.Lock()
-	f.released = append(f.released, a.Ref)
-	f.mu.Unlock()
-	return &cloudprov.ReleaseResult{Minutes: &cloudprov.DeviceMinutes{Metered: 2, Total: 2}}, nil
-}
-
-func (f *cloudFake) ReleaseRef(_ context.Context, ref string) (*cloudprov.DeviceMinutes, error) {
-	f.call("ReleaseRef")
-	if f.releaseFn != nil {
-		if err := f.releaseFn(ref); err != nil {
-			return nil, err
-		}
-	}
-	f.mu.Lock()
-	f.released = append(f.released, ref)
-	f.mu.Unlock()
-	return &cloudprov.DeviceMinutes{Metered: 4, Total: 4, Estimated: true}, nil
-}
-
-func (f *cloudFake) releasedRefs() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.released...)
-}
 
 // remoteEnv is a plain test daemon with a devicefarm cloudFake and a fake
 // remote driver for every launch.
 type remoteEnv struct {
 	*testEnv
-	f       *cloudFake
-	drivers []*fakeRemoteDriver
+	f       *daemontest.Cloud
+	drivers []*daemontest.RemoteDriver
 	mu      sync.Mutex
 	// stepDelay slows every step of a launched device.
 	stepDelay time.Duration
@@ -202,7 +33,7 @@ func newRemoteEnv(t *testing.T, cfg func(*Config)) *remoteEnv {
 	t.Helper()
 	t.Setenv(EnvHome, t.TempDir())
 	t.Setenv(envFastCloud, "1")
-	e := &remoteEnv{testEnv: &testEnv{t: t}, f: newCloudFake()}
+	e := &remoteEnv{testEnv: &testEnv{t: t}, f: daemontest.NewCloud()}
 	deps := testDeps(&e.cleanups, 0)
 	deps.Providers = map[string]func() (cloudprov.RemoteProvider, error){
 		"devicefarm": func() (cloudprov.RemoteProvider, error) { return e.f, nil },
@@ -213,7 +44,7 @@ func newRemoteEnv(t *testing.T, cfg func(*Config)) *remoteEnv {
 		}
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		d := &fakeRemoteDriver{Driver: mock.New(mock.Config{Platform: "android", StepDelay: e.stepDelay})}
+		d := &daemontest.RemoteDriver{Driver: mock.New(mock.Config{Platform: "android", StepDelay: e.stepDelay})}
 		e.drivers = append(e.drivers, d)
 		return d, DriverInfo{DriverName: "appium", Platform: "android", Kind: "cloud"}, nil
 	}
@@ -242,7 +73,7 @@ func (e *remoteEnv) launch(spec cloudprov.CloudSpec) *DeviceInfo {
 	return dev
 }
 
-func (e *remoteEnv) driver(i int) *fakeRemoteDriver {
+func (e *remoteEnv) driver(i int) *daemontest.RemoteDriver {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.drivers[i]
@@ -287,7 +118,7 @@ func TestRemote_LaunchDriveStop(t *testing.T) {
 	if err := e.c.Detach(ctx, dev.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n := e.driver(0).closes.Load(); n != 0 {
+	if n := e.driver(0).Closes.Load(); n != 0 {
 		t.Fatalf("detach closed the held driver (%d)", n)
 	}
 	if _, err := e.c.Attach(ctx, dev.ID, AttachConfig{}); err != nil {
@@ -298,8 +129,8 @@ func TestRemote_LaunchDriveStop(t *testing.T) {
 	if err != nil || res.Device.DeviceMinutes == nil || res.Device.DeviceMinutes.Total != 2 || res.Device.ID != dev.ID {
 		t.Fatalf("stop: %+v %v", res, err)
 	}
-	if e.driver(0).closes.Load() != 1 || len(e.f.releasedRefs()) != 1 {
-		t.Fatalf("closes %d released %v", e.driver(0).closes.Load(), e.f.releasedRefs())
+	if e.driver(0).Closes.Load() != 1 || len(e.f.ReleasedRefs()) != 1 {
+		t.Fatalf("closes %d released %v", e.driver(0).Closes.Load(), e.f.ReleasedRefs())
 	}
 	if entries, _ := ReadLedger(); len(entries) != 0 {
 		t.Fatalf("ledger after stop: %+v", entries)
@@ -356,11 +187,11 @@ func TestRemote_CreateRefusals(t *testing.T) {
 		t.Fatalf("top-level platform: %v", err)
 	}
 	// A provider failure maps through its kind.
-	e.f.allocErr = cloudprov.Errorf(cloudprov.NotFound, "no model matches; closest: Google Pixel 8 14")
+	e.f.AllocErr = cloudprov.Errorf(cloudprov.NotFound, "no model matches; closest: Google Pixel 8 14")
 	if err := create(BootRequest{Create: cloud(cloudprov.CloudSpec{Platform: "android", Name: "Nokia"})}); codeOf(t, err) != CodeDeviceNotFound {
 		t.Fatalf("not found: %v", err)
 	}
-	e.f.allocErr = nil
+	e.f.AllocErr = nil
 
 	// A remote caller of a plain daemon is FORBIDDEN.
 	r := httptest.NewRequest("POST", "/v1/devices", strings.NewReader(`{"create":{"cloud":{"platform":"android"}}}`))
@@ -373,7 +204,7 @@ func TestRemote_CreateRefusals(t *testing.T) {
 
 	// A hub refuses every cloud create with the lease hint, before its
 	// share list is looked at.
-	hub := newRemoteEnv(t, func(c *Config) { c.Hub, c.HubName, c.ShareDevices = true, "h", []string{"mock-1"} })
+	hub := newRemoteEnv(t, func(c *Config) { c.Hub, c.HubName, c.ShareDevices = NewTestHub(), "h", []string{"mock-1"} })
 	for _, caller := range []Caller{{}, {Remote: true, Addr: "10.0.0.9:1"}} {
 		r := httptest.NewRequest("POST", "/v1/devices", strings.NewReader(`{"create":{"cloud":{"platform":"android"}}}`))
 		r = r.WithContext(withCaller(r.Context(), caller))
@@ -424,7 +255,7 @@ func TestRemoteIdle_LongStepAndRelease(t *testing.T) {
 	if _, err := e.c.Attach(ctx, dev.ID, AttachConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	pings := e.driver(0).pings.Load()
+	pings := e.driver(0).Pings.Load()
 	// A step that outlasts the idle timeout completes: the clock stops
 	// while it runs, and no keepalive is sent beside it.
 	res, err := e.c.Command(ctx, dev.ID, "tapOn", "Login", true)
@@ -432,7 +263,7 @@ func TestRemoteIdle_LongStepAndRelease(t *testing.T) {
 		t.Fatalf("long step: %+v %v", res, err)
 	}
 	stepEnd := time.Now()
-	if e.driver(0).pings.Load() != pings {
+	if e.driver(0).Pings.Load() != pings {
 		t.Fatalf("pinged during the step")
 	}
 	var rel Event
@@ -461,11 +292,11 @@ func TestRemoteIdle_OverlappingRequestsAndBlobs(t *testing.T) {
 	e := newRemoteEnv(t, nil)
 	dev := e.launch(cloudprov.CloudSpec{IdleReleaseSec: 1})
 	rd := e.s.remote(dev.ID)
-	done1, err := e.s.cloudBusy(dev.ID)
+	done1, err := e.s.CloudBusy(dev.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	done2, _ := e.s.cloudBusy(dev.ID)
+	done2, _ := e.s.CloudBusy(dev.ID)
 	time.Sleep(1500 * time.Millisecond)
 	done1()
 	time.Sleep(1200 * time.Millisecond)
@@ -475,7 +306,7 @@ func TestRemoteIdle_OverlappingRequestsAndBlobs(t *testing.T) {
 	done2()
 	waitUntil(t, 3*time.Second, "release after the last request", func() bool { return e.s.remote(dev.ID) == nil })
 	// A non-cloud id: cloudBusy does nothing.
-	done, err := e.s.cloudBusy("mock-1")
+	done, err := e.s.CloudBusy("mock-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +337,7 @@ func TestRemoteIdle_KeepaliveAndDaemonTimer(t *testing.T) {
 	ctx := context.Background()
 	dev := e.launch(cloudprov.CloudSpec{IdleReleaseSec: 60})
 	d := e.driver(0)
-	waitUntil(t, 4*time.Second, "a keepalive", func() bool { return d.pings.Load() > 0 })
+	waitUntil(t, 4*time.Second, "a keepalive", func() bool { return d.Pings.Load() > 0 })
 	// The held device holds the daemon's idle timer.
 	time.Sleep(1500 * time.Millisecond)
 	if e.s.idle.stopped {
@@ -514,9 +345,9 @@ func TestRemoteIdle_KeepaliveAndDaemonTimer(t *testing.T) {
 	}
 	// A ping that fails while the provider says RUNNING keeps the device.
 	boom := errors.New("socket hang up")
-	d.pingErr.Store(&boom)
-	n := d.pings.Load()
-	waitUntil(t, 4*time.Second, "a failing ping", func() bool { return d.pings.Load() > n+1 })
+	d.PingErr.Store(&boom)
+	n := d.Pings.Load()
+	waitUntil(t, 4*time.Second, "a failing ping", func() bool { return d.Pings.Load() > n+1 })
 	if e.s.remote(dev.ID) == nil {
 		t.Fatal("a failed ping ended a running session")
 	}
@@ -526,17 +357,17 @@ func TestRemoteIdle_KeepaliveAndDaemonTimer(t *testing.T) {
 	}
 	a := e.s.getAttached(dev.ID)
 	a.busy.Lock()
-	n = d.pings.Load()
+	n = d.Pings.Load()
 	time.Sleep(1500 * time.Millisecond)
-	if d.pings.Load() != n {
+	if d.Pings.Load() != n {
 		t.Fatal("pinged while a step held the device")
 	}
 	a.busy.Unlock()
 	// Once the provider ends the session, the next failed ping ends the
 	// device.
-	e.f.mu.Lock()
-	e.f.state = "COMPLETED"
-	e.f.mu.Unlock()
+	e.f.Mu.Lock()
+	e.f.State = "COMPLETED"
+	e.f.Mu.Unlock()
 	waitUntil(t, 5*time.Second, "the device to end", func() bool {
 		info, ok := e.s.registry.Record(dev.ID)
 		return ok && info.State == "ended"
@@ -591,7 +422,7 @@ func TestRemoteIdle_PingDoesNotMakeWaitFalseBusy(t *testing.T) {
 
 func TestRemoteSessionCap(t *testing.T) {
 	e := newRemoteEnv(t, nil)
-	e.f.expires = 32 * time.Second // the daemon releases 30 s before
+	e.f.Expires = 32 * time.Second // the daemon releases 30 s before
 	ctx := context.Background()
 	events, _, unsub := e.s.events.Subscribe("", 0)
 	defer unsub()
@@ -634,8 +465,8 @@ func TestRemote_LedgerWriteFailsTheLaunch(t *testing.T) {
 	if codeOf(t, err) != CodeDeviceError || !strings.Contains(err.Error(), "cannot record") {
 		t.Fatalf("launch with the ledger locked: %v", err)
 	}
-	if len(e.f.releasedRefs()) != 1 {
-		t.Fatalf("the session was not stopped: %v", e.f.releasedRefs())
+	if len(e.f.ReleasedRefs()) != 1 {
+		t.Fatalf("the session was not stopped: %v", e.f.ReleasedRefs())
 	}
 }
 
@@ -647,16 +478,16 @@ func TestRemote_LaunchFailures(t *testing.T) {
 	e.s.deps.NewRemoteDriver = func(context.Context, string, map[string]any) (RemoteDriver, DriverInfo, error) {
 		return nil, DriverInfo{}, errors.New("POST https://x/remote-endpoint/SECRET/wd/hub/session: refused")
 	}
-	e.f.fakeProvider = newFakeProvider()
+	e.f.Provider = daemontest.NewProvider()
 	_, err := e.c.CreateDevice(ctx, BootRequest{Create: &CreateSpec{Cloud: &cloudprov.CloudSpec{Platform: "android"}}})
-	if codeOf(t, err) != CodeDeviceError || len(e.f.releasedRefs()) != 1 {
-		t.Fatalf("WebDriver failure: %v %v", err, e.f.releasedRefs())
+	if codeOf(t, err) != CodeDeviceError || len(e.f.ReleasedRefs()) != 1 {
+		t.Fatalf("WebDriver failure: %v %v", err, e.f.ReleasedRefs())
 	}
 	if entries, _ := ReadLedger(); len(entries) != 0 {
 		t.Fatalf("ledger: %+v", entries)
 	}
 	// The release fails too: the entry stays for --orphans.
-	e.f.releaseFn = func(string) error { return errors.New("throttled") }
+	e.f.ReleaseFn = func(string) error { return errors.New("throttled") }
 	_, _ = e.c.CreateDevice(ctx, BootRequest{Create: &CreateSpec{Cloud: &cloudprov.CloudSpec{Platform: "android"}}})
 	if entries, _ := ReadLedger(); len(entries) != 1 {
 		t.Fatalf("ledger after a failed release: %+v", entries)
@@ -678,7 +509,7 @@ func TestRemote_ReleaseFailureAndShutdown(t *testing.T) {
 	a := e.launch(cloudprov.CloudSpec{})
 	b := e.launch(cloudprov.CloudSpec{})
 	// A stop whose release fails answers DEVICE_ERROR, and the entry stays.
-	e.f.releaseFn = func(ref string) error {
+	e.f.ReleaseFn = func(ref string) error {
 		if strings.Contains(ref, a.ID) {
 			return cloudprov.Errorf(cloudprov.Other, "throttled")
 		}
@@ -714,7 +545,7 @@ func TestRemote_SelfRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e.f.releaseFn = func(ref string) error {
+	e.f.ReleaseFn = func(ref string) error {
 		if ref == "ref-fail" {
 			return errors.New("throttled")
 		}
@@ -723,7 +554,7 @@ func TestRemote_SelfRelease(t *testing.T) {
 	events, _, unsub := e.s.events.Subscribe("", 0)
 	e.s.selfRelease()
 	unsub()
-	if got := e.f.releasedRefs(); len(got) != 1 || got[0] != "ref-old" {
+	if got := e.f.ReleasedRefs(); len(got) != 1 || got[0] != "ref-old" {
 		t.Fatalf("released %v", got)
 	}
 	// The release reports its minutes on the event.
@@ -805,14 +636,14 @@ func TestRemote_ListsTheAppiumVersion(t *testing.T) {
 }
 
 func TestRemote_SessionAnswers(t *testing.T) {
-	d := &fakeRemoteDriver{Driver: mock.New(mock.Config{})}
+	d := &daemontest.RemoteDriver{Driver: mock.New(mock.Config{})}
 	s := &Server{}
 	rd := &remoteDevice{driver: d}
-	if !s.sessionAnswers(rd) || d.pings.Load() != 1 {
+	if !s.sessionAnswers(rd) || d.Pings.Load() != 1 {
 		t.Fatal("a live session")
 	}
 	gone := errors.New("invalid session id")
-	d.pingErr.Store(&gone)
+	d.PingErr.Store(&gone)
 	if s.sessionAnswers(rd) {
 		t.Fatal("a dead session answered")
 	}
@@ -826,7 +657,7 @@ func TestRemote_FailedReleaseIsRetried(t *testing.T) {
 	dev := e.launch(cloudprov.CloudSpec{})
 	var fails atomic.Int32
 	fails.Store(2)
-	e.f.releaseFn = func(string) error {
+	e.f.ReleaseFn = func(string) error {
 		if fails.Add(-1) >= 0 {
 			return errors.New("ServiceUnavailableException")
 		}
@@ -843,7 +674,7 @@ func TestRemote_FailedReleaseIsRetried(t *testing.T) {
 	}
 	waitUntil(t, 5*time.Second, "the retried release", func() bool {
 		entries, _ := ReadLedger()
-		return len(entries) == 0 && len(e.f.releasedRefs()) == 1
+		return len(entries) == 0 && len(e.f.ReleasedRefs()) == 1
 	})
 	var retried bool
 	for len(events) > 0 {
@@ -862,15 +693,15 @@ func TestRemote_UnknownSessionEndsTheDevice(t *testing.T) {
 	e := newRemoteEnv(t, nil)
 	dev := e.launch(cloudprov.CloudSpec{})
 	rd := e.s.remote(dev.ID)
-	e.f.mu.Lock()
-	e.f.refreshErr = cloudprov.Errorf(cloudprov.Other, "slow down")
-	e.f.mu.Unlock()
+	e.f.Mu.Lock()
+	e.f.RefreshErr = cloudprov.Errorf(cloudprov.Other, "slow down")
+	e.f.Mu.Unlock()
 	if e.s.checkRemote(rd) {
 		t.Fatal("a failed refresh ended the device")
 	}
-	e.f.mu.Lock()
-	e.f.refreshErr = cloudprov.Errorf(cloudprov.NotFound, "no such session")
-	e.f.mu.Unlock()
+	e.f.Mu.Lock()
+	e.f.RefreshErr = cloudprov.Errorf(cloudprov.NotFound, "no such session")
+	e.f.Mu.Unlock()
 	if !e.s.checkRemote(rd) {
 		t.Fatal("an unknown session did not end the device")
 	}
@@ -891,8 +722,10 @@ func TestRemote_PlainDaemonDoesNotShareCloudDevices(t *testing.T) {
 	if e.s.sharedInfo(DeviceInfo{ID: dev.ID, Provider: "devicefarm"}) {
 		t.Fatal("a plain daemon shared its cloud device past --share-device")
 	}
-	hub := &Server{cfg: Config{Hub: true, ShareDevices: []string{"mock-1"}}}
-	if !hub.sharedInfo(DeviceInfo{ID: dev.ID, Provider: "devicefarm"}) {
+	hub := New(Config{Hub: NewTestHub(), ShareDevices: []string{"mock-1"}}, Deps{})
+	r := httptest.NewRequest("GET", "/v1/devices", nil)
+	r = r.WithContext(withCaller(r.Context(), Caller{Remote: true}))
+	if len(hub.cfg.Hub.Visible(r, []DeviceInfo{{ID: dev.ID, Provider: "devicefarm"}})) == 0 {
 		t.Fatal("a hub's cloud device is not in its pool")
 	}
 }
@@ -909,7 +742,7 @@ func TestRemote_FailedLaunchReleaseIsRetried(t *testing.T) {
 	}
 	var fails atomic.Int32
 	fails.Store(1)
-	e.f.releaseFn = func(string) error {
+	e.f.ReleaseFn = func(string) error {
 		if fails.Add(-1) >= 0 {
 			return errors.New("ServiceUnavailableException")
 		}
@@ -920,18 +753,18 @@ func TestRemote_FailedLaunchReleaseIsRetried(t *testing.T) {
 	}
 	waitUntil(t, 5*time.Second, "the retried release", func() bool {
 		entries, _ := ReadLedger()
-		return len(entries) == 0 && len(e.f.releasedRefs()) == 1
+		return len(entries) == 0 && len(e.f.ReleasedRefs()) == 1
 	})
 	// The provider gives up a session it could not stop: the daemon
 	// releases the ledger's entry for it.
-	e.f.releaseFn = nil
-	e.f.failAfterCreated = cloudprov.Errorf(cloudprov.DeviceBusy, "busy; stopping the session failed")
+	e.f.ReleaseFn = nil
+	e.f.FailAfterCreated = cloudprov.Errorf(cloudprov.DeviceBusy, "busy; stopping the session failed")
 	if _, err := e.c.CreateDevice(ctx, BootRequest{Create: &CreateSpec{Cloud: &cloudprov.CloudSpec{Platform: "android"}}}); err == nil {
 		t.Fatal("the launch passed")
 	}
 	waitUntil(t, 5*time.Second, "the abandoned session's release", func() bool {
 		entries, _ := ReadLedger()
-		return len(entries) == 0 && len(e.f.releasedRefs()) == 2
+		return len(entries) == 0 && len(e.f.ReleasedRefs()) == 2
 	})
 }
 
@@ -939,7 +772,7 @@ func TestRemote_FailedLaunchReleaseIsRetried(t *testing.T) {
 // registered after the teardown, and the session is released.
 func TestRemote_ShutdownCancelsALaunch(t *testing.T) {
 	e := newRemoteEnv(t, nil)
-	e.f.hold = make(chan struct{})
+	e.f.Hold = make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.c.CreateDevice(context.Background(), BootRequest{Create: &CreateSpec{Cloud: &cloudprov.CloudSpec{Platform: "android"}}})

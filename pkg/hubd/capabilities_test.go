@@ -1,4 +1,4 @@
-package daemon
+package hubd
 
 import (
 	"encoding/json"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
 // capsConfig is a config.json written as text, so the capabilities keep
@@ -25,7 +27,7 @@ const mock1Caps = `{"teamstation":{"class":"ipad","features":["camera"]},"anythi
 
 func writeCapsConfig(t *testing.T) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(Home(), "config.json"), []byte(capsConfig), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(daemon.Home(), "config.json"), []byte(capsConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -46,17 +48,17 @@ func compact(t *testing.T, raw json.RawMessage) string {
 // answers; a null one is left out. A running emulator takes its serial's
 // entry first and its AVD's after.
 func TestServer_DeviceCapabilities(t *testing.T) {
-	env := newHubEnv(t, Config{})
+	env := newHubEnv(t, daemon.Config{})
 	writeCapsConfig(t)
 
-	res := env.lease(env.remote, LeaseRequest{Device: "mock-1", TTLSec: 30, Attach: &AttachConfig{Platform: "mock"}})
+	res := env.lease(env.remote, daemon.LeaseRequest{Device: "mock-1", TTLSec: 30, Attach: &daemon.AttachConfig{Platform: "mock"}})
 	if res.Device == nil || compact(t, res.Device.Capabilities) != mock1Caps || res.Device.Description != "Lab iPad" {
 		t.Fatalf("lease answer: %+v", res.Device)
 	}
-	if d, err := env.remote.Device(bg, "mock-1"); err != nil || compact(t, d.Capabilities) != mock1Caps {
+	if d, err := env.remote.Device(t.Context(), "mock-1"); err != nil || compact(t, d.Capabilities) != mock1Caps {
 		t.Fatalf("device: %v %+v", err, d)
 	}
-	listed, err := env.remote.Devices(bg, "")
+	listed, err := env.remote.Devices(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +67,7 @@ func TestServer_DeviceCapabilities(t *testing.T) {
 			t.Fatalf("listed: %+v", d)
 		}
 	}
-	devs := []DeviceInfo{
+	devs := []daemon.DeviceInfo{
 		{ID: "mock-1", Platform: "mock"},
 		{ID: "mock-2", Platform: "mock"},
 		{ID: "mock-3", Platform: "mock"},
@@ -73,7 +75,7 @@ func TestServer_DeviceCapabilities(t *testing.T) {
 		{ID: "emulator-5556", Platform: "android", Kind: "emulator", Name: "other"},
 		{ID: "mock-9", Platform: "mock", Capabilities: json.RawMessage(`{"stale":true}`)},
 	}
-	env.s.applyDeviceConfig(devs)
+	env.s.ApplyDeviceConfig(devs)
 	want := []string{mock1Caps, `"just a string"`, "", `{"from":"avd"}`, `[true]`, ""}
 	for i, d := range devs {
 		got := ""

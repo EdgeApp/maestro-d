@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
@@ -264,7 +265,7 @@ func (h *hubFiles) fetchOutputs(outputs []string) error {
 			return err
 		}
 		if !h.quiet {
-			progress("Fetched %s → %s", entry, target)
+			common.Progress("Fetched %s → %s", entry, target)
 		}
 	}
 	if h.bundleDir != "" && len(rest) > 0 {

@@ -252,7 +252,7 @@ func WrapErr(code Code, err error) *Error {
 // WithDetails adds structured context and returns the same error.
 // detail returns a string detail of e ("" and false when e is nil or has
 // none).
-func (e *Error) detail(key string) (string, bool) {
+func (e *Error) Detail(key string) (string, bool) {
 	if e == nil {
 		return "", false
 	}

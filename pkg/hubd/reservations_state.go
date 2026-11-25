@@ -1,4 +1,4 @@
-package daemon
+package hubd
 
 // reservations_state.go: a hub's reservations outlive its process.
 //
@@ -27,6 +27,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
@@ -51,9 +52,9 @@ type reservationFile struct {
 // ReservationsPath is where hub daemon name keeps its reservations.
 func ReservationsPath(name string) string {
 	if name == "" || name == "hub" {
-		return filepath.Join(Home(), "hub", "scheduled-leases.json")
+		return filepath.Join(daemon.Home(), "hub", "scheduled-leases.json")
 	}
-	return filepath.Join(Home(), "hub", "daemons", name, "scheduled-leases.json")
+	return filepath.Join(daemon.Home(), "hub", "daemons", name, "scheduled-leases.json")
 }
 
 // snapshot lists the reservations that have not started.
@@ -80,9 +81,6 @@ func (t *leaseTable) snapshot() []reservationRecord {
 // saveReservations writes the hub's reservations. A failure is logged:
 // the reservations still hold in this process.
 func (s *Server) saveReservations() {
-	if !s.cfg.Hub {
-		return
-	}
 	s.reservationsMu.Lock()
 	defer s.reservationsMu.Unlock()
 	if err := writeReservations(ReservationsPath(s.cfg.Name), s.leases.snapshot()); err != nil {
@@ -166,8 +164,8 @@ func (s *Server) loadReservations() {
 		default:
 			started++
 			logger.Info("lease %s: %s reserved by %s started while the hub was down; it runs until %s", e.id, e.device,
-				HolderName(e.holder), e.expires.UTC().Format(time.RFC3339))
-			s.events.Publish(Event{Type: "lease.granted", Device: e.device, Message: HolderName(e.holder)})
+				daemon.HolderName(e.holder), e.expires.UTC().Format(time.RFC3339))
+			s.Events().Publish(daemon.Event{Type: "lease.granted", Device: e.device, Message: daemon.HolderName(e.holder)})
 		}
 	}
 	logger.Info("reservations: %d kept, %d started, %d over (from %s)", kept, started, dropped, path)

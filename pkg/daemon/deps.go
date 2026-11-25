@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -26,6 +27,8 @@ type Deps struct {
 	// Device management: the catalog and the create and delete tools
 	// behind `device catalog|create|delete`. A nil hook makes its
 	// operation fail with INTERNAL.
+	BootDevice         func(platform, name string, timeout time.Duration) (string, error)
+	ShutdownDevice     func(DeviceInfo) error
 	IOSCatalog         func() (*simulator.Catalog, error)
 	AndroidCatalog     func(available bool) (*emulator.Catalog, error)
 	CreateSimulator    func(name, deviceTypeID, runtimeID string) (string, error)

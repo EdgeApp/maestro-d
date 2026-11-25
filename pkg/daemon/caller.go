@@ -69,7 +69,7 @@ func isLoopbackListen(addr string) bool {
 
 // remoteTCP decides whether a TCP request is remote.
 func (s *Server) remoteTCP(remoteAddr string) bool {
-	if s.cfg.Hub {
+	if s.cfg.Hub != nil {
 		return true
 	}
 	host, _, err := net.SplitHostPort(remoteAddr)
@@ -82,7 +82,7 @@ func (s *Server) remoteTCP(remoteAddr string) bool {
 // importsEnv reports whether sessions import the daemon's environment: not
 // on a hub, nor on a daemon that listens beyond loopback.
 func (s *Server) importsEnv() bool {
-	return !s.cfg.Hub && (s.cfg.HTTPAddr == "" || isLoopbackListen(s.cfg.HTTPAddr))
+	return s.cfg.Hub == nil && (s.cfg.HTTPAddr == "" || isLoopbackListen(s.cfg.HTTPAddr))
 }
 
 // callerPolicy is the executor policy for a step-running call on a.
@@ -100,55 +100,55 @@ func (s *Server) callerPolicy(ctx context.Context, a *attached) *executor.Caller
 	return p
 }
 
-// forbidden builds a FORBIDDEN error for a remote request.
-func forbidden(format string, args ...any) *Error {
+// Forbidden builds a FORBIDDEN error for a remote request.
+func Forbidden(format string, args ...any) *Error {
 	return Errorf(CodeForbidden, format, args...)
 }
 
-// checkRemoteAttach refuses the attach settings that would give a remote
+// CheckRemoteAttach refuses the attach settings that would give a remote
 // caller the hub's host: a web session, a report or flow directory, a
 // browser profile, an app file that is not a blob ref, or Appium (its
 // driver, server URL or capabilities file).
-func checkRemoteAttach(cfg *AttachConfig) *Error {
+func CheckRemoteAttach(cfg *AttachConfig) *Error {
 	if strings.EqualFold(cfg.Platform, ComputerPlatform) {
-		return forbidden("a remote caller cannot attach this computer: the computer device is local only").
+		return Forbidden("a remote caller cannot attach this computer: the computer device is local only").
 			WithDetails("field", "platform")
 	}
 	if strings.EqualFold(cfg.Platform, "web") || isWebDriver(cfg.Driver) {
-		return forbidden("a remote caller cannot attach a web session: hubs share simulators, emulators and phones, not the host's browser").
+		return Forbidden("a remote caller cannot attach a web session: hubs share simulators, emulators and phones, not the host's browser").
 			WithDetails("field", "platform")
 	}
 	if cfg.OutputDir != "" {
-		return forbidden("a remote caller cannot set outputDir (a directory on the daemon's host)").WithDetails("field", "outputDir")
+		return Forbidden("a remote caller cannot set outputDir (a directory on the daemon's host)").WithDetails("field", "outputDir")
 	}
 	if cfg.FlowDir != "" {
-		return forbidden("a remote caller cannot set flowDir (a directory on the daemon's host)").WithDetails("field", "flowDir")
+		return Forbidden("a remote caller cannot set flowDir (a directory on the daemon's host)").WithDetails("field", "flowDir")
 	}
 	if cfg.AppFile != "" && !strings.HasPrefix(cfg.AppFile, "blob:") {
-		return forbidden("appFile %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", cfg.AppFile).
+		return Forbidden("appFile %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", cfg.AppFile).
 			WithDetails("field", "appFile")
 	}
 	if v, ok := cfg.Extra["browser"]; ok && v != "" && v != nil {
-		return forbidden("a remote caller cannot set extra.browser (a program on the daemon's host)").
+		return Forbidden("a remote caller cannot set extra.browser (a program on the daemon's host)").
 			WithDetails("field", "extra.browser")
 	}
 	if v, ok := cfg.Extra["userDataDir"]; ok && v != "" && v != nil {
-		return forbidden("a remote caller cannot set extra.userDataDir (a browser profile on the daemon's host)").
+		return Forbidden("a remote caller cannot set extra.userDataDir (a browser profile on the daemon's host)").
 			WithDetails("field", "extra.userDataDir")
 	}
 	// Appium capabilities name host files and programs (appium:app,
 	// appium:chromedriverExecutable, …) and appiumUrl points the hub at
 	// any address it can reach, so a remote caller gets no Appium at all.
 	if isAppiumDriver(cfg.Driver) {
-		return forbidden("a remote caller cannot attach with the Appium driver (its capabilities reach the daemon's host)").
+		return Forbidden("a remote caller cannot attach with the Appium driver (its capabilities reach the daemon's host)").
 			WithDetails("field", "driver")
 	}
 	if cfg.AppiumURL != "" {
-		return forbidden("a remote caller cannot set appiumUrl (an Appium server the daemon would connect to)").
+		return Forbidden("a remote caller cannot set appiumUrl (an Appium server the daemon would connect to)").
 			WithDetails("field", "appiumUrl")
 	}
 	if v, ok := cfg.Extra["capsFile"]; ok && v != "" && v != nil {
-		return forbidden("a remote caller cannot set extra.capsFile (Appium capabilities reach the daemon's host)").
+		return Forbidden("a remote caller cannot set extra.capsFile (Appium capabilities reach the daemon's host)").
 			WithDetails("field", "extra.capsFile")
 	}
 	return nil

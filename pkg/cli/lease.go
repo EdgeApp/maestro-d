@@ -22,15 +22,16 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
+	"github.com/devicelab-dev/maestro-runner/pkg/fsage"
 )
 
 // leaseRecord is one entry of leases.json.
@@ -118,7 +119,7 @@ func loadLeases() []leaseRecord {
 	}
 	var f leaseFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		progress("warning: ignoring unreadable %s: %v", leasesPath(), err)
+		common.Progress("warning: ignoring unreadable %s: %v", leasesPath(), err)
 		return nil
 	}
 	cutoff := time.Now().Add(-leaseStaleAfter)
@@ -162,16 +163,16 @@ func updateLeases(fn func([]leaseRecord) []leaseRecord) {
 	leasesMu.Lock()
 	defer leasesMu.Unlock()
 	if err := os.MkdirAll(daemon.Home(), 0o700); err != nil {
-		progress("warning: %s: %v", leasesPath(), err)
+		common.Progress("warning: %s: %v", leasesPath(), err)
 		return
 	}
-	if lock, err := lockFile(leasesPath() + ".lock"); err != nil {
-		progress("warning: lock %s: %v (updating it unlocked)", leasesPath(), err)
+	if lock, err := fsage.LockFile(leasesPath() + ".lock"); err != nil {
+		common.Progress("warning: lock %s: %v (updating it unlocked)", leasesPath(), err)
 	} else {
-		defer unlockFile(lock)
+		defer fsage.UnlockFile(lock)
 	}
 	if err := saveLeases(fn(loadLeases())); err != nil {
-		progress("warning: %s: %v", leasesPath(), err)
+		common.Progress("warning: %s: %v", leasesPath(), err)
 	}
 }
 
@@ -270,9 +271,9 @@ func wireLeases(c *daemon.Client, o *daemonOpts) {
 		switch {
 		case o.JSON:
 		case hint != "":
-			progress("Lease %s on %s has ended, and the device is gone with it; take a new one with `%s`", lease, device, hint)
+			common.Progress("Lease %s on %s has ended, and the device is gone with it; take a new one with `%s`", lease, device, hint)
 		default:
-			progress("Lease %s on %s has expired; take a new one with `maestro-d lease --device %s`", lease, device, device)
+			common.Progress("Lease %s on %s has expired; take a new one with `maestro-d lease --device %s`", lease, device, device)
 		}
 	}
 }
@@ -359,31 +360,31 @@ func isCode(err error, code daemon.Code) bool {
 // ---------------------------------------------------------------------------
 // lease / release
 
-var leaseFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], one(deviceFlag), attachFlags, targetFlags, []dflag{
-	strFlag("kind", "Select a device of this kind: simulator, emulator, device", nil,
+var leaseFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], common.One(deviceFlag), attachFlags, targetFlags, []dflag{
+	common.StringFlag("kind", "Select a device of this kind: simulator, emulator, device", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Kind = v }),
-	strFlag("name", "Select the device with this name (or id)", nil,
+	common.StringFlag("name", "Select the device with this name (or id)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Name = v }),
-	strFlag("os", "Select an OS version, or a prefix of one (26 matches 26.5)", nil,
+	common.StringFlag("os", "Select an OS version, or a prefix of one (26 matches 26.5)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.OSVersion = v }),
-	strFlag("hub", "Select a device on this hub", nil,
+	common.StringFlag("hub", "Select a device on this hub", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Hub = v }),
-	boolFlag("boot", "Let the selector pick a shut-down simulator or AVD, which the hub boots for the lease", nil,
+	common.BoolFlag("boot", "Let the selector pick a shut-down simulator or AVD, which the hub boots for the lease", nil,
 		func(o *daemonOpts, v bool) { o.lease.sel.Boot = v }),
-	strFlag("location", "cloud: launch a cloud device for the lease, on the hub that holds the provider's credentials (--name is then the model)", nil,
+	common.StringFlag("location", "cloud: launch a cloud device for the lease, on the hub that holds the provider's credentials (--name is then the model)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Location = v }),
-	strFlag("provider", "Cloud: the provider (default devicefarm)", nil, func(o *daemonOpts, v string) { o.lease.sel.Provider = v }),
-	strFlag("os-min", "Select an OS version at least this", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMin = v }),
-	strFlag("os-max", "Select an OS version at most this, at its own precision (17 admits 17.5)", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMax = v }),
-	strFlag("idle-release", "Cloud: release the device (and end the lease) after this long without a request (default 10m, 60s–150m)", nil,
+	common.StringFlag("provider", "Cloud: the provider (default devicefarm)", nil, func(o *daemonOpts, v string) { o.lease.sel.Provider = v }),
+	common.StringFlag("os-min", "Select an OS version at least this", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMin = v }),
+	common.StringFlag("os-max", "Select an OS version at most this, at its own precision (17 admits 17.5)", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMax = v }),
+	common.StringFlag("idle-release", "Cloud: release the device (and end the lease) after this long without a request (default 10m, 60s–150m)", nil,
 		func(o *daemonOpts, v string) { o.lease.idleRelease = v }),
-	strFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
+	common.StringFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
 		func(o *daemonOpts, v string) { o.lease.appiumVersion = v }),
 	ttlFlag("The lease's window: a duration (8h, 90m) or seconds (default the hub's, 8h or the device's maximum); using the lease never extends it"),
-	strFlag("holder", "Who holds the lease, as listings show it (default user@host)", nil,
+	common.StringFlag("holder", "Who holds the lease, as listings show it (default user@host)", nil,
 		func(o *daemonOpts, v string) { o.lease.holder = v }),
-	{name: "attach", kind: kindBool, value: "true", usage: "Attach the device once leased (default true; --no-attach only reserves it)",
-		apply: func(o *daemonOpts, v string) error {
+	{Name: "attach", Kind: common.Bool, Value: "true", Usage: "Attach the device once leased (default true; --no-attach only reserves it)",
+		Apply: func(o *daemonOpts, v string) error {
 			o.lease.noAttach = v == "false"
 			return nil
 		}},
@@ -393,7 +394,7 @@ var leaseCommand = &cli.Command{
 	Name:      "lease",
 	Usage:     "Lease a device on a hub, by id or by selector, and attach it",
 	ArgsUsage: " ",
-	Description: flagsDoc(`A hub lends each device to one client at a time, for a fixed window: --ttl
+	Description: common.FlagHelp(`A hub lends each device to one client at a time, for a fixed window: --ttl
 (default 8 hours, or the device's maximum when that is shorter; the hub
 refuses a window over the maximum). The lease is recorded in leases.json
 and sent with every later command; using it never extends it. Only
@@ -504,7 +505,7 @@ func startedRecord(r leaseRecord) bool {
 
 func printLease(o *daemonOpts, l daemon.Lease, info *daemon.DeviceInfo) error {
 	if o.JSON {
-		printJSON(os.Stdout, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
+		common.PrintJSON(os.Stdout, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
 		return nil
 	}
 	if l.State == daemon.LeaseScheduled {
@@ -527,8 +528,8 @@ func secs(n int) string {
 
 // ttlFlag is --ttl: a lease window as a duration or seconds.
 func ttlFlag(usage string) dflag {
-	return dflag{name: "ttl", kind: kindString, usage: usage, apply: func(o *daemonOpts, v string) error {
-		d, err := parseLeaseDuration("ttl", v)
+	return dflag{Name: "ttl", Kind: common.String, Usage: usage, Apply: func(o *daemonOpts, v string) error {
+		d, err := common.ParseLeaseDuration("ttl", v)
 		if err != nil {
 			return err
 		}
@@ -537,7 +538,7 @@ func ttlFlag(usage string) dflag {
 	}}
 }
 
-var renewFlags = flagSet(daemonSelectFlags, one(deviceFlag), targetFlags, []dflag{
+var renewFlags = common.FlagSet(daemonSelectFlags, common.One(deviceFlag), targetFlags, []dflag{
 	ttlFlag("The new window from now: a duration (8h, 90m) or seconds (default the lease's own)"),
 })
 
@@ -545,7 +546,7 @@ var renewCommand = &cli.Command{
 	Name:      "renew",
 	Usage:     "Renew this client's lease on a device (or every lease it holds on the hub): its window starts again now",
 	ArgsUsage: " ",
-	Description: flagsDoc(`A lease's window is fixed: using the device never extends it. renew sets
+	Description: common.FlagHelp(`A lease's window is fixed: using the device never extends it. renew sets
 its end to now plus --ttl (default the lease's own window); a window over
 the device's maximum is refused. Without --device it renews every lease
 this client holds on the hub.
@@ -626,9 +627,9 @@ func runRenew(ctx context.Context, o *daemonOpts, args []string) error {
 	}
 	if o.JSON {
 		if len(renewed) == 1 && o.Device != "" {
-			printJSON(os.Stdout, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: renewed[0]})
+			common.PrintJSON(os.Stdout, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: renewed[0]})
 		} else {
-			printJSON(os.Stdout, daemon.LeasesResult{Envelope: daemon.Envelope{OK: true}, Leases: renewed})
+			common.PrintJSON(os.Stdout, daemon.LeasesResult{Envelope: daemon.Envelope{OK: true}, Leases: renewed})
 		}
 	}
 	return nil
@@ -648,16 +649,16 @@ func untilExpiry(expiresAt string) string {
 	return d.String()
 }
 
-var releaseFlags = flagSet(daemonSelectFlags, one(deviceFlag), targetFlags, []dflag{
-	boolFlag("all", "Release every lease this client holds on the hub", nil, func(o *daemonOpts, v bool) { o.lease.all = v }),
-	strFlag("lease", "Release this one lease, by id (a reservation is cancelled)", nil, func(o *daemonOpts, v string) { o.lease.id = v }),
+var releaseFlags = common.FlagSet(daemonSelectFlags, common.One(deviceFlag), targetFlags, []dflag{
+	common.BoolFlag("all", "Release every lease this client holds on the hub", nil, func(o *daemonOpts, v bool) { o.lease.all = v }),
+	common.StringFlag("lease", "Release this one lease, by id (a reservation is cancelled)", nil, func(o *daemonOpts, v string) { o.lease.id = v }),
 })
 
 var releaseCommand = &cli.Command{
 	Name:      "release",
 	Usage:     "End this client's leases on a device (or one lease, or --all): the hub detaches it",
 	ArgsUsage: " ",
-	Description: flagsDoc(`--device releases every lease this client holds on that device, its
+	Description: common.FlagHelp(`--device releases every lease this client holds on that device, its
 reservations included; --lease releases that one lease (a reservation is
 cancelled, and nothing is detached); --all every lease on the hub. Against
 a daemon that has no leases (not a hub), release does nothing and
@@ -680,7 +681,7 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 	released := []string{}
 	done := func(note string) error {
 		if o.JSON {
-			printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "released": released})
+			common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "released": released})
 		} else if note != "" {
 			fmt.Println(note)
 		}
@@ -764,59 +765,8 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 		}
 	}
 	if o.JSON && len(minutes) > 0 {
-		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "released": released, "deviceMinutes": minutes})
+		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "released": released, "deviceMinutes": minutes})
 		return nil
 	}
 	return done("")
-}
-
-// parseLeaseDuration reads a lease window: a Go duration (8h, 90m, 1h30m)
-// or a plain number of seconds, at least one second.
-func parseLeaseDuration(flag, v string) (time.Duration, error) {
-	v = strings.TrimSpace(v)
-	var d time.Duration
-	if n, err := strconv.Atoi(v); err == nil {
-		d = time.Duration(n) * time.Second
-	} else if d, err = time.ParseDuration(v); err != nil {
-		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: want a duration (8h, 90m, 1h30m) or seconds", flag, v)
-	}
-	if d < time.Second {
-		return 0, daemon.Errorf(daemon.CodeUsage, "--%s %q: at least 1s", flag, v)
-	}
-	return d.Round(time.Second), nil
-}
-
-// parseReservationLead reads hub start's --reservation-lead: "" is the
-// default, DefaultReservationLead.
-func parseReservationLead(v string) (time.Duration, error) {
-	if strings.TrimSpace(v) == "" {
-		return daemon.DefaultReservationLead, nil
-	}
-	return parseLeaseDuration("reservation-lead", v)
-}
-
-// parseLeaseMax reads hub start's --lease-max values: DURATION sets the
-// hub's maximum window (the last one wins), DEVICE=DURATION one device's.
-func parseLeaseMax(vals []string) (time.Duration, []daemon.LeaseMax, error) {
-	var hubMax time.Duration
-	var devs []daemon.LeaseMax
-	for _, v := range vals {
-		dev, dur, perDevice := "", v, false
-		if i := strings.LastIndexByte(v, '='); i >= 0 {
-			dev, dur, perDevice = strings.TrimSpace(v[:i]), v[i+1:], true
-			if dev == "" {
-				return 0, nil, daemon.Errorf(daemon.CodeUsage, "--lease-max %q: want DURATION or DEVICE=DURATION", v)
-			}
-		}
-		d, err := parseLeaseDuration("lease-max", dur)
-		if err != nil {
-			return 0, nil, err
-		}
-		if perDevice {
-			devs = append(devs, daemon.LeaseMax{Device: dev, Max: d})
-		} else {
-			hubMax = d
-		}
-	}
-	return hubMax, devs, nil
 }

@@ -68,7 +68,7 @@ func newCallerEnv(t *testing.T, cfg Config) *callerEnv {
 // client of the env send it.
 func (e *callerEnv) lease(t *testing.T, device string) {
 	t.Helper()
-	if !e.s.cfg.Hub {
+	if e.s.cfg.Hub == nil {
 		return
 	}
 	res, err := e.local.AcquireLease(context.Background(), LeaseRequest{Device: device, Holder: "test"})
@@ -115,7 +115,7 @@ func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
 }
 
 func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: true, ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: NewTestHub(), ShareDevices: []string{"mock-1", "mock-2"}})
 	ctx := context.Background()
 	env.lease(t, "mock-1")
 	if _, err := env.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -213,7 +213,7 @@ func TestCaller_EnvironmentStaysOnTheHost(t *testing.T) {
 		cfg     Config
 		imports bool
 	}{
-		{"hub", Config{Hub: true, HTTPAddr: ":7433", Token: "t", ShareDevices: []string{"mock-1", "mock-2"}}, false},
+		{"hub", Config{Hub: NewTestHub(), HTTPAddr: ":7433", Token: "t", ShareDevices: []string{"mock-1", "mock-2"}}, false},
 		{"non-loopback serve", Config{HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
 		{"loopback serve", Config{HTTPAddr: "127.0.0.1:7433"}, true},
 		{"socket only", Config{}, true},
@@ -259,8 +259,8 @@ func TestCaller_ListenChecks(t *testing.T) {
 		{Config{HTTPAddr: "[::1]:7433"}, true},
 		{Config{HTTPAddr: "0.0.0.0:7433"}, false},
 		{Config{HTTPAddr: "0.0.0.0:7433", Token: "t"}, true},
-		{Config{HTTPAddr: ":7433", Hub: true}, false},
-		{Config{HTTPAddr: ":7433", Hub: true, Token: "t"}, true},
+		{Config{HTTPAddr: ":7433", Hub: NewTestHub()}, false},
+		{Config{HTTPAddr: ":7433", Hub: NewTestHub(), Token: "t"}, true},
 		{Config{TLSCert: "c"}, false},
 		{Config{HTTPAddr: ":7433", TLSCert: "c"}, false},
 		{Config{HTTPAddr: ":7433", TLSCert: "c", TLSKey: "k"}, true},
@@ -355,7 +355,7 @@ func TestCallerHelpers(t *testing.T) {
 		c    Caller
 		want string
 	}{{Caller{}, "unix socket"}, {Caller{Remote: true, Addr: "a"}, "remote a"}, {Caller{Addr: "b"}, "local b"}} {
-		if got := describeCaller(c.c); got != c.want {
+		if got := DescribeCaller(c.c); got != c.want {
 			t.Errorf("%+v: %q", c.c, got)
 		}
 	}
@@ -387,7 +387,7 @@ func TestCheckRemoteAttach_Appium(t *testing.T) {
 		{"devicelab", AttachConfig{Platform: "ios", Driver: "devicelab"}, ""},
 		{"empty capsFile", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": ""}}, ""},
 	} {
-		e := checkRemoteAttach(&tc.cfg)
+		e := CheckRemoteAttach(&tc.cfg)
 		switch {
 		case tc.field == "" && e != nil:
 			t.Errorf("%s: refused: %v", tc.name, e)

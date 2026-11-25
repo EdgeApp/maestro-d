@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
@@ -225,7 +227,7 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 		setupHome(t)
 	}
 	mcfg := fastConfig(name)
-	dcfg := daemon.Config{Name: name, HTTPAddr: "127.0.0.1:0", Token: testToken, Hub: true, HubName: name}
+	dcfg := daemon.Config{Name: name, HTTPAddr: "127.0.0.1:0", Token: testToken, Hub: &hubd.Server{}, HubName: name}
 	for _, o := range opts {
 		o(&mcfg, &dcfg)
 	}

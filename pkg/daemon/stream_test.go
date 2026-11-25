@@ -14,97 +14,15 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
-	"github.com/devicelab-dev/maestro-runner/pkg/capture/fake"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 	"github.com/devicelab-dev/maestro-runner/pkg/report"
 )
-
-// stepSource is a capture source a test drives: Run emits the clip's
-// config, then one packet per value sent on next (a keyframe when true),
-// and fails with the error sent on fail.
-type stepSource struct {
-	fpsControl bool
-	next       chan bool
-	fail       chan error
-	started    atomic.Int32
-	silent     bool // emit nothing at all
-	tiny       bool // emit 4-byte samples
-}
-
-func newStepSource() *stepSource {
-	return &stepSource{fpsControl: true, next: make(chan bool, 64), fail: make(chan error, 1)}
-}
-
-func (s *stepSource) Mode() capture.Mode { return capture.OnDemand }
-func (s *stepSource) FPSControl() bool   { return s.fpsControl }
-
-func (s *stepSource) Run(ctx context.Context, opts capture.Options, emit func(capture.Packet)) error {
-	s.started.Add(1)
-	format, frames, err := fake.ParseClip(fake.Clip())
-	if err != nil {
-		return err
-	}
-	if !s.silent {
-		emit(capture.Packet{Kind: capture.VideoConfig, Video: format})
-	}
-	var pts time.Duration
-	for i := 0; ; i++ {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-s.fail:
-			return err
-		case key := <-s.next:
-			f := frames[i%len(frames)]
-			if key {
-				f = frames[0]
-			}
-			data := f.Data
-			if s.tiny {
-				data = []byte{0, 0, 0, 1, 0x65}[:5]
-			}
-			emit(capture.Packet{Kind: capture.Video, PTS: pts, Key: key || f.Key, Data: data})
-			pts += time.Second / 15
-		}
-	}
-}
-
-// burstSource emits the config and a keyframe, then large packets as fast
-// as it can until ctx ends: a subscriber that does not read falls behind.
-type burstSource struct{}
-
-func (burstSource) Mode() capture.Mode { return capture.OnDemand }
-func (burstSource) FPSControl() bool   { return true }
-func (burstSource) Run(ctx context.Context, _ capture.Options, emit func(capture.Packet)) error {
-	format, frames, err := fake.ParseClip(fake.Clip())
-	if err != nil {
-		return err
-	}
-	emit(capture.Packet{Kind: capture.VideoConfig, Video: format})
-	big := append(append([]byte(nil), frames[0].Data...), make([]byte, 16<<10)...)
-	for i := 0; ctx.Err() == nil; i++ {
-		emit(capture.Packet{Kind: capture.Video, PTS: time.Duration(i) * time.Millisecond, Key: true, Data: big})
-		if i%256 == 255 {
-			time.Sleep(time.Millisecond)
-		}
-	}
-	return nil
-}
-
-// capDriver is the mock driver with the capture a test gives it.
-type capDriver struct {
-	*mock.Driver
-	sess *capture.Session
-	err  error
-}
-
-func (d *capDriver) Capture() (*capture.Session, error) { return d.sess, d.err }
 
 // plainDriver hides every optional interface of the mock: no capture.
 type plainDriver struct{ core.Driver }
@@ -132,13 +50,13 @@ func newStreamEnv(t *testing.T) *streamEnv {
 			info.DriverName = "plain"
 			return plainDriver{m}, info, func() {}, nil
 		case strings.HasPrefix(id, "perm-"):
-			return &capDriver{Driver: m, err: &capture.Unavailable{Reason: capture.ReasonCameraPermission, Message: "denied"}}, info, func() {}, nil
+			return &daemontest.CaptureDriver{Driver: m, Err: &capture.Unavailable{Reason: capture.ReasonCameraPermission, Message: "denied"}}, info, func() {}, nil
 		case strings.HasPrefix(id, "ctl-"):
 			env.mu.Lock()
 			src := env.sources[id]
 			env.mu.Unlock()
 			sess := capture.NewSession(src)
-			return &capDriver{Driver: m, sess: sess}, info, sess.Close, nil
+			return &daemontest.CaptureDriver{Driver: m, Session: sess}, info, sess.Close, nil
 		}
 		return m, info, m.Close, nil
 	}
@@ -230,9 +148,9 @@ func TestStream_Refusals(t *testing.T) {
 	}
 	// A failed source before its first frames: CAPTURE_UNAVAILABLE with
 	// the source's reason.
-	src := newStepSource()
-	src.fail <- &capture.Unavailable{Reason: capture.ReasonScrcpyFailed, Message: "server died"}
-	src.silent = true
+	src := daemontest.NewStepSource()
+	src.Fail <- &capture.Unavailable{Reason: capture.ReasonScrcpyFailed, Message: "server died"}
+	src.Silent = true
 	env.source("ctl-fail", src)
 	env.attach("ctl-fail")
 	if st, e := failure(t, env.get(ctx, "/v1/devices/ctl-fail/stream")); st != 503 || e.Details["reason"] != capture.ReasonScrcpyFailed {
@@ -246,12 +164,12 @@ func TestStream_Refusals(t *testing.T) {
 // U14
 func TestStream_HeadersAndFlush(t *testing.T) {
 	env := newStreamEnv(t)
-	src := newStepSource()
+	src := daemontest.NewStepSource()
 	env.source("ctl-1", src)
 	env.attach("ctl-1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	src.next <- true
+	src.Next <- true
 	resp := env.get(ctx, "/v1/devices/ctl-1/stream?fps=20")
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -291,11 +209,11 @@ func TestStream_HeadersAndFlush(t *testing.T) {
 	cancel()
 
 	// A source that picks its own rate says so.
-	dev := newStepSource()
-	dev.fpsControl = false
+	dev := daemontest.NewStepSource()
+	dev.CanSetFPS = false
 	env.source("ctl-2", dev)
 	env.attach("ctl-2")
-	dev.next <- true
+	dev.Next <- true
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	resp2 := env.get(ctx2, "/v1/devices/ctl-2/stream")
@@ -306,9 +224,9 @@ func TestStream_HeadersAndFlush(t *testing.T) {
 }
 
 // openStream starts a stream on id and waits for its first fragment.
-func (e *streamEnv) openStream(ctx context.Context, id string, src *stepSource) *http.Response {
+func (e *streamEnv) openStream(ctx context.Context, id string, src *daemontest.StepSource) *http.Response {
 	e.t.Helper()
-	src.next <- true
+	src.Next <- true
 	resp := e.get(ctx, "/v1/devices/"+id+"/stream")
 	if resp.StatusCode != 200 {
 		e.t.Fatalf("stream %s: %d", id, resp.StatusCode)
@@ -339,7 +257,7 @@ func TestStream_EndConditions(t *testing.T) {
 
 	// A step runs while a stream is open: the stream never takes the
 	// device's busy lock.
-	src := newStepSource()
+	src := daemontest.NewStepSource()
 	env.source("ctl-busy", src)
 	env.attach("ctl-busy")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -373,18 +291,18 @@ func TestStream_EndConditions(t *testing.T) {
 	waitFor(t, func() bool { return env.holds() == 0 })
 
 	// The source failing ends the body.
-	fail := newStepSource()
+	fail := daemontest.NewStepSource()
 	env.source("ctl-src", fail)
 	env.attach("ctl-src")
 	resp = env.openStream(context.Background(), "ctl-src", fail)
-	fail.fail <- errors.New("boom")
+	fail.Fail <- errors.New("boom")
 	if !drained(resp.Body) {
 		t.Fatal("a source failure did not end the stream")
 	}
 	resp.Body.Close()
 
 	// A client that stops reading falls behind and its stream ends.
-	env.source("ctl-lag", burstSource{})
+	env.source("ctl-lag", daemontest.BurstSource{})
 	env.attach("ctl-lag")
 	resp = env.get(context.Background(), "/v1/devices/ctl-lag/stream")
 	time.Sleep(500 * time.Millisecond)
@@ -395,7 +313,7 @@ func TestStream_EndConditions(t *testing.T) {
 	waitFor(t, func() bool { return env.holds() == 0 })
 
 	// Shutdown ends a running stream.
-	sd := newStepSource()
+	sd := daemontest.NewStepSource()
 	env.source("ctl-sd", sd)
 	env.attach("ctl-sd")
 	resp = env.openStream(context.Background(), "ctl-sd", sd)
@@ -414,8 +332,8 @@ func TestStream_NoFrames(t *testing.T) {
 	streamFirstFrameWait = 200 * time.Millisecond
 	defer func() { streamFirstFrameWait = old }()
 	env := newStreamEnv(t)
-	src := newStepSource()
-	src.silent = true
+	src := daemontest.NewStepSource()
+	src.Silent = true
 	env.source("ctl-quiet", src)
 	env.attach("ctl-quiet")
 	st, e := failure(t, env.get(context.Background(), "/v1/devices/ctl-quiet/stream"))
@@ -436,13 +354,13 @@ func TestStream_NoFrames(t *testing.T) {
 // U24
 func TestStream_CaptureEvents(t *testing.T) {
 	env := newStreamEnv(t)
-	src := newStepSource()
+	src := daemontest.NewStepSource()
 	env.source("ctl-ev", src)
 	env.attach("ctl-ev")
 	env.attach("perm-ev")
 	env.attach("plain-ev")
 	resp := env.openStream(context.Background(), "ctl-ev", src)
-	src.fail <- &capture.Unavailable{Reason: capture.ReasonScrcpyFailed}
+	src.Fail <- &capture.Unavailable{Reason: capture.ReasonScrcpyFailed}
 	drained(resp.Body)
 	resp.Body.Close()
 	var got []string
@@ -532,7 +450,7 @@ func slowWrites(t *testing.T, d time.Duration) {
 func TestStream_StalledClientEnds(t *testing.T) {
 	slowWrites(t, 200*time.Millisecond)
 	env := newStreamEnv(t)
-	env.source("ctl-stall", burstSource{})
+	env.source("ctl-stall", daemontest.BurstSource{})
 	env.attach("ctl-stall")
 	stalledStream(t, env.url, "/v1/devices/ctl-stall/stream", nil)
 	waitStalled(t, "the stream to end", func() bool { return env.holds() == 0 })
@@ -540,31 +458,6 @@ func TestStream_StalledClientEnds(t *testing.T) {
 		writeFailure(io.ErrClosedPipe) != "write: io: read/write on closed pipe" {
 		t.Error("writeFailure reasons")
 	}
-}
-
-// Review 2.harness-review.1: under a hub lease, a stalled client's write
-// held the lease gate, so the lease's teardown waited on it and the device
-// stayed "being released". The write now fails, the work under the lease
-// unwinds, and the device is free again. The release comes while the
-// write is blocked (its socket buffers fill in a few milliseconds), before
-// the write's deadline.
-func TestLeases_StalledStreamFreesTheDevice(t *testing.T) {
-	slowWrites(t, 1500*time.Millisecond)
-	env := newHubEnv(t, Config{})
-	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
-		sess := capture.NewSession(burstSource{})
-		return &capDriver{Driver: mock.New(mock.Config{Platform: "mock", DeviceID: id}), sess: sess},
-			DriverInfo{DriverName: "mock", Device: report.Device{ID: id}, Platform: "mock", Kind: "device"}, sess.Close, nil
-	}
-	res := env.lease(env.remote, LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
-	stalledStream(t, env.remote.BaseURL(), "/v1/devices/mock-1/stream",
-		map[string]string{"Authorization": "Bearer t", HeaderLease: res.Lease.ID})
-	time.Sleep(500 * time.Millisecond)
-	if _, err := env.remote.ReleaseLease(context.Background(), res.Lease.ID); err != nil {
-		t.Fatal(err)
-	}
-	waitStalled(t, "the device to be released", func() bool { return !env.s.leases.releasing(DeviceInfo{ID: "mock-1"}) })
-	env.lease(env.local, LeaseRequest{Device: "mock-1"})
 }
 
 // waitStalled waits up to 20 s for cond: a machine loaded by the rest of

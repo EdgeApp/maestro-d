@@ -8,104 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 )
-
-// fakeProvider is an in-memory cloudprov.RemoteProvider.
-type fakeProvider struct {
-	mu        sync.Mutex
-	models    []cloudprov.CloudModel
-	catalogFn func(platform string) error
-	calls     []string
-}
-
-var _ cloudprov.RemoteProvider = (*fakeProvider)(nil)
-
-func newFakeProvider() *fakeProvider {
-	return &fakeProvider{models: []cloudprov.CloudModel{
-		{ID: "df:android:google-pixel-8:14", ARN: "arn:p8", Platform: "android", Name: "Google Pixel 8", OSVersion: "14", Availability: "HIGHLY_AVAILABLE", Available: true},
-		{ID: "df:ios:apple-iphone-15:17.4", ARN: "arn:i15", Platform: "ios", Name: "Apple iPhone 15", OSVersion: "17.4", Availability: "BUSY"},
-		{ID: "df:ios:apple-iphone-14:27.0", ARN: "arn:i14", Platform: "ios", Name: "Apple iPhone 14", OSVersion: "27.0", Availability: "AVAILABLE", Available: true},
-	}}
-}
-
-func (f *fakeProvider) call(name string) {
-	f.mu.Lock()
-	f.calls = append(f.calls, name)
-	f.mu.Unlock()
-}
-
-func (f *fakeProvider) Name() string     { return "devicefarm" }
-func (f *fakeProvider) IDPrefix() string { return "df" }
-func (f *fakeProvider) Catalog(_ context.Context, platform string) ([]cloudprov.CloudModel, error) {
-	f.call("Catalog")
-	if f.catalogFn != nil {
-		if err := f.catalogFn(platform); err != nil {
-			return nil, err
-		}
-	}
-	var out []cloudprov.CloudModel
-	for _, m := range f.models {
-		if platform == "" || m.Platform == platform {
-			out = append(out, m)
-		}
-	}
-	return out, nil
-}
-func (f *fakeProvider) Allocate(context.Context, cloudprov.CloudSpec, cloudprov.AllocateHooks) (*cloudprov.Allocation, error) {
-	f.call("Allocate")
-	return nil, cloudprov.Errorf(cloudprov.Other, "not in this test")
-}
-func (f *fakeProvider) Install(context.Context, *cloudprov.Allocation, cloudprov.AppRef) (*cloudprov.InstallResult, error) {
-	f.call("Install")
-	return &cloudprov.InstallResult{}, nil
-}
-func (f *fakeProvider) Refresh(context.Context, *cloudprov.Allocation) (string, string, error) {
-	f.call("Refresh")
-	return "RUNNING", "", nil
-}
-func (f *fakeProvider) Release(context.Context, *cloudprov.Allocation) (*cloudprov.ReleaseResult, error) {
-	f.call("Release")
-	return &cloudprov.ReleaseResult{Minutes: &cloudprov.DeviceMinutes{Metered: 1, Total: 1}}, nil
-}
-func (f *fakeProvider) ReleaseRef(context.Context, string) (*cloudprov.DeviceMinutes, error) {
-	f.call("ReleaseRef")
-	return nil, nil
-}
-func (f *fakeProvider) Upload(context.Context, string) (*cloudprov.AppRef, error) {
-	f.call("Upload")
-	return &cloudprov.AppRef{Ref: "arn:upload"}, nil
-}
-func (f *fakeProvider) Apps(context.Context) ([]cloudprov.AppRef, error) {
-	f.call("Apps")
-	return nil, nil
-}
-func (f *fakeProvider) Account(context.Context) (map[string]any, error) {
-	f.call("Account")
-	return map[string]any{}, nil
-}
-func (f *fakeProvider) Sessions(context.Context) ([]cloudprov.SessionSummary, error) {
-	f.call("Sessions")
-	return nil, nil
-}
-func (f *fakeProvider) Redact(s string) string { return strings.ReplaceAll(s, "SECRET", "<redacted>") }
 
 // cloudEnv is a test daemon whose devicefarm provider is f, constructed on
 // first use; made counts constructions.
 type cloudEnv struct {
 	*testEnv
-	f    *fakeProvider
+	f    *daemontest.Provider
 	made atomic.Int32
 }
 
 func newCloudEnv(t *testing.T, hub bool, mkErr error) *cloudEnv {
 	t.Helper()
 	t.Setenv(EnvHome, t.TempDir())
-	ce := &cloudEnv{testEnv: &testEnv{t: t}, f: newFakeProvider()}
+	ce := &cloudEnv{testEnv: &testEnv{t: t}, f: daemontest.NewProvider()}
 	deps := testDeps(&ce.cleanups, 0)
 	deps.Providers = map[string]func() (cloudprov.RemoteProvider, error){
 		"devicefarm": func() (cloudprov.RemoteProvider, error) {
@@ -118,7 +39,7 @@ func newCloudEnv(t *testing.T, hub bool, mkErr error) *cloudEnv {
 	}
 	cfg := Config{Name: "test-" + strings.ToLower(t.Name()), ReportsDir: filepath.Join(t.TempDir(), "reports")}
 	if hub {
-		cfg.Hub, cfg.HubName, cfg.CloudMaxDevices = true, "hubtest", 2
+		cfg.Hub, cfg.HubName, cfg.CloudMaxDevices = NewTestHub(), "hubtest", 2
 	}
 	ce.s = New(cfg, deps)
 	ce.s.info = Info{Name: ce.s.cfg.Name, PID: os.Getpid(), APIVersion: APIVersion, Version: "test"}
@@ -239,7 +160,7 @@ func TestCloud_Catalog(t *testing.T) {
 		t.Fatalf("bad location: %v", err)
 	}
 	// A provider failure maps through its kind.
-	e.f.catalogFn = func(string) error { return cloudprov.Errorf(cloudprov.Auth, "denied SECRET") }
+	e.f.CatalogFn = func(string) error { return cloudprov.Errorf(cloudprov.Auth, "denied SECRET") }
 	_, err = e.c.CatalogQuery(ctx, CatalogQuery{Location: []string{LocationCloud}})
 	if codeOf(t, err) != CodeUsage {
 		t.Fatalf("auth failure: %v", err)
@@ -277,7 +198,7 @@ func TestCloud_HubStatus(t *testing.T) {
 	if len(st) != 1 || st[0].Provider != "devicefarm" || st[0].MaxDevices != 2 || st[0].Held != 1 {
 		t.Fatalf("hub cloud status: %+v", st)
 	}
-	hubless := &Server{cfg: Config{Hub: true, HubName: "h"}}
+	hubless := &Server{cfg: Config{Hub: NewTestHub(), HubName: "h"}}
 	if _, e := hubless.provider("devicefarm"); e == nil || !strings.Contains(e.Message, "--devicefarm") {
 		t.Fatalf("hub without the provider: %v", e)
 	}
@@ -367,7 +288,7 @@ func TestClient_SendsMachineAndQuery(t *testing.T) {
 	}
 	// hostIdentity names the same machine.
 	s := &Server{}
-	if m, _ := s.hostIdentity(); m != "machine-a" {
+	if m, _ := s.HostIdentity(); m != "machine-a" {
 		t.Fatalf("hostIdentity machine %q", m)
 	}
 }

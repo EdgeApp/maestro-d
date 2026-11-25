@@ -1,4 +1,4 @@
-package cli
+package hubcmd
 
 // hub_service.go: `maestro-d hub service install|uninstall|status`, the
 // hub as a per-user launchd LaunchAgent on macOS
@@ -27,6 +27,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"howett.net/plist"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -118,9 +119,9 @@ func serviceTarget(name string) string {
 	return fmt.Sprintf("gui/%d/%s", serviceUID(), serviceLabel(name))
 }
 
-// serviceInstalled reports whether the hub daemon name runs as a launchd
+// ServiceInstalled reports whether the hub daemon name runs as a launchd
 // service in this home.
-func serviceInstalled(name string) bool {
+func ServiceInstalled(name string) bool {
 	if serviceGOOS != "darwin" {
 		return false
 	}
@@ -132,22 +133,23 @@ func serviceUnsupported() error {
 	return daemon.Errorf(daemon.CodeUsage, "the hub service is a macOS LaunchAgent; on %s run `maestro-d hub start --foreground` under your supervisor (docs/daemon/hub.md shows a systemd unit)", serviceGOOS)
 }
 
-var hubServiceUninstallFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
-	boolFlag("purge", "Also delete the tokens install wrote under <home>/hub/secrets (<home>/hub/daemons/<daemon>/secrets for a daemon other than hub)", nil,
+var hubServiceUninstallFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags, []dflag{
+	common.BoolFlag("purge", "Also delete the tokens install wrote under <home>/hub/secrets (<home>/hub/daemons/<daemon>/secrets for a daemon other than hub)", nil,
 		func(o *daemonOpts, v bool) { o.hub.purge = v }),
 })
 
-var hubServiceStatusFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:])
+var hubServiceStatusFlags = common.FlagSet(common.One(hubDaemonFlag), outputFlags)
 
-var hubServiceCommand = &cli.Command{
-	Name:  "service",
-	Usage: "Run the hub as a launchd LaunchAgent (macOS): install, uninstall, status",
-	Subcommands: []*cli.Command{
-		{
-			Name:      "install",
-			Usage:     "Install and load the hub as a LaunchAgent that starts at login and restarts after a crash",
-			ArgsUsage: " ",
-			Description: flagsDoc(`Takes hub start's flags. The agent runs 'hub start --foreground' with
+func serviceCommand(withArgs actionFactory) *cli.Command {
+	return &cli.Command{
+		Name:  "service",
+		Usage: "Run the hub as a launchd LaunchAgent (macOS): install, uninstall, status",
+		Subcommands: []*cli.Command{
+			{
+				Name:      "install",
+				Usage:     "Install and load the hub as a LaunchAgent that starts at login and restarts after a crash",
+				ArgsUsage: " ",
+				Description: common.FlagHelp(`Takes hub start's flags. The agent runs 'hub start --foreground' with
 them; the tokens are written to <home>/hub/secrets (mode 0600) and passed
 as --token-file/--peer-token-file, never written into the plist. PATH,
 MAESTRO_D_HOME, ANDROID_HOME, ANDROID_SDK_ROOT, DEVELOPER_DIR and
@@ -155,26 +157,27 @@ MAESTRO_TEAM_ID are recorded when set. The hub's output goes to its
 daemon.log.
 
   maestro-d hub service install --name lab-a --token-file ~/.hub-token --peer-token-file ~/.peer-token`, hubStartFlags),
-			SkipFlagParsing: true,
-			Action:          withArgs(hubStartFlags, runServiceInstall),
+				SkipFlagParsing: true,
+				Action:          withArgs(hubStartFlags, runServiceInstall),
+			},
+			{
+				Name:            "uninstall",
+				Usage:           "Unload the LaunchAgent (stopping the hub) and delete its plist; --purge also deletes the tokens",
+				ArgsUsage:       " ",
+				Description:     common.FlagHelp("", hubServiceUninstallFlags),
+				SkipFlagParsing: true,
+				Action:          withArgs(hubServiceUninstallFlags, runServiceUninstall),
+			},
+			{
+				Name:            "status",
+				Usage:           "Print the LaunchAgent's launchd state, then hub status",
+				ArgsUsage:       " ",
+				Description:     common.FlagHelp("", hubServiceStatusFlags),
+				SkipFlagParsing: true,
+				Action:          withArgs(hubServiceStatusFlags, runServiceStatus),
+			},
 		},
-		{
-			Name:            "uninstall",
-			Usage:           "Unload the LaunchAgent (stopping the hub) and delete its plist; --purge also deletes the tokens",
-			ArgsUsage:       " ",
-			Description:     flagsDoc("", hubServiceUninstallFlags),
-			SkipFlagParsing: true,
-			Action:          withArgs(hubServiceUninstallFlags, runServiceUninstall),
-		},
-		{
-			Name:            "status",
-			Usage:           "Print the LaunchAgent's launchd state, then hub status",
-			ArgsUsage:       " ",
-			Description:     flagsDoc("", hubServiceStatusFlags),
-			SkipFlagParsing: true,
-			Action:          withArgs(hubServiceStatusFlags, runServiceStatus),
-		},
-	},
+	}
 }
 
 // writeSecret writes one token file, mode 0600.
@@ -216,7 +219,7 @@ func runServiceInstall(ctx context.Context, o *daemonOpts, args []string) error 
 	if err != nil {
 		return err
 	}
-	if c, _ := daemon.Dial(o.Name); c != nil && !serviceInstalled(o.Name) {
+	if c, _ := daemon.Dial(o.Name); c != nil && !ServiceInstalled(o.Name) {
 		return daemon.Errorf(daemon.CodeUsage, "hub %q is already running (pid %d); stop it first (maestro-d hub stop)", o.Name, c.Info.PID)
 	}
 	dir := serviceSecretsDir(o.Name)
@@ -247,7 +250,7 @@ func runServiceInstall(ctx context.Context, o *daemonOpts, args []string) error 
 	if err := os.MkdirAll(launchAgentsDir(), 0o755); err != nil {
 		return daemon.WrapErr(daemon.CodeUsage, err)
 	}
-	if serviceInstalled(o.Name) {
+	if ServiceInstalled(o.Name) {
 		_, _ = launchctl("bootout", serviceTarget(o.Name))
 	}
 	path := servicePlistPath(o.Name)
@@ -283,7 +286,7 @@ func kickstartService(ctx context.Context, o *daemonOpts) error {
 		return daemon.Errorf(daemon.CodeDaemonUnavailable, "launchctl kickstart %s: %v %s", serviceTarget(o.Name), err, strings.TrimSpace(string(out)))
 	}
 	if !o.JSON {
-		progress("Started the hub service through launchd (kickstart %s)", serviceTarget(o.Name))
+		common.Progress("Started the hub service through launchd (kickstart %s)", serviceTarget(o.Name))
 	}
 	c, err := waitForHub(ctx, o.Name, startTimeout(o))
 	if err != nil {
@@ -298,10 +301,10 @@ func runServiceUninstall(ctx context.Context, o *daemonOpts, args []string) erro
 	}
 	hubName(o)
 	path := servicePlistPath(o.Name)
-	installed := serviceInstalled(o.Name)
+	installed := ServiceInstalled(o.Name)
 	if installed {
 		if out, err := launchctl("bootout", serviceTarget(o.Name)); err != nil && !strings.Contains(string(out), "No such process") {
-			progress("launchctl bootout %s: %v %s", serviceTarget(o.Name), err, strings.TrimSpace(string(out)))
+			common.Progress("launchctl bootout %s: %v %s", serviceTarget(o.Name), err, strings.TrimSpace(string(out)))
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return daemon.WrapErr(daemon.CodeUsage, err)
@@ -324,7 +327,7 @@ func runServiceUninstall(ctx context.Context, o *daemonOpts, args []string) erro
 		}
 	}
 	if o.JSON {
-		printJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "removed": installed, "plist": path, "purged": purged})
+		common.PrintJSON(os.Stdout, map[string]any{"ok": true, "exitCode": 0, "removed": installed, "plist": path, "purged": purged})
 		return nil
 	}
 	if installed {
@@ -357,7 +360,7 @@ func runServiceStatus(ctx context.Context, o *daemonOpts, args []string) error {
 		return serviceUnsupported()
 	}
 	hubName(o)
-	if !serviceInstalled(o.Name) {
+	if !ServiceInstalled(o.Name) {
 		fmt.Println("hub service: not installed")
 	} else {
 		out, err := launchctl("print", serviceTarget(o.Name))

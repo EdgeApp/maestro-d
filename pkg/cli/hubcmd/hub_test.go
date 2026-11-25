@@ -1,4 +1,4 @@
-package cli
+package hubcmd
 
 import (
 	"bytes"
@@ -18,6 +18,7 @@ import (
 
 	"howett.net/plist"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -207,7 +208,7 @@ func TestHubService_RefusedOffMacOS(t *testing.T) {
 			t.Fatalf("linux: %v", err)
 		}
 	}
-	if serviceInstalled("hub") {
+	if ServiceInstalled("hub") {
 		t.Fatal("installed on linux")
 	}
 	if st, pid := launchdState("x\n\tstate = waiting\n"); st != "waiting" || pid != "" {
@@ -256,11 +257,11 @@ func TestHub_FlagsAndTokens(t *testing.T) {
 		}
 	}
 	_ = os.Chmod(f, 0o644)
-	if _, err := readSecretFile("peer-token-file", f); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+	if _, err := common.ReadSecretFile("peer-token-file", f); err == nil || !strings.Contains(err.Error(), "chmod 600") {
 		t.Fatalf("readable: %v", err)
 	}
 	_ = os.Chmod(f, 0o200)
-	if _, err := readSecretFile("peer-token-file", f); err == nil {
+	if _, err := common.ReadSecretFile("peer-token-file", f); err == nil {
 		t.Fatal("unreadable file")
 	}
 	if p, err := peerCAPool(""); p != nil || err != nil {
@@ -454,4 +455,9 @@ func TestHubService_TwoDaemonsInOneHome(t *testing.T) {
 	if _, err := os.Stat(servicePlistPath("hub")); err != nil {
 		t.Fatal("uninstalling tvhub removed hub's plist")
 	}
+}
+
+func isCode(err error, code daemon.Code) bool {
+	de, ok := err.(*daemon.Error)
+	return ok && de.Code == code
 }

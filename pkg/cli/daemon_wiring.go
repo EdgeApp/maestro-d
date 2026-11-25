@@ -20,7 +20,14 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/computer"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
+	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
+
+// HubDriverDeps discovers local TVs before the hub accepts its first request.
+func HubDriverDeps() daemon.Deps {
+	cachedTVs()
+	return daemonDeps()
+}
 
 // UpstreamVersion is the maestro-runner release this fork is based on.
 const UpstreamVersion = "1.1.26"
@@ -29,7 +36,7 @@ const UpstreamVersion = "1.1.26"
 // driver and device code.
 func daemonDeps() daemon.Deps {
 	return daemon.Deps{
-		Version:            Version,
+		Version:            version.Version,
 		NewDriver:          daemonNewDriver,
 		ListDevices:        daemonListDevices,
 		NormalizeHierarchy: NormalizeHierarchy,

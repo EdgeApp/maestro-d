@@ -77,10 +77,10 @@ func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := listArtifacts(a.reportDir)
 	if err != nil {
-		writeError(w, WrapErr(CodeInternal, err))
+		WriteError(w, WrapErr(CodeInternal, err))
 		return
 	}
-	writeJSON(w, http.StatusOK, ArtifactsResult{Envelope: Envelope{OK: true}, Device: a.id, ReportDir: a.reportDir, Artifacts: list})
+	WriteJSON(w, http.StatusOK, ArtifactsResult{Envelope: Envelope{OK: true}, Device: a.id, ReportDir: a.reportDir, Artifacts: list})
 }
 
 // artifactPath resolves a caller's artifact path inside reportDir, refusing
@@ -90,11 +90,11 @@ func artifactPath(reportDir, rel string) (string, *Error) {
 		return "", Errorf(CodeUsage, "artifact path is required")
 	}
 	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") {
-		return "", forbidden("artifact path %q must be relative to the report directory", rel).WithDetails("field", "path")
+		return "", Forbidden("artifact path %q must be relative to the report directory", rel).WithDetails("field", "path")
 	}
 	for _, el := range strings.Split(filepath.ToSlash(rel), "/") {
 		if el == ".." {
-			return "", forbidden("artifact path %q may not contain ..", rel).WithDetails("field", "path")
+			return "", Forbidden("artifact path %q may not contain ..", rel).WithDetails("field", "path")
 		}
 	}
 	full := filepath.Join(reportDir, filepath.FromSlash(rel))
@@ -110,7 +110,7 @@ func artifactPath(reportDir, rel string) (string, *Error) {
 		return "", WrapErr(CodeInternal, err)
 	}
 	if !executor.PathUnder(real, root) {
-		return "", forbidden("artifact path %q leads outside the report directory", rel).WithDetails("field", "path")
+		return "", Forbidden("artifact path %q leads outside the report directory", rel).WithDetails("field", "path")
 	}
 	return real, nil
 }
@@ -123,20 +123,20 @@ func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 	path, e := artifactPath(a.reportDir, r.PathValue("path"))
 	if e != nil {
 		if e.Code == CodeForbidden {
-			s.logForbidden(r, e)
+			s.LogForbidden(r, e)
 		}
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		writeError(w, WrapErr(CodeInternal, err))
+		WriteError(w, WrapErr(CodeInternal, err))
 		return
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || fi.IsDir() {
-		writeError(w, Errorf(CodeUsage, "artifact %s is not a file", r.PathValue("path")))
+		WriteError(w, Errorf(CodeUsage, "artifact %s is not a file", r.PathValue("path")))
 		return
 	}
 	ct := "application/octet-stream"

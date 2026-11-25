@@ -301,7 +301,7 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 	}
 	platform := strings.ToLower(req.Platform)
 	if platform == "" {
-		p, e := r.inferBootPlatform(req.Name)
+		p, e := r.InferBootPlatform(req.Name)
 		if e != nil {
 			return DeviceInfo{}, e
 		}
@@ -392,11 +392,11 @@ func (r *Registry) findLive(platform, id string) (DeviceInfo, bool) {
 	return DeviceInfo{}, false
 }
 
-// inferBootPlatform picks the platform of a device start without
+// InferBootPlatform picks the platform of a device start without
 // --platform: avd:<name> is android, and otherwise the id or name must match
 // a listed device (a simulator by name or UDID, an AVD by name, a running
 // emulator or device by serial).
-func (r *Registry) inferBootPlatform(name string) (string, *Error) {
+func (r *Registry) InferBootPlatform(name string) (string, *Error) {
 	if strings.HasPrefix(name, AVDPrefix) {
 		return "android", nil
 	}

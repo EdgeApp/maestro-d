@@ -111,10 +111,10 @@ func asError(err error) *Error {
 	return WrapErr(CodeDaemonUnavailable, err)
 }
 
-// hostIdentity is what a hub's device entries carry to name the machine
+// HostIdentity is what a hub's device entries carry to name the machine
 // they are attached to: the machine name (MachineName), and the hub's
 // --advertise address followed by the host's non-loopback IPs.
-func (s *Server) hostIdentity() (machine string, addrs []string) {
+func (s *Server) HostIdentity() (machine string, addrs []string) {
 	machine = MachineName()
 	if s.cfg.Advertise != "" {
 		addrs = append(addrs, s.cfg.Advertise)

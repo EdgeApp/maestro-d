@@ -10,6 +10,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  windows-locks:
+    name: Windows file locks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 -v ./pkg/fsage
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -43,7 +53,7 @@ jobs:
       - name: Go tests (daemon, CLI, capture, hub, executor, mock driver)
         env:
           MAESTRO_D_REQUIRE_FFPROBE: '1'  # ffprobe-backed tests fail rather than skip
-        run: ffprobe -version | head -1 && go test -race -timeout 20m ./pkg/daemon/... ./pkg/cloudprov/... ./pkg/devicefarm/... ./pkg/cli/... ./pkg/capture/... ./pkg/hub/... ./pkg/executor/... ./pkg/driver/mock/... ./pkg/device/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/driver/wda/... ./pkg/rfb/... ./pkg/driver/computer/...
+        run: ffprobe -version | head -1 && go test -race -timeout 20m ./pkg/daemon/... ./pkg/hubd/... ./pkg/fsage/... ./pkg/version/... ./pkg/cloudprov/... ./pkg/devicefarm/... ./pkg/cli/... ./pkg/capture/... ./pkg/hub/... ./pkg/executor/... ./pkg/driver/mock/... ./pkg/device/... ./pkg/driver/uiautomator2/... ./pkg/driver/devicelab/... ./pkg/driver/wda/... ./pkg/rfb/... ./pkg/driver/computer/...
 
       - name: JavaScript library tests
         run: npm ci --no-audit --no-fund && npm test

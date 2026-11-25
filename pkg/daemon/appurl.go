@@ -118,7 +118,7 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 		}
 		var rr *refusedRedirect
 		if errors.As(err, &rr) {
-			return nil, forbidden("install: download %s redirects to %s, which installApp.allowHosts does not list", redactedURL(req.URL), rr.host).WithDetails("field", "url")
+			return nil, Forbidden("install: download %s redirects to %s, which installApp.allowHosts does not list", redactedURL(req.URL), rr.host).WithDetails("field", "url")
 		}
 		return nil, Errorf(CodeDeviceError, "install: download %s: %v", redactedURL(req.URL), err)
 	}
@@ -163,12 +163,12 @@ func (s *Server) installAllowHosts(ctx context.Context, u *url.URL) (*netshape.I
 	allow := cfg.InstallApp
 	if allow == nil {
 		if CallerFrom(ctx).Remote {
-			return nil, forbidden("install: a remote caller may download only from installApp.allowHosts, and this daemon's config.json lists none").WithDetails("field", "url")
+			return nil, Forbidden("install: a remote caller may download only from installApp.allowHosts, and this daemon's config.json lists none").WithDetails("field", "url")
 		}
 		return nil, nil
 	}
 	if !allow.Allows(u.Hostname()) {
-		return nil, forbidden("install: url host %s is not in installApp.allowHosts", u.Hostname()).WithDetails("field", "url")
+		return nil, Forbidden("install: url host %s is not in installApp.allowHosts", u.Hostname()).WithDetails("field", "url")
 	}
 	return allow, nil
 }

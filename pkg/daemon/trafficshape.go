@@ -53,7 +53,7 @@ func (s *Server) trafficShaper(id string) *netshape.Shaper {
 // runs, whose calls the session uses when the serial has none; "" for any
 // other device.
 func (s *Server) avdAlias(id string) string {
-	if !isEmulatorSerial(id) {
+	if !IsEmulatorSerial(id) {
 		return ""
 	}
 	if d, ok := s.registry.Lookup(id); ok {
@@ -72,12 +72,12 @@ func avdEntryID(d DeviceInfo) string {
 	return AVDPrefix + d.Name
 }
 
-// configNames reports whether a hubDevices id names device d: its own id,
+// ConfigNames reports whether a hubDevices id names device d: its own id,
 // or, for a running emulator, its avd:<name>. A boot or create by a bare
 // name (no kind yet) is taken to be the AVD of that name only when it asks
 // for android: without a platform a bare name may boot a simulator. Names
 // do not match, as they do for --share-device: an entry is an id.
-func configNames(entry string, d DeviceInfo) bool {
+func ConfigNames(entry string, d DeviceInfo) bool {
 	if entry == d.ID {
 		return true
 	}
@@ -103,13 +103,13 @@ func configEntries(cfg *netshape.Config, d DeviceInfo) []netshape.Device {
 	return out
 }
 
-// applyDeviceConfig sets, from the device config, each device's
+// ApplyDeviceConfig sets, from the device config, each device's
 // description, capabilities and trafficShaping (whether this host can shape it). Each
 // comes from the first of the device's entries that has one (see
 // configEntries), as the session's shaper picks its calls. A config that
 // cannot be read sets neither, and is logged once per problem: listings
 // are polled, the shaping commands answer USAGE.
-func (s *Server) applyDeviceConfig(devs []DeviceInfo) {
+func (s *Server) ApplyDeviceConfig(devs []DeviceInfo) {
 	if len(devs) == 0 {
 		return
 	}
@@ -137,7 +137,7 @@ func (s *Server) applyDeviceConfig(devs []DeviceInfo) {
 // withDeviceConfig is applyDeviceConfig for one device.
 func (s *Server) withDeviceConfig(info DeviceInfo) DeviceInfo {
 	devs := []DeviceInfo{info}
-	s.applyDeviceConfig(devs)
+	s.ApplyDeviceConfig(devs)
 	return devs[0]
 }
 
