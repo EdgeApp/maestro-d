@@ -184,6 +184,10 @@ func checkAVDImages() []DoctorCheck {
 // readAVDSysdir returns the image.sysdir.1 value from an AVD config.ini,
 // normalised to be relative to the SDK root.
 func readAVDSysdir(configPath string) string {
+	return normalizeSysdir(readAVDValue(configPath, "image.sysdir.1"))
+}
+
+func readAVDValue(configPath, key string) string {
 	f, err := os.Open(configPath)
 	if err != nil {
 		return ""
@@ -193,11 +197,11 @@ func readAVDSysdir(configPath string) string {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		value, ok := strings.CutPrefix(line, "image.sysdir.1=")
-		if !ok {
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) != key {
 			continue
 		}
-		return normalizeSysdir(strings.TrimSpace(value))
+		return strings.TrimSpace(value)
 	}
 	return ""
 }
