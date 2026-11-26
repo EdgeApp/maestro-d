@@ -111,6 +111,16 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m := rt.m
 	fwd := forwardedFrom(r.Context())
 	path := r.URL.Path
+	// Configuration belongs to this machine. Refuse remote and forwarded
+	// requests before authentication or any mesh device-ID routing.
+	if path == "/v1/config" || strings.HasPrefix(path, "/v1/config/") {
+		if rt.tcp {
+			writeError(w, http.StatusForbidden, daemon.Forbidden(daemon.ConfigLocalOnlyMessage))
+		} else {
+			rt.local.ServeHTTP(w, r)
+		}
+		return
+	}
 	if path == "/v1/hub/link" {
 		if !rt.tcp || fwd != "" {
 			writeError(w, 0, daemon.Errorf(daemon.CodeUsage, "peer links are made to a hub's TCP listener"))
