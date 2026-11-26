@@ -43,7 +43,8 @@ type Lease struct {
 	MaxSec int `json:"maxSec"`
 	// Booted is true when the hub booted the device for this lease; it
 	// shuts it down again when the lease ends.
-	Booted bool `json:"booted,omitempty"`
+	Booted         bool `json:"booted,omitempty"`
+	AwaitingAttach bool `json:"awaitingAttach,omitempty"`
 }
 
 // The states of a lease.
