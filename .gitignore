@@ -10,6 +10,7 @@ maestro-runner-*
 # hid npm/maestro-runner/bin/, which holds the published CLI shim.
 /bin/
 dist/
+!/pkg/hubweb/dist/
 build-release.sh
 build-dist.sh
 release.sh
