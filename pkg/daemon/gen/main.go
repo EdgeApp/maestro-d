@@ -53,6 +53,13 @@ var commandOverrides = map[string]func(*Command){
 	"toggleAirplaneMode": func(c *Command) {
 		c.Doc = "Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100)."
 	},
+	// maestro-d: the executor runs both AI checks for every driver (pkg/aicheck).
+	"assertWithAI": func(c *Command) {
+		c.Doc = "Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data."
+	},
+	"assertNoDefectsWithAI": func(c *Command) {
+		c.Doc = "assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result."
+	},
 	// Decoded by a helper (flow/trafficshape.go), which the AST walk does
 	// not follow: it takes a map of its fields, each optional.
 	"setTrafficShape": func(c *Command) { c.ValueLess = false },
@@ -580,6 +587,8 @@ func tsType(goType string) string {
 		return "Selector[]"
 	case "Condition", "*Condition":
 		return "Condition"
+	case "AIThresholds", "*AIThresholds": // maestro-d
+		return "AIThresholds"
 	case "map[string]string":
 		return "Record<string, string>"
 	case "[]string":
@@ -688,7 +697,7 @@ func renderGoSource(cmds []Command) []byte {
 func renderTS(cmds []Command) []byte {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// %s\n\n", header)
-	b.WriteString("import type { Condition, Selector, Step } from '../types'\n\n")
+	b.WriteString("import type { AIThresholds, Condition, Selector, Step } from '../types'\n\n")
 	for _, c := range cmds {
 		tn := paramsTypeName(c.Name)
 		if c.Doc != "" {

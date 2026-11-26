@@ -107,5 +107,6 @@ var stepTypeOrder = []StepType{
 	StepTakeScreenshot, StepAssertScreenshot, StepStartRecording, StepStopRecording, StepAddMedia, StepRemoveMedia,
 	StepPressKey, StepWaitForAnimationToEnd, StepDefineVariables,
 	StepSetTrafficShape, StepResetTrafficShape,
+	StepSetStatusBar, StepKeyboardVisible, StepStartSampler, StepStopSampler,
 	StepMoveMouse, StepClickOn, StepScrollAt,
 }

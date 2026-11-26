@@ -106,11 +106,11 @@ Instance:
 | `devices({platform?})` | connected devices, booted simulators/emulators, attached sessions |
 | `device(id)` | one device record (`DEVICE_NOT_FOUND`) |
 | `catalog({platform?, available?})` | what `createDevice()` can use: `{ios: {runtimes, deviceTypes}, android: {images, profiles}}` |
-| `createDevice({platform, name, type?, runtime?, image?, profile?, dataSize?, installImage?, acceptLicenses?, boot?, bootTimeout?})` | create a simulator or AVD and boot it (unless `boot: false`); recorded as created by maestro-d |
+| `createDevice({platform, name, type?, runtime?, image?, profile?, dataSize?, installImage?, acceptLicenses?, boot?, bootTimeout?, hub?})` | create a simulator or AVD and boot it (unless `boot: false`); recorded as created by maestro-d. On a hub, `hub` names the hub whose machine makes it, Android as iOS |
 | `startDevice({platform?, name, bootTimeout?})` | boot a simulator/AVD by name, UDID or `avd:<name>`; `platform` may be left out for a listed device; the daemon shuts it down on exit |
 | `stopDevice(id, {force?})` | shut a device down; devices the daemon did not boot need `force` (`DEVICE_EXTERNAL`) |
 | `deleteDevice(id, {force?})` | delete a simulator or AVD (stopping it first); ones maestro-d did not create need `force` (`DEVICE_EXTERNAL`) |
-| `attach(opts)` | open a driver and return a `MaestroDevice` (below); on a hub it needs a lease the client holds — from `lease()` or `maestro-d lease` (see [Leases](#leases-on-a-hub)) |
+| `attach(opts)` | open a driver and return a `MaestroDevice` (below); on a hub it needs a lease the client holds — from `lease()` or `maestro-d lease` (see [Leases](#leases-on-a-hub)). `ai: {jevKey?, anthropicKey?}` gives the session the keys its AI checks spend when the daemon has none of its own ([config.md](../../docs/daemon/config.md#ai)); they are sent, never kept on any object the client returns |
 | `lease({device \| select, ttlSec?, holder?, attach?})` | on a hub: lease a device and return its handle, attached unless `attach: false` (see [Leases](#leases-on-a-hub)) |
 | `leasing` | true when the daemon is a hub (`info.hub`) and leases its devices |
 | `detach(id)` | close the driver on a device |
@@ -247,6 +247,8 @@ await pipeline(Readable.fromWeb(video.body), createWriteStream('screen.mp4'))
 | | |
 | --- | --- |
 | `installApp(file, {reinstall?, platform?})` | install an `.apk`, `.app` or `.ipa` without attaching; resolves `{appId}` when the daemon can read it. On a hub the file is uploaded first, unless the hub has it |
+| `installApp({url, headers?, appId, reinstall?, platform?})` | install a build the device's own daemon downloads (on a hub, the hub it is plugged into); `headers` go to `url` only, never to a redirect. Resolves `{appId, cached, etag}`: `cached` when the server's `ETag` matches the build installed last |
+| `supportsStatusBar()` | whether `setStatusBar` works here: false on a physical iPhone, iPad or Apple TV, a browser or the computer device. Also exported as `supportsStatusBar(deviceInfo)` |
 | `uninstallApp(appId)` | remove an app by bundle id or package name |
 | `artifacts()` | the session's report files: `{path, size, modTime}[]` |
 | `artifact(path)` | one of them as a `Buffer` (`outputs/…`, `report.json`, …) |
@@ -319,7 +321,7 @@ class MaestroError extends Error {
 | `DEVICE_NOT_FOUND` | 4 | 404 | no such device id |
 | `INTERNAL` | 4 | 500 | daemon bug |
 | `CAPTURE_UNAVAILABLE` | 4 | 503 | `stream()`: the device has no screen capture, or it failed or sent no frames; `details.reason` says why |
-| `UNSUPPORTED` | 2 | 501 | the host or device cannot do it: traffic shaping on a device whose host has no shaper configured for it, or airplane mode on iOS |
+| `UNSUPPORTED` | 2 | 501 | the host or device cannot do it: traffic shaping on a device whose host has no shaper configured for it, airplane mode on iOS, `setStatusBar` on a physical iOS device, a sampler kind the device cannot measure |
 | `BUSY` | 5 | 409 | `wait: false` and the device is running a step |
 | `DEVICE_IN_USE` | 5 | 409 | another daemon has the device |
 | `DEVICE_EXTERNAL` | 5 | 409 | `stopDevice` on a device this daemon did not boot, or `deleteDevice` on one maestro-d did not create |

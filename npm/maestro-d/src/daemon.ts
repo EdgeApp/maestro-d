@@ -559,8 +559,10 @@ export class MaestroD {
       return res.device
     }
     if (!opts.platform || !opts.name) throw new TypeError('createDevice() needs platform and name')
-    const { signal, platform, name, boot, bootTimeout, ...create } = opts
+    const { signal, platform, name, boot, bootTimeout, hub, ...create } = opts
     const body: Record<string, unknown> = { platform, name, create: { name, ...create } }
+    // The hub whose machine creates it goes beside the spec, for Android as for iOS.
+    if (hub !== undefined) body.hub = hub
     if (boot !== undefined) body.boot = boot
     if (bootTimeout !== undefined) body.bootTimeout = bootTimeout
     const res = await this.transport.json<Envelope & { device: DeviceInfo }>('/v1/devices', {

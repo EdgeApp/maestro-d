@@ -67,6 +67,8 @@ type daemonOpts struct {
 
 	envPairs []string
 	envFile  string
+	// aiKeysFile is --ai-keys-file, read into Attach.AI by finish.
+	aiKeysFile string
 
 	// Command-specific switches.
 	stopAll bool             // stop/detach --all
@@ -83,6 +85,8 @@ type daemonOpts struct {
 	hub     hubOpts    // hub start
 	lease   leaseOpts  // lease, and the lease a targeted command takes
 	stream  streamOpts // stream
+	// installURL: installApp --url, --headers-file, --app-id.
+	installURL installURLOpts
 }
 
 // hubOpts are hub start's switches.
@@ -171,6 +175,14 @@ func (o *daemonOpts) finish() error {
 	if len(env) > 0 {
 		o.Attach.Env = env
 		o.markAttach("env")
+	}
+	if o.aiKeysFile != "" {
+		ai, err := readAIKeysFile(o.aiKeysFile)
+		if err != nil {
+			return err
+		}
+		o.Attach.AI = ai
+		o.markAttach("ai")
 	}
 	return nil
 }
@@ -344,6 +356,8 @@ var (
 		envFlag,
 		strFlag("env-file", "File of KEY=VALUE lines to load as session variables", nil,
 			func(o *daemonOpts, v string) { o.envFile = v }),
+		strFlag("ai-keys-file", "JSON file {jevKey, anthropicKey} (mode 0600) with the keys assertWithAI spends on a daemon whose config.json has no ai block", nil,
+			func(o *daemonOpts, v string) { o.aiKeysFile = v }),
 		attachStr("artifacts", "Artifact mode: all, none, on-failure (default)", []string{"MAESTRO_ARTIFACTS"},
 			func(a *daemon.AttachConfig, v string) { a.Artifacts = v }),
 		attachStr("output-dir", "Report/artifact directory (default ~/.maestro-d/run/<name>/reports/<device>/<ts>)", []string{"MAESTRO_OUTPUT"},

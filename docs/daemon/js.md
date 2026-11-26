@@ -187,6 +187,33 @@ with its leased handle; `dev.release()` resolves with `{deviceMinutes}`.
 `dev.installApp(file)` on a cloud device installs into the running session,
 which keeps its id; `dev.uninstallApp()` rejects with `USAGE` there.
 
+`device.installApp({url, headers, appId})` installs a build the device's
+own daemon downloads (a hub routes it to the hub the device is plugged
+into, which fetches it), with `headers` such as a bearer key sent to `url`
+only, never to a redirect's target; it resolves `{appId, cached, etag}`,
+`cached` when the server's `ETag` matches the build installed last
+([`POST …/apps`](rest.md#post-v1devicesidapps)). `md.attach({…, ai:
+{jevKey, anthropicKey}})` (and `lease({attach: {ai}})`) gives the
+session the keys its AI checks spend when the daemon has no `ai` block of
+its own ([config.md](config.md#ai)); the keys are sent, never kept on the
+handle or its `info`. Device records carry `capabilities`, the JSON their
+host's config.json gives them, untouched. `createDevice({platform:
+'android', name, hub})` makes an AVD on another hub's machine, as it does a
+simulator.
+
+The commands that answer data resolve a `StepResult` whose `data` is
+typed by the exported result types: `keyboardVisible()` gives
+`KeyboardVisibleResult` (`{visible}`), `startSampler(kind)` gives
+`SamplerStarted` and `stopSampler(kind)` `SamplerResult` (`{kind, unit,
+appId, intervalMs, durationMs, count, min, max, mean, samples}`), and
+`assertWithAI(assertion)` and `assertNoDefectsWithAI()` give
+`AICheckResult` (`{verdict, confidence, model, escalations, observed,
+costUsd}`): every verdict resolves, so read `data.verdict` rather than
+catching. `setStatusBar({mode: 'demo'})` rejects with `UNSUPPORTED` on a
+physical iPhone or iPad; `device.supportsStatusBar()` (or the exported
+`supportsStatusBar(info)`) tells ahead, so a rig can mask the status bar
+there instead.
+
 `md.devicefarm` reaches Device Farm without a device: `account()` (trial
 minutes and unmetered slots), `apps()` (the project's uploads),
 `sessions()` (its remote access sessions, each named with its device id)
