@@ -72,7 +72,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 }
 
 func (s *Server) Shutdown(ctx context.Context, endLeases bool) {
-	s.endAllLeases()
+	s.stopLeases(endLeases)
 }
 
 func (s *Server) DeviceStopped(ctx context.Context, deleted bool, ids ...string) *daemon.Error {

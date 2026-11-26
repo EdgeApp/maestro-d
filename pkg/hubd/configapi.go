@@ -141,7 +141,11 @@ func (s *Server) removedLeaseMatches(device, credential string) bool {
 }
 
 func (s *Server) publishLeaseEnd(e *leaseEntry, reason string) {
-	event := daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)}
+	device := s.resolvedDevice(e)
+	if device == "" && e.avd != "" {
+		device = daemon.AVDPrefix + strings.TrimPrefix(e.avd, "android:")
+	}
+	event := daemon.Event{Type: leaseEndEvent(reason), Device: device, Message: daemon.HolderName(e.holder)}
 	if reason == endRemoved {
 		event.Reason = reason
 	}
@@ -201,7 +205,7 @@ func (s *Server) prepareRemoval(cfg *netshape.Config, id string, force bool) (*d
 		s.removing[key] = true
 	}
 	for _, e := range entries {
-		s.removedLeases[e.id] = removedLease{device: e.device, until: e.expires}
+		s.removedLeases[e.id] = removedLease{device: s.resolvedDevice(e), until: e.expires}
 		rm.teardowns = append(rm.teardowns, s.endLeaseLocked(e, endRemoved))
 	}
 	return rm, nil

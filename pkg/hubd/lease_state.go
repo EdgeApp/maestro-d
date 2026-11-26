@@ -27,6 +27,7 @@ type leaseRecord struct {
 type leaseFile struct {
 	Version            int                        `json:"version"`
 	Leases             []leaseRecord              `json:"leases"`
+	BootDuties         []bootDuty                 `json:"bootDuties,omitempty"`
 	AcquisitionReplays []daemon.AcquisitionReplay `json:"acquisitionReplays,omitempty"`
 	SelectorAttempts   []daemon.SelectorAttempt   `json:"selectorAttempts,omitempty"`
 }
@@ -45,6 +46,10 @@ func (t *leaseTable) snapshot() leaseFile {
 	defer t.mu.Unlock()
 	t.pruneJournal(time.Now())
 	f := leaseFile{Version: 2, Leases: []leaseRecord{}}
+	for _, d := range t.bootDuties {
+		f.BootDuties = append(f.BootDuties, d)
+	}
+	sort.Slice(f.BootDuties, func(i, j int) bool { return f.BootDuties[i].key() < f.BootDuties[j].key() })
 	for _, e := range t.byID {
 		if e.durable {
 			f.Leases = append(f.Leases, leaseRecord{Lease: e.view(), AVD: e.avd, Shared: e.sharedAtGrant.Load()})
@@ -157,18 +162,20 @@ func (t *leaseTable) restore(r leaseRecord) (*leaseEntry, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	if !now.Before(expires) || t.byID[r.ID] != nil || t.overlapLocked(r.Device, starts, expires, nil) != nil {
-		return nil, false
-	}
 	e := &leaseEntry{id: r.ID, device: r.Device, avd: r.AVD, holder: r.Holder, description: daemon.LeaseDescription(r.Description), durable: true, booted: r.Booted, ttl: time.Duration(r.TTLSec) * time.Second,
 		max: time.Duration(r.MaxSec) * time.Second, starts: starts, expires: expires, ended: make(chan struct{})}
+	e.restored = r.State == daemon.LeaseActive && !starts.After(now)
+	if !now.Before(expires) || t.byID[r.ID] != nil || t.overlapLocked(e.tableKey(), starts, expires, nil) != nil {
+		return nil, false
+	}
+	e.awaitingAttach.Store(e.restored)
 	e.sharedAtGrant.Store(r.Shared)
 	t.byID[e.id] = e
 	if starts.After(now) {
 		t.scheduleLocked(e)
 	} else {
 		e.started.Store(true)
-		t.byDevice[e.device] = e
+		t.byDevice[e.tableKey()] = e
 	}
 	return e, true
 }
@@ -267,24 +274,47 @@ func (s *Server) loadLeases() error {
 	for _, a := range f.SelectorAttempts {
 		t.attempts[a.RequestID] = a
 	}
+	for _, d := range f.BootDuties {
+		t.bootDuties[d.key()] = d
+	}
 	changed := t.pruneJournal(time.Now())
 	t.mu.Unlock()
+	var restored, kept, started, over int
 	for _, r := range f.Leases {
 		e, ok := t.restore(r)
 		if !ok {
+			over++
+			if ends, err := time.Parse(time.RFC3339, r.ExpiresAt); err == nil && !t.now().Before(ends) && r.Booted && r.Device != "" {
+				d := bootDuty{Device: r.Device, AVD: r.AVD}
+				t.bootDuties[d.key()] = d
+			}
 			changed = true
 			continue
 		}
 		changed = changed || r.Description != e.description
-		if !e.pending() && r.State == daemon.LeaseScheduled {
+		if e.pending() {
+			kept++
+		} else if e.restored {
+			restored++
+		} else {
+			started++
 			changed = true
 			s.Events().Publish(daemon.Event{Type: "lease.granted", Device: e.device, Message: daemon.HolderName(e.holder)})
 		}
 	}
-	if changed {
-		return s.saveLeases()
+	logger.Info("leases: %d active restored, %d scheduled kept, %d started, %d over", restored, kept, started, over)
+	for _, d := range t.bootDuties {
+		if t.transferDuty(d) {
+			changed = true
+		}
 	}
-	return nil
+	if changed {
+		if err := s.saveLeases(); err != nil {
+			return err
+		}
+	}
+	s.retryBootDuties()
+	return s.queueLeases(false).wait()
 }
 
 // Replay records share the acquisition routes' existing empty-device scope.

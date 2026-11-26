@@ -417,6 +417,10 @@ func (s *Server) Done() <-chan struct{} { return s.done }
 // Shutdown detaches every device, shuts down daemon-booted devices,
 // removes the run files and closes the listeners. Idempotent.
 func (s *Server) Shutdown(reason string) {
+	s.shutdown(reason, false)
+}
+
+func (s *Server) shutdown(reason string, endLeases bool) {
 	s.shutdownOnce.Do(func() {
 		s.shuttingDown.Store(true)
 		if s.cancelLaunches != nil {
@@ -426,13 +430,13 @@ func (s *Server) Shutdown(reason string) {
 		s.idle.Stop()
 		go func() {
 			defer close(s.done)
-			// A hub's leases end first, while the mesh still carries their
+			// Process the hub's leases while the mesh still carries their
 			// events to peers' clients and before daemon.shutdown: requests
 			// under them are cancelled, and every teardown (one that waits
 			// for work that ignores its cancellation too, for a while) is
 			// done before the devices are detached and shut down below.
 			if hub := s.cfg.Hub; hub != nil {
-				hub.Shutdown(context.Background(), true)
+				hub.Shutdown(context.Background(), endLeases)
 			}
 			if s.cfg.Mesh != nil {
 				s.cfg.Mesh.Close()
@@ -667,7 +671,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-	s.Shutdown("shutdown request")
+	s.shutdown("shutdown request", r.URL.Query().Get("endLeases") == "true")
 }
 
 // ---------------------------------------------------------------------------
@@ -761,6 +765,10 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if rd := s.remote(id); rd != nil {
 		s.handleStopCloud(w, r, rd, req.Delete)
+		return
+	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if req.Delete {
@@ -986,6 +994,11 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, a *attached) bo
 		}
 	} else {
 		a.busy.Lock()
+	}
+	if e := s.verifyBinding(r.Context(), a.id); e != nil {
+		a.busy.Unlock()
+		WriteError(w, e)
+		return false
 	}
 	// A cloud device counts the request on its idle clock (remote.go).
 	if rd := s.remote(a.id); rd != nil {
