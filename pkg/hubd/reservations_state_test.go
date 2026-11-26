@@ -2,7 +2,6 @@ package hubd
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,25 +11,27 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
-func readReservations(t *testing.T, path string) []reservationRecord {
+func readReservations(t *testing.T, path string) []leaseRecord {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	f, err := readLeases(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f reservationFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		t.Fatal(err)
+	var pending []leaseRecord
+	for _, r := range f.Leases {
+		if r.State == daemon.LeaseScheduled {
+			pending = append(pending, r)
+		}
 	}
-	return f.Reservations
+	return pending
 }
 
 func TestReservationsState_Path(t *testing.T) {
 	t.Setenv(daemon.EnvHome, "/h")
-	if got := ReservationsPath("hub"); got != "/h/hub/scheduled-leases.json" {
+	if got := LeasesPath("hub"); got != "/h/hub/leases.json" {
 		t.Fatal(got)
 	}
-	if got := ReservationsPath("lab-2"); got != "/h/hub/daemons/lab-2/scheduled-leases.json" {
+	if got := LeasesPath("lab-2"); got != "/h/hub/daemons/lab-2/leases.json" {
 		t.Fatal(got)
 	}
 }
@@ -40,7 +41,7 @@ func TestReservationsState_Path(t *testing.T) {
 func TestReservationsState_Written(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
 	ctx := context.Background()
-	path := ReservationsPath("hubtest")
+	path := LeasesPath("hubtest")
 	if err := recordCreated(daemon.CreatedRecord{Platform: "ios", ID: "SIM-UP", Name: "Shared Phone"}); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +94,8 @@ func TestReservationsState_Written(t *testing.T) {
 func TestReservationsState_Load(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
 	ctx := context.Background()
-	path := ReservationsPath("hubtest")
-	recs := []reservationRecord{
+	path := LeasesPath("hubtest")
+	recs := []daemon.Lease{
 		{ID: "future", Device: "mock-1", Holder: "alice", StartsAt: env.at(time.Hour), ExpiresAt: env.at(2 * time.Hour), TTLSec: 3600, MaxSec: 28800},
 		{ID: "started", Device: "mock-2", Holder: "bob", StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Minute), TTLSec: 120, MaxSec: 28800},
 		{ID: "over", Device: "SIM-UP", StartsAt: env.at(-2 * time.Hour), ExpiresAt: env.at(-time.Hour), TTLSec: 3600, MaxSec: 28800},
@@ -102,10 +103,17 @@ func TestReservationsState_Load(t *testing.T) {
 		{ID: "clash", Device: "mock-1", StartsAt: env.at(90 * time.Minute), ExpiresAt: env.at(3 * time.Hour), TTLSec: 5400, MaxSec: 28800},
 		{ID: "", Device: "mock-1", StartsAt: "x", ExpiresAt: "y"},
 	}
-	if err := writeReservations(path, recs); err != nil {
+	var records []leaseRecord
+	for _, l := range recs {
+		l.State = daemon.LeaseScheduled
+		records = append(records, leaseRecord{Lease: l})
+	}
+	if err := writeLeases(path, leaseFile{Version: 2, Leases: records}); err != nil {
 		t.Fatal(err)
 	}
-	env.s.loadReservations()
+	if err := env.s.loadLeases(); err != nil {
+		t.Fatal(err)
+	}
 	if l, err := env.local.Lease(ctx, "future"); err != nil || l.Lease.State != daemon.LeaseScheduled || l.Lease.Holder != "alice" || l.Lease.StartsAt != recs[0].StartsAt {
 		t.Fatalf("future: %+v %v", l, err)
 	}
@@ -132,14 +140,16 @@ func TestReservationsState_Load(t *testing.T) {
 
 func TestReservationsState_UnreadableFile(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
-	path := ReservationsPath("hubtest")
+	path := LeasesPath("hubtest")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.s.loadReservations()
+	if err := env.s.loadLeases(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(path + ".bad"); err != nil {
 		t.Fatalf("not moved aside: %v", err)
 	}
@@ -147,7 +157,9 @@ func TestReservationsState_UnreadableFile(t *testing.T) {
 		t.Fatalf("leases: %+v", ls)
 	}
 	// No file at all is no reservations.
-	env.s.loadReservations()
+	if err := env.s.loadLeases(); err != nil {
+		t.Fatal(err)
+	}
 	// A plain daemon writes nothing.
 	plain := daemon.New(daemon.Config{Name: "hubtest"}, daemon.Deps{})
 	plain.Shutdown("test")
@@ -163,7 +175,7 @@ func TestReservationsState_UnreadableFile(t *testing.T) {
 // window passed or not.
 func TestReservationsState_BootDutyIsNotReadBack(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
-	path := ReservationsPath("hubtest")
+	path := filepath.Join(filepath.Dir(LeasesPath("hubtest")), "scheduled-leases.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +186,9 @@ func TestReservationsState_BootDutyIsNotReadBack(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env.s.loadReservations()
+	if err := env.s.loadLeases(); err != nil {
+		t.Fatal(err)
+	}
 	if l, err := env.local.Lease(context.Background(), "later"); err != nil || l.Lease.Booted {
 		t.Fatalf("later: %+v %v", l, err)
 	}
@@ -184,7 +198,7 @@ func TestReservationsState_BootDutyIsNotReadBack(t *testing.T) {
 	if len(env.stopped) != 0 {
 		t.Fatalf("the load shut down %v", env.stopped)
 	}
-	if strings.Contains(string(mustRead(t, path)), "booted") {
+	if strings.Contains(string(mustRead(t, LeasesPath("hubtest"))), "booted") {
 		t.Fatal("the rewritten file still carries the duty")
 	}
 }

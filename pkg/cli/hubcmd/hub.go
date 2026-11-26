@@ -472,8 +472,10 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 	if err != nil {
 		return err
 	}
+	policy := &hubd.Server{}
 	mesh := newMesh(hub.Config{
-		Name: o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
+		SelectorJournal: policy,
+		Name:            o.hub.name, Token: token, PeerToken: peerToken, Peers: o.hub.peers, Advertise: o.hub.advertise,
 		NoMDNS: o.hub.noMDNS, PeerCA: pool, Version: version.Version, Cloud: providerNames(deps), ReservationLead: lead,
 		Logf: func(format string, args ...any) { logger.Info(format, args...) },
 	})
@@ -488,7 +490,7 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		Token:            token,
 		TLSCert:          o.TLSCert,
 		TLSKey:           o.TLSKey,
-		Hub:              &hubd.Server{},
+		Hub:              policy,
 		HubName:          o.hub.name,
 		LeaseMax:         leaseMax,
 		LeaseMaxDevices:  leaseMaxDevices,

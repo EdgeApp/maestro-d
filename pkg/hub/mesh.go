@@ -52,6 +52,8 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 // Config configures a hub's mesh.
 type Config struct {
+	// SelectorJournal records keyed mesh acquisitions with the hub's lease state.
+	SelectorJournal SelectorJournal
 	// Name is this hub's name, unique in the mesh.
 	Name string
 	// Token is the client bearer token; forwarded requests carry it.
@@ -184,6 +186,9 @@ type Mesh struct {
 	afterLinked atomic.Pointer[func()]
 
 	cache fanoutCache
+
+	selectorMu sync.Mutex
+	selectors  map[string]*selectorCall
 
 	// peerIDs remembers, for PeerIDCacheFor, the hub an unqualified id
 	// resolved to when this hub did not list it (router.resolve).
