@@ -184,3 +184,11 @@ validate:
 release: clean build-all
 	@echo "Release builds created:"
 	@ls -la $(BINARY_NAME)-*
+
+# Rebuild or verify the self-contained dashboard after installing web/package-lock.json.
+.PHONY: web web-check
+web:
+	node web/scripts/bundle.mjs
+
+web-check:
+	node web/scripts/bundle.mjs --check
