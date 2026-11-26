@@ -898,3 +898,31 @@ func TestDevice_ShapeableNeedsBothCalls(t *testing.T) {
 		}
 	}
 }
+
+// ParseConfig keeps a device's capabilities exactly as written, any JSON
+// value, apart from the description; a null one is none, and it takes no
+// part in validation.
+func TestParseConfig_CapabilitiesKeptAsWritten(t *testing.T) {
+	const caps = `{"teamstation": {"class": "ipad", "features": ["camera"]}, "anything": [1, 2], "big": 123456789012345678901234567890, "tiny": 1e400}`
+	cfg, err := ParseConfig([]byte(`{"hubDevices": [
+		{"id": "a", "description": "Lab iPad", "capabilities": ` + caps + `},
+		{"id": "b", "capabilities": 7},
+		{"id": "c", "capabilities": null},
+		{"id": "d"}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(cfg.Devices["a"].Capabilities); got != caps || cfg.Devices["a"].Description != "Lab iPad" {
+		t.Fatalf("a: %q", got)
+	}
+	if got := string(cfg.Devices["b"].Capabilities); got != "7" {
+		t.Fatalf("b: %q", got)
+	}
+	if cfg.Devices["c"].Capabilities != nil || cfg.Devices["d"].Capabilities != nil {
+		t.Fatalf("c, d: %+v", cfg.Devices)
+	}
+	if _, err := ParseConfig([]byte(`{"hubDevices": [{"id": "a", "capabilities": {"x": }}]}`)); err == nil {
+		t.Fatal("malformed capabilities parsed")
+	}
+}

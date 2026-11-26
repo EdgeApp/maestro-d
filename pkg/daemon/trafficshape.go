@@ -104,7 +104,7 @@ func configEntries(cfg *netshape.Config, d DeviceInfo) []netshape.Device {
 }
 
 // applyDeviceConfig sets, from the device config, each device's
-// description and trafficShaping (whether this host can shape it). Each
+// description, capabilities and trafficShaping (whether this host can shape it). Each
 // comes from the first of the device's entries that has one (see
 // configEntries), as the session's shaper picks its calls. A config that
 // cannot be read sets neither, and is logged once per problem: listings
@@ -121,11 +121,14 @@ func (s *Server) applyDeviceConfig(devs []DeviceInfo) {
 	shapingWarned.Delete(path)
 	for i := range devs {
 		dev := &devs[i]
-		dev.TrafficShaping, dev.Description = false, ""
+		dev.TrafficShaping, dev.Description, dev.Capabilities = false, "", nil
 		for _, e := range configEntries(cfg, *dev) {
 			dev.TrafficShaping = dev.TrafficShaping || e.Shapeable()
 			if dev.Description == "" {
 				dev.Description = e.Description
+			}
+			if dev.Capabilities == nil {
+				dev.Capabilities = e.Capabilities
 			}
 		}
 	}

@@ -115,6 +115,17 @@ const (
 	StepSetTrafficShape   StepType = "setTrafficShape"
 	StepResetTrafficShape StepType = "resetTrafficShape"
 
+	// maestro-d: the status bar, the keyboard and the samplers (device_steps.go)
+	StepSetStatusBar    StepType = "setStatusBar"
+	StepKeyboardVisible StepType = "keyboardVisible"
+	StepStartSampler    StepType = "startSampler"
+	StepStopSampler     StepType = "stopSampler"
+
+	// maestro-d: pointer gestures (pointer_steps.go)
+	StepHoverOn  StepType = "hoverOn"
+	StepHoldOn   StepType = "holdOn"
+	StepDragPath StepType = "dragPath"
+
 	// maestro-d: the computer device's mouse (desktop_steps.go)
 	StepMoveMouse StepType = "moveMouse"
 	StepClickOn   StepType = "clickOn"
@@ -187,6 +198,7 @@ type TapOnStep struct {
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	AllowCovered          bool     `yaml:"allowCovered"` // Tap the element's centre even when something lies over it (a video under its player's controls), skipping the hit-target check; the tap reaches whatever is on top there, as a finger's would. The browser and the devicelab Android driver check; WebDriverAgent and uiautomator2 never refuse a covered element, so there it changes nothing
 }
 
 // DoubleTapOnStep double taps on an element (alias for tapOn with repeat=2).
@@ -491,13 +503,23 @@ func (s *AssertConditionStep) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // AssertNoDefectsWithAIStep uses AI to check for visual defects.
+//
+// maestro-d: the executor runs it for every driver (pkg/aicheck), with the
+// built-in assertion that the screen shows no visual defect.
 type AssertNoDefectsWithAIStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep  `yaml:",inline"`
+	AIOptions `yaml:",inline"`
 }
 
 // AssertWithAIStep uses AI to verify an assertion.
+//
+// maestro-d: the executor runs it for every driver (pkg/aicheck): Jev, then
+// Claude Haiku, Sonnet and Opus, until one answers with confidence. Every
+// verdict (pass, fail, unsure) is a successful step with the result in its
+// data.
 type AssertWithAIStep struct {
 	BaseStep  `yaml:",inline"`
+	AIOptions `yaml:",inline"`
 	Assertion string `yaml:"assertion"`
 }
 
@@ -983,9 +1005,14 @@ type RemoveMediaStep struct {
 
 // PressKeyStep presses a key. Native iOS supports LOCK and UNLOCK to set and verify
 // screen lock state; UNLOCK does not bypass a passcode.
+//
+// maestro-d: on iOS (WebDriverAgent) up, down, left, right (or dpad_up, …)
+// and escape (or esc) are hardware keys sent with XCUITest's typeKey, which
+// needs iOS or iPadOS 17; an older device answers UNSUPPORTED for them. tab,
+// enter, delete and space are typed into the focused field.
 type PressKeyStep struct {
 	BaseStep `yaml:",inline"`
-	Key      string `yaml:"key"`
+	Key      string `yaml:"key"` // The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later)
 }
 
 // WaitForAnimationToEndStep waits for animations.

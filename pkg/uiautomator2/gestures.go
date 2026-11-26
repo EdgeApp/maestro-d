@@ -183,3 +183,29 @@ func (c *Client) PinchClose(elementID string, percent float64, speed int) error 
 	_, err := c.request("POST", c.sessionPath("/appium/gestures/pinch_close"), req)
 	return err
 }
+
+// TouchPath presses one finger at (startX, startY), holds holdMs, moves
+// through each leg ({x, y, ms}) over its time and lifts, as one W3C touch
+// action. (maestro-d: dragPath)
+func (c *Client) TouchPath(startX, startY, holdMs int, legs [][3]int) error {
+	actions := []map[string]interface{}{
+		{"type": "pointerMove", "duration": 0, "x": startX, "y": startY},
+		{"type": "pointerDown", "button": 0},
+	}
+	if holdMs > 0 {
+		actions = append(actions, map[string]interface{}{"type": "pause", "duration": holdMs})
+	}
+	for _, l := range legs {
+		actions = append(actions, map[string]interface{}{"type": "pointerMove", "duration": l[2], "x": l[0], "y": l[1]})
+	}
+	actions = append(actions, map[string]interface{}{"type": "pointerUp", "button": 0})
+	req := map[string]interface{}{
+		"actions": []map[string]interface{}{{
+			"type": "pointer", "id": "finger1",
+			"parameters": map[string]interface{}{"pointerType": "touch"},
+			"actions":    actions,
+		}},
+	}
+	_, err := c.request("POST", c.sessionPath("/actions"), req)
+	return err
+}

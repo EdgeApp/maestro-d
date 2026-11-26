@@ -548,6 +548,10 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.back(s)
 	case *flow.PressKeyStep:
 		result = d.pressKey(s)
+	case *flow.SetStatusBarStep: // maestro-d (devicesteps.go)
+		result = core.RunAndroidStatusBar(d.shellFunc(), s.Mode, s.EffectiveTime(), s.EffectiveBattery())
+	case *flow.KeyboardVisibleStep: // maestro-d (devicesteps.go)
+		result = d.keyboardVisibleResult()
 	case *flow.OpenNotificationsStep:
 		result = d.openNotifications(s)
 

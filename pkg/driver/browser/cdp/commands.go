@@ -33,6 +33,11 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	// check; this catches the additional "disabled / aria-disabled /
 	// pointer-events:none" cases that visibility doesn't cover, and gives a
 	// short window for state to settle if the page just enabled the control.
+	// maestro-d: allowCovered taps the centre whatever lies over it.
+	if step.AllowCovered {
+		return d.tapCovered(elem, info, step.Selector.DescribeQuoted())
+	}
+
 	if err := d.waitForActionable(elem, defaultActionableTimeoutMs); err != nil {
 		return errorResult(err, fmt.Sprintf("Element not actionable: %s — %v", step.Selector.DescribeQuoted(), err))
 	}
@@ -99,6 +104,29 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Tapped on %s", desc), info)
+}
+
+// tapCovered is tapOn's allowCovered: it scrolls elem into view and clicks
+// its centre in top-frame coordinates, with no wait for the element to be
+// interactable and no hit-target check, so the click reaches whatever is
+// on top there (a player's controls over its video), as a user's would.
+// (maestro-d)
+func (d *Driver) tapCovered(elem *rod.Element, info *core.ElementInfo, desc string) *core.CommandResult {
+	_ = elem.ScrollIntoView()
+	res, err := elem.Eval(`() => { var p = window.__maestro.topFrameClickPoint(this); return [p.x, p.y]; }`)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to find the centre of %s: %v", desc, err))
+	}
+	pt := res.Value.Arr()
+	x, y := pt[0].Num(), pt[1].Num()
+	mouse := d.page.Mouse
+	if err := mouse.MoveTo(proto.NewPoint(x, y)); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to tap on %s: %v", desc, err))
+	}
+	if err := pressAndRelease(mouse); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to tap on %s: %v", desc, err))
+	}
+	return successResult(fmt.Sprintf("Tapped the centre of %s (%.0f, %.0f), covered or not", desc, x, y), info)
 }
 
 // clickWaitGaveUp reports whether a native click's error is its wait giving
@@ -453,20 +481,34 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 	x, y := step.X, step.Y
 
-	// Handle percentage-based point
+	// A point in viewport pixels ("x, y") or percent ("x%, y%").
 	if step.Point != "" {
-		px, py, err := parsePercentageCoords(step.Point)
+		px, py, err := core.ParsePointCoords(step.Point, d.viewportW, d.viewportH)
 		if err != nil {
 			return errorResult(err, "Failed to parse point coordinates")
 		}
-		x = int(px * float64(d.viewportW))
-		y = int(py * float64(d.viewportH))
+		x, y = px, py
 	}
 
 	mouse := d.page.Mouse
 	pt := proto.NewPoint(float64(x), float64(y))
 	if err := mouse.MoveTo(pt); err != nil {
 		return errorResult(err, "Failed to move mouse")
+	}
+	// maestro-d: longPress or a duration holds the press (holdOn on a point).
+	if step.LongPress || step.DurationMs > 0 {
+		hold := time.Duration(step.DurationMs) * time.Millisecond
+		if hold <= 0 {
+			hold = time.Duration(flow.DefaultHoldMs) * time.Millisecond
+		}
+		if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to press at point")
+		}
+		time.Sleep(hold)
+		if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to release at point")
+		}
+		return successResult(fmt.Sprintf("Pressed at (%d, %d) for %v", x, y, hold), nil)
 	}
 	if err := mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to click at point")

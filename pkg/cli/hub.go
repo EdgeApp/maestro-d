@@ -74,7 +74,7 @@ var hubStartFlags = flagSet(one(hubDaemonFlag), daemonSelectFlags[1:], []dflag{
 		func(o *daemonOpts, v string) { o.hub.reservationLead = v }),
 	boolFlag("allow-remote-shell", "Let remote callers run runShell on this machine", nil,
 		func(o *daemonOpts, v bool) { o.hub.remoteShell = v }),
-	strFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+	strFlag("config", "The device config: config.json's hubDevices, each with an id and an optional description, capabilities and trafficShaping calls, and its optional ai block (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
 	strFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),

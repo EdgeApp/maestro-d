@@ -280,6 +280,8 @@ func isStepType(key string) bool {
 		StepStopRecording, StepAddMedia, StepRemoveMedia, StepPressKey, StepWaitForAnimationToEnd,
 		StepDefineVariables, StepDragAndDrop,
 		StepSetTrafficShape, StepResetTrafficShape, // maestro-d
+		StepSetStatusBar, StepKeyboardVisible, StepStartSampler, StepStopSampler, // maestro-d
+		StepHoverOn, StepHoldOn, StepDragPath, // maestro-d
 		StepMoveMouse, StepClickOn, StepScrollAt: // maestro-d
 		return true
 	}
@@ -534,6 +536,9 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 		if err := valueNode.Decode(&s); err != nil {
 			return nil, wrapParseError(sourcePath, valueNode.Line, err)
 		}
+		if err := ValidateAIOptions(string(stepType), s.AIOptions); err != nil { // maestro-d
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
 		s.StepType = stepType
 		return &s, nil
 
@@ -542,6 +547,9 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 		if valueNode.Kind == yaml.ScalarNode {
 			s.Assertion = valueNode.Value
 		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		if err := ValidateAIOptions(string(stepType), s.AIOptions); err != nil { // maestro-d
 			return nil, wrapParseError(sourcePath, valueNode.Line, err)
 		}
 		s.StepType = stepType
@@ -685,6 +693,76 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 		}
 		s.StepType = stepType
 		return validateDesktopStep(&s, valueNode, sourcePath)
+
+	case StepSetStatusBar: // maestro-d (device_steps.go)
+		var s SetStatusBarStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Mode = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		if err := ValidateStatusBar(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return &s, nil
+
+	case StepKeyboardVisible: // maestro-d (device_steps.go)
+		return &KeyboardVisibleStep{BaseStep: BaseStep{StepType: stepType}}, nil
+
+	case StepStartSampler: // maestro-d (device_steps.go)
+		var s StartSamplerStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Kind = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		if err := ValidateStartSampler(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return &s, nil
+
+	case StepStopSampler: // maestro-d (device_steps.go)
+		var s StopSamplerStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Kind = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		if err := ValidateSamplerKind("stopSampler", s.Kind); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return &s, nil
+
+	case StepHoverOn: // maestro-d (pointer_steps.go)
+		var s HoverOnStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Selector.Text = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validatedPointerStep(&s, valueNode, sourcePath)
+
+	case StepHoldOn: // maestro-d (pointer_steps.go)
+		var s HoldOnStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.Selector.Text = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validatedPointerStep(&s, valueNode, sourcePath)
+
+	case StepDragPath: // maestro-d (pointer_steps.go)
+		var s DragPathStep
+		if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = stepType
+		return validatedPointerStep(&s, valueNode, sourcePath)
 
 	case StepSetTrafficShape: // maestro-d (trafficshape.go)
 		var s SetTrafficShapeStep
