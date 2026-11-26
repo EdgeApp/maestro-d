@@ -71,13 +71,13 @@ func TestConfigDeviceFieldsAndWindows(t *testing.T) {
 	configRequest(t, env.local, "PUT", "/mock-1", "{", 400)
 	configRequest(t, env.local, "PUT", "/mock-1@hubtest", `{"description":"rack A"}`, 200)
 	configRequest(t, env.local, "PUT", "/offline", `{"description":"later"}`, 201)
-	list := func() configListing {
+	list := func() daemon.HubConfigListing {
 		t.Helper()
 		b := configRequest(t, env.local, "GET", "", "", 200)
 		if bytes.Contains(b, []byte("lab.invalid")) || bytes.Contains(b, []byte("setTrafficShape")) {
 			t.Fatalf("shaping request in listing: %s", b)
 		}
-		var res configListing
+		var res daemon.HubConfigListing
 		if err := json.Unmarshal(b, &res); err != nil {
 			t.Fatal(err)
 		}
