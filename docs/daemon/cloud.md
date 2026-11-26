@@ -132,7 +132,7 @@ and launches cloud devices for any client of any hub in its mesh, through
 leases:
 
 ```
-$ maestro-d hub start --name lab-mac --devicefarm --devicefarm-credentials-file ~/.aws/devicefarm-creds \
+$ maestro-d-hub start --name lab-mac --devicefarm --devicefarm-credentials-file ~/.aws/devicefarm-creds \
     --cloud-max-devices 2 --token-file … --peer-token-file …
 $ maestro-d lease --target-hub=lab-mac.local --location cloud --platform ios --name 'Apple iPhone 15' --ttl 1h
 df-2fd5de78@lab-mac leased: lease 5ae28c45-…@lab-mac, holder ci@laptop, expires … (59m59s; window 1h0m0s, max 2h30m0s)
@@ -157,9 +157,9 @@ df-2fd5de78@lab-mac released (lease 5ae28c45-…@lab-mac) (about 2.1 device minu
   requests under it `LEASE_EXPIRED`, whose `details.hint` is a new cloud
   lease, since the device went with it; the CLI prints that hint and
   forgets the lease, and without a lease the device is `DEVICE_NOT_FOUND`).
-- **Sharing.** A cloud device a hub launched is in its pool whatever
-  `--share-device` and `config.json`'s `hubDevices` list, and is listed `available: false` while its lease
-  lasts.
+- **Sharing.** A hub automatically includes a cloud device it launches in
+  its pool for that lease and lists it as `available: false`. The device
+  needs no `hubDevices` entry in `config.json`.
 - **Apps** are installed after the lease, through the install route.
 
 ## Release
