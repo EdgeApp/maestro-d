@@ -35,24 +35,22 @@ through WebDriverAgent. TVs have no touch screen: move focus with
 `playPause`); WebDriverAgent sends them as Siri Remote presses. Touchpad
 swipes on a physical TV need the Companion pairing below.
 
-A TV can pair with several Macs, so a hub shares one only when `--share-tv`
-names it (by id or name) or its `config.json`'s `hubDevices` does (by id);
-name each TV on exactly one hub. A hub shares only the devices it names, TVs or not
-(`--share-device`, `--share-tv`, `hubDevices`). An unnamed TV is private to the
-machine: no remote route lists, reads, stops or leases it. A shared TV is
+A TV can pair with several Macs. On the Mac that will lend it, add its device
+ID to the hub's `config.json` using the command below. List each TV on
+exactly one hub. Other paired TVs stay private to the machine. A shared TV is
 leased like any device. A selector picks a TV only when it asks for
 `--kind tv` or names the TV, so `lease --platform ios` still means a phone or
 tablet:
 
 ```sh
-maestro-d hub start --share-tv "Lab TV" …
+maestro-d-hub devices add "$TV_UDID" --description "Lab TV"
 maestro-d lease --kind tv --target-hub=hub.lan
 maestro-d lease --name "Lab TV" --target-hub=hub.lan
 ```
 
 WebDriverAgent's first build signs with the login keychain, which a hub
 started over SSH cannot use (`errSecInternalComponent`). Run that hub as the
-launchd service (`hub service install`, docs/daemon/hub.md), or build once
+launchd service (`maestro-d-hub service install`, [Hubs](daemon/hub.md)), or build once
 from a GUI session.
 
 ## Simulators
