@@ -1152,3 +1152,40 @@ test('local config methods use the recorded socket in each long home; TCP config
     if (aRunning) cli(a.home, 'stop')
   }
 })
+
+test('a local hub shutdown preserves the held device; a refused TCP shutdown leaves it usable', async (t) => {
+  const home = path.join(tmp, 'restart-js')
+  fs.mkdirSync(home, { mode: 0o700 })
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ hubDevices: [{ id: 'mock-restart' }] }), { mode: 0o600 })
+  const savedHome = process.env.MAESTRO_D_HOME
+  process.env.MAESTRO_D_HOME = home
+  const env = { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-restart' }
+  const start = (addr = '127.0.0.1:0') => JSON.parse(execFileSync(hubBin, ['start', '--name', 'js-restore', '--listen', addr,
+    '--token', 'js-restore', '--peer-token', 'peers', '--no-mdns', '--json'], { env })).daemon
+  t.after(() => {
+    process.env.MAESTRO_D_HOME = savedHome
+    execFileSync(hubBin, ['stop', '--end-leases'], { env })
+  })
+  const info = start()
+  const local = await MaestroD.connect({ hubSocket: true })
+  const device = await local.lease({ device: 'mock-restart', ttlSec: 120, attach: { platform: 'mock' } })
+  const before = { ...device.lease }
+  await local.shutdown()
+  assert.ok(JSON.parse(fs.readFileSync(path.join(home, 'leases.json'))).leases.some(l => l.id === before.id))
+  start(info.httpAddr)
+  assert.equal((await device.tapOn('working again')).ok, true)
+  assert.equal(device.lease.id, before.id)
+  assert.equal(device.lease.expiresAt, before.expiresAt)
+  await device.release()
+  const tcp = await MaestroD.connect({ hub: info.httpAddr, token: 'js-restore' })
+  const remoteDevice = await tcp.lease({ device: 'mock-restart' })
+  const original = remoteDevice.lease.id
+  try {
+    await assert.rejects(tcp.shutdown(), e => e.code === 'FORBIDDEN')
+    assert.equal(remoteDevice.lease.id, original)
+    assert.equal((await remoteDevice.tapOn('still attached')).ok, true)
+  } finally {
+    await tcp.close()
+    await local.close()
+  }
+})

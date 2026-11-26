@@ -260,6 +260,17 @@ describe('leases.json with several leases per device', () => {
     assert.deepEqual(ids, ['go-1', 'new'])
   })
 
+  test('static attach keeps connection options out of the driver request and the saved grant', async () => {
+    const hub = `http://${addr}`
+    recordLease(hub, { ...LEASE, startsAt: '2020-01-01T00:00:00Z' })
+    const driver = { platform: 'mock', appId: 'example.app', noAppInstall: true }
+    await MaestroD.attach({ url: hub, token: 'secret', log() {}, device: 'mock-1', ...driver })
+    const req = requests.find(r => r.url.endsWith('/attach'))
+    assert.equal(req.headers.authorization, 'Bearer secret')
+    assert.deepEqual(req.body, driver)
+    assert.deepEqual(findLease(hub, 'mock-1').attach, driver)
+  })
+
   test('attach() sends the started lease on file, not a reservation; LEASE_NOT_STARTED keeps the record', async () => {
     const md = await MaestroD.connect({ hub: addr, token: 't' })
     recordLease(md.leaseKey, { id: 'now', device: 'mock-1', startsAt: '2020-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z', ttlSec: 60 })
