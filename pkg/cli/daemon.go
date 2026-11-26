@@ -184,7 +184,9 @@ func leaseAndAttach(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 		if err != nil {
 			return id, nil, err
 		}
-		if rec != nil && startedRecord(*rec) {
+		// Device Farm ends its session on shutdown. Its device route returns
+		// the provider-specific reason and reacquisition hint after release.
+		if rec != nil && startedRecord(*rec) && !strings.HasPrefix(rec.Device, "df-") {
 			held, e := resolveGrant(ctx, c, o, *rec)
 			if e != nil {
 				return id, nil, e
