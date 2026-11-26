@@ -853,17 +853,17 @@ func (c *fanoutCache) drop(hub string) {
 // fanout asks every linked peer for path (scope=local) in parallel, each
 // within FanoutTimeout; answers are cached for CacheFor.
 func (m *Mesh) fanout(ctx context.Context, path, query string) []fanoutResult {
-	return m.fanoutWithLease(ctx, path, query, "", "")
+	return m.fanoutWithLease(ctx, path, query, "", "", false)
 }
 
-func (m *Mesh) fanoutWithLease(ctx context.Context, path, query, lease, owner string) []fanoutResult {
+func (m *Mesh) fanoutWithLease(ctx context.Context, path, query, lease, owner string, refresh bool) []fanoutResult {
 	links := m.linked()
 	out := make([]fanoutResult, len(links))
 	var wg sync.WaitGroup
 	for i, l := range links {
 		key := l.peer + " " + path + "?" + query
 		private := lease != "" && owner == l.peer
-		if !private {
+		if !private && !refresh {
 			if res, ok := m.cache.get(key, m.cfg.CacheFor); ok {
 				out[i] = res
 				continue
@@ -1035,7 +1035,33 @@ func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Set("scope", "local")
-	for _, res := range rt.m.fanoutWithLease(r.Context(), "/v1/devices", q.Encode(), lease, owner) {
+	rt.m.mergePeerDevices(&out, rt.m.fanoutWithLease(r.Context(), "/v1/devices", q.Encode(), lease, owner, false))
+	daemon.SetLocations(out.Devices, daemon.CallerMachine(r, !rt.tcp, daemon.MachineName()))
+	out.Devices = dq.Filter(out.Devices)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// PollPublicDevices refreshes the public peer listing, including linked peers
+// with an empty pool. It never sends a lease credential or a caller's headers.
+func (m *Mesh) PollPublicDevices(ctx context.Context) (daemon.DevicesResult, map[string]string) {
+	results := m.fanoutWithLease(ctx, "/v1/devices", "scope=local", "", "", true)
+	var out daemon.DevicesResult
+	m.mergePeerDevices(&out, results)
+	// Remember the machine from its hello even with no shared devices
+	// and after a link drops. Older peers identify it in device rows.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	machines := make(map[string]string, len(m.peers))
+	for name, peer := range m.peers {
+		if !peer.stopped {
+			machines[name] = peer.machine
+		}
+	}
+	return out, machines
+}
+
+func (m *Mesh) mergePeerDevices(out *daemon.DevicesResult, results []fanoutResult) {
+	for _, res := range results {
 		var devs daemon.DevicesResult
 		if res.err == nil {
 			if err := json.Unmarshal(res.body, &devs); err != nil {
@@ -1048,10 +1074,7 @@ func (rt *router) listDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Devices = append(out.Devices, devs.Devices...)
 	}
-	out.Unreachable = append(out.Unreachable, rt.m.down()...)
-	daemon.SetLocations(out.Devices, daemon.CallerMachine(r, !rt.tcp, daemon.MachineName()))
-	out.Devices = dq.Filter(out.Devices)
-	writeJSON(w, http.StatusOK, out)
+	out.Unreachable = append(out.Unreachable, m.down()...)
 }
 
 // listLeases merges this hub's leases with every peer's.

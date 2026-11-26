@@ -40,8 +40,9 @@ type HubStatus struct {
 	// Addr is the --advertise address ("" when peers use the link's).
 	Addr string `json:"addr,omitempty"`
 	// Listen is the bound client and peer listener.
-	Listen string `json:"listen,omitempty"`
-	TLS    bool   `json:"tls,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+	WebAddr string `json:"webAddr,omitempty"`
+	TLS     bool   `json:"tls,omitempty"`
 	// MDNS is false with --no-mdns.
 	MDNS  bool      `json:"mdns"`
 	Peers []HubPeer `json:"peers"`

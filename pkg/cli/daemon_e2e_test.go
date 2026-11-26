@@ -104,6 +104,7 @@ func (e *e2e) env(extra ...string) []string {
 		daemon.EnvBin+"="+e.bin,
 		daemon.EnvName+"=",
 		daemon.EnvDevice+"=",
+		"MAESTRO_D_HUB_WEB_PORT=0", // every fixture hub selects its own web port
 		"NO_COLOR=1",
 	)
 	if e.coverDir != "" {
