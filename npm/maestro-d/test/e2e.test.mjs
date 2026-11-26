@@ -642,7 +642,7 @@ describe('leases', () => {
   before(() => {
     const hubDevices = ['mock-h1', 'mock-h2', 'mock-unlisted'].map(id => ({ id }))
     fs.writeFileSync(path.join(process.env.MAESTRO_D_HOME, 'config.json'), JSON.stringify({ hubDevices }), { mode: 0o600 })
-    const out = execFileSync(hubBin, ['start', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--json'], {
+    const out = execFileSync(hubBin, ['start', '--web-port', '0', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0', '--token', token, '--peer-token', 'lease-peer', '--json'], {
       env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-h1,mock-h2' },
     })
     addr = JSON.parse(out.toString()).daemon.httpAddr
@@ -1026,7 +1026,7 @@ test('devices() lists both leased devices after their owner unshares them across
     const config = path.join(home, 'config.json')
     const write = (ids) => fs.writeFileSync(config, JSON.stringify({ hubDevices: ids.map(id => ({ id })) }), { mode: 0o600 })
     write(devices)
-    const result = execFileSync(hubBin, ['start', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
+    const result = execFileSync(hubBin, ['start', '--web-port', '0', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
       '--token', token, '--peer-token', 'js-listing-peer', ...(peer ? ['--peer', peer] : []), '--json'], { env })
     t.after(() => execFileSync(hubBin, ['stop'], { env }))
     return { address: JSON.parse(result).daemon.httpAddr, write }
@@ -1085,7 +1085,7 @@ test('local config methods use the recorded socket in each long home; TCP config
   async function start(name) {
     const home = path.join(tmp, 'socket-fallback-'.repeat(7), name)
     fs.mkdirSync(home, { recursive: true, mode: 0o700 })
-    const { daemon: info } = JSON.parse(cli(home, 'start', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
+    const { daemon: info } = JSON.parse(cli(home, 'start', '--web-port', '0', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
       '--token', token, '--peer-token', 'config-peer', '--json'))
     try {
       assert.ok(!info.socketPath.startsWith(home + path.sep), 'expected a fallback socket outside the long home')
@@ -1160,7 +1160,7 @@ test('a local hub shutdown preserves the held device; a refused TCP shutdown lea
   const savedHome = process.env.MAESTRO_D_HOME
   process.env.MAESTRO_D_HOME = home
   const env = { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-restart' }
-  const start = (addr = '127.0.0.1:0') => JSON.parse(execFileSync(hubBin, ['start', '--name', 'js-restore', '--listen', addr,
+  const start = (addr = '127.0.0.1:0') => JSON.parse(execFileSync(hubBin, ['start', '--web-port', '0', '--name', 'js-restore', '--listen', addr,
     '--token', 'js-restore', '--peer-token', 'peers', '--no-mdns', '--json'], { env })).daemon
   t.after(() => {
     process.env.MAESTRO_D_HOME = savedHome
