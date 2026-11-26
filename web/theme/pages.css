@@ -1,0 +1,41 @@
+/* The pages' own arrangements of the design language's components
+   (screen-01-dashboard, screen-05-artifacts), on tokens only. */
+
+/* Projects & apps. */
+.m-card__header--top { align-items: flex-start; }
+.m-project__link { color: var(--m-text); }
+.m-project__link:hover { color: var(--m-text); text-decoration: none; }
+.m-project__link:hover h2 { text-decoration: underline; }
+.m-stack--tight { gap: var(--m-space-3); }
+.m-card__section { padding: 0 var(--m-space-6) var(--m-space-2); }
+.m-card__body--after { padding-top: 0; }
+@container main (max-width: 37.49rem) { .m-card__section { padding-left: var(--m-space-5); padding-right: var(--m-space-5); } }
+.m-approw__id { font-weight: 600; overflow-wrap: anywhere; }
+.m-approw__platforms { margin-top: var(--m-space-2); }
+.m-queue__entry { flex-direction: column; align-items: stretch; gap: var(--m-space-3); }
+.m-queue__name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.m-progress__running { --bar: var(--m-running-solid); }
+.m-chip--remove { cursor: pointer; min-height: 2rem; }
+.m-chip--remove:hover { background: var(--m-surface-hover); }
+.m-chip--remove:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; }
+.m-dashboard__filter { width: min(100%, 16rem); }
+@container main (max-width: 37.49rem) { .m-dashboard__filter { width: 100%; } }
+.m-stat__icon { color: var(--m-accent-soft-text); font-size: 2rem; }
+
+/* Artifacts. */
+.m-select--auto { width: auto; }
+@container main (max-width: 37.49rem) { .m-artifacts__filters, .m-artifacts__filters .m-select--auto { width: 100%; } }
+.m-metric--sm { font-size: 1.5rem; }
+.m-danger-text { color: var(--m-danger-text); }
+.m-run__desc { color: var(--m-text); margin: 0; }
+.m-tests__totals { gap: var(--m-space-6); }
+
+/* Text links that act as row or card targets keep a 44 px hit area on touch. */
+@media (pointer: coarse) {
+  .m-approw__id, .m-project__link, .m-card a.m-t-subhead, .m-table a.m-t-headline { display: inline-flex; align-items: center; min-height: var(--m-target-min); }
+}
+
+/* A stacked table's cells read left to right under their labels, numbers too. */
+@container table (max-width: 37.49rem) {
+  .m-table--stack td.m-num, .m-table--stack td.m-right { text-align: left; }
+}
