@@ -23,8 +23,9 @@ type recordingHub struct {
 func (h *recordingHub) TCPCaller(addr string, outputs bool) Caller {
 	return Caller{Remote: true, Addr: addr, ClientOutputs: outputs}
 }
-func (h *recordingHub) DeviceConfig() *netshape.Config { return &netshape.Config{} }
-func (h *recordingHub) Bind(*Server, Config, Deps)     {}
+func (h *recordingHub) VerifyBinding(context.Context, string) *Error { return nil }
+func (h *recordingHub) DeviceConfig() *netshape.Config               { return &netshape.Config{} }
+func (h *recordingHub) Bind(*Server, Config, Deps)                   {}
 func (h *recordingHub) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /test-hub", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })
 }
@@ -52,8 +53,11 @@ func (h *recordingHub) Visible(r *http.Request, devices []DeviceInfo) []DeviceIn
 	}
 	return []DeviceInfo{}
 }
-func (h *recordingHub) OnEvent(ev Event)                           { h.events = append(h.events, ev) }
-func (h *recordingHub) Shutdown(_ context.Context, endLeases bool) { h.ended = endLeases }
+func (h *recordingHub) OnEvent(ev Event) { h.events = append(h.events, ev) }
+func (h *recordingHub) Shutdown(_ context.Context, endLeases bool) error {
+	h.ended = endLeases
+	return nil
+}
 
 func TestHubSeam(t *testing.T) {
 	t.Setenv(EnvHome, t.TempDir())
@@ -110,7 +114,7 @@ func TestHubSeam(t *testing.T) {
 	s.Events().Publish(Event{Type: "test"})
 	s.Shutdown("test")
 	<-s.Done()
-	if !h.ended || len(h.events) != 2 || h.events[0].Type != "test" || h.events[1].Type != "daemon.shutdown" {
+	if h.ended || len(h.events) != 2 || h.events[0].Type != "test" || h.events[1].Type != "daemon.shutdown" {
 		t.Fatalf("lifecycle: ended %t, events %+v", h.ended, h.events)
 	}
 	plain := New(Config{Name: "plain"}, Deps{})

@@ -30,6 +30,9 @@ var (
 // running AVD is listed once, under its serial.
 func avdEntries(entries []DeviceEntry, includeShutdown bool) []DeviceEntry {
 	running := map[string]bool{}
+	// androidEntries returns nil when adb discovery failed, and an empty
+	// non-nil slice when adb confirmed there are no transports.
+	complete := entries != nil
 	var bySerial map[string]string
 	for i := range entries {
 		e := &entries[i]
@@ -42,10 +45,16 @@ func avdEntries(entries []DeviceEntry, includeShutdown bool) []DeviceEntry {
 		if name := bySerial[e.ID]; name != "" {
 			e.Name = name
 			running[name] = true
+		} else {
+			complete = false // This serial could be any installed AVD.
 		}
 	}
 	if !includeShutdown {
 		return entries
+	}
+	state := "Shutdown"
+	if !complete {
+		state = "Unknown"
 	}
 	for _, name := range listAVDNames() {
 		if running[name] {
@@ -56,7 +65,7 @@ func avdEntries(entries []DeviceEntry, includeShutdown bool) []DeviceEntry {
 			Kind:     "emulator",
 			ID:       daemon.AVDPrefix + name,
 			Name:     name,
-			State:    "Shutdown",
+			State:    state,
 		})
 	}
 	return entries
