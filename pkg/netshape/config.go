@@ -104,6 +104,8 @@ type Config struct {
 	// AI is config.json's ai block, nil without one (network.json has
 	// none).
 	AI *AI `json:"-"`
+	// InstallApp is config.json's installApp block, nil without one.
+	InstallApp *InstallApp `json:"-"`
 }
 
 // Source is where a daemon reads its device config. Config (--config) is
@@ -235,11 +237,13 @@ type hubDevice struct {
 // "description", "capabilities", "trafficShaping": {"setTrafficShape",
 // "resetTrafficShape"}}]}. Each id must be given once; description,
 // capabilities (any JSON value, a null one as if absent) and trafficShaping are optional,
-// and trafficShaping needs both calls.
+// and trafficShaping needs both calls. The optional ai and installApp
+// blocks are validated too (ai.go, installapp.go).
 func ParseConfig(data []byte) (*Config, error) {
 	var file struct {
 		HubDevices []hubDevice `json:"hubDevices"`
 		AI         *AI         `json:"ai"`
+		InstallApp *InstallApp `json:"installApp"`
 	}
 	if err := decode(data, &file); err != nil {
 		return nil, err
@@ -249,7 +253,12 @@ func ParseConfig(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("ai: %w", err)
 		}
 	}
-	cfg := &Config{Devices: map[string]Device{}, AI: file.AI}
+	if file.InstallApp != nil {
+		if err := file.InstallApp.validate(); err != nil {
+			return nil, fmt.Errorf("installApp: %w", err)
+		}
+	}
+	cfg := &Config{Devices: map[string]Device{}, AI: file.AI, InstallApp: file.InstallApp}
 	for i, e := range file.HubDevices {
 		id := strings.TrimSpace(e.ID)
 		if id == "" {

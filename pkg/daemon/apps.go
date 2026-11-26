@@ -83,6 +83,9 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	case req.URL != "":
 		f, e := s.fetchApp(r.Context(), id, req)
 		if e != nil {
+			if e.Code == CodeForbidden {
+				s.logForbidden(r, e)
+			}
 			writeError(w, e)
 			return
 		}

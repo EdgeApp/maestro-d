@@ -1267,6 +1267,14 @@ fails on the network or ends short is `DEVICE_ERROR`. Neither the headers
 nor the URL's query string (which may sign it) appear in a message or the
 log.
 
+**Allowed hosts.** The daemon fetches only from the hosts its
+`config.json` lists in [`installApp.allowHosts`](config.md#installapp), and
+follows a redirect only to one of them or, over https, to a DigitalOcean
+Space (`*.digitaloceanspaces.com`, Mason's signed download). Any other
+host, or a redirect elsewhere, is `FORBIDDEN`. A daemon without that block
+downloads any URL for a local caller and none for a remote one, so a hub
+that installs builds for its mesh lists their host.
+
 `appId` is the `CFBundleIdentifier` of an `.app` or an `.ipa`'s
 `Payload/*.app`, or an `.apk`'s package name from `aapt2 dump packagename`
 (the newest `build-tools` under `$ANDROID_HOME`); without `aapt2` it is

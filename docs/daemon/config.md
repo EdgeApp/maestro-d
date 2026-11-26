@@ -2,8 +2,8 @@
 
 A host's `config.json` describes the devices it serves: which ones a hub
 shares, each one's description and capabilities, and each one's
-[traffic-shaping](network.md) calls; and the keys its [AI checks](#ai)
-spend. Nothing else writes it — there is no API to change it — and a device
+[traffic-shaping](network.md) calls; the keys its [AI checks](#ai)
+spend; and the hosts [`installApp`](#installapp) may download a build from. Nothing else writes it — there is no API to change it — and a device
 listing returns what it says.
 
 ```json
@@ -35,6 +35,9 @@ listing returns what it says.
     "jevKeyFile": "jev.key",
     "anthropicKeyFile": "anthropic.key",
     "maxBudgetUsdPerCall": 0.5
+  },
+  "installApp": {
+    "allowHosts": ["mason.teamstation.app"]
   }
 }
 ```
@@ -135,3 +138,31 @@ written to reports or logs, never echoed in an answer, and a hub never
 forwards them to the hub that owns the device. A stage whose key the
 daemon has neither way is skipped (`no-key` in the result's
 `escalations`); with no key at all the verdict is `unsure`.
+
+## installApp
+
+The optional top-level `installApp` block names the hosts this daemon
+downloads a build from when an install names a `url`
+([installing from a URL](rest.md#apps)). On a hub that is the hub the device
+is plugged into: a hub routing the install on to it does not fetch.
+
+| Key | | Meaning |
+| --- | --- | --- |
+| `allowHosts` | required | Host names or IP addresses, without scheme, port, path or wildcard (`mason.teamstation.app`, `bern`, `192.0.2.20`), matched case-insensitively on the URL's host whatever its port |
+
+- **With the block**, every caller, local or remote, may download only from
+  a listed host. A redirect must stay on the listed hosts, with one
+  exception: a redirect over https to a DigitalOcean Space
+  (`*.digitaloceanspaces.com`), where Mason sends its signed download. Any
+  other host or redirect answers `FORBIDDEN` (with `details.field` `url`),
+  before any request to it.
+- **Without the block**, a local caller (the unix socket, or loopback on a
+  plain `serve --http`) may name any URL and follow any redirect, as before.
+  A remote caller (any TCP request to a hub, and every install a hub
+  routes on to the hub that owns the device) is refused with `FORBIDDEN`,
+  so a client of a hub cannot make it fetch an arbitrary URL. A hub whose
+  devices are installed from Mason through the mesh lists Mason's host.
+- The block is read at each install, so a new host needs no restart. An
+  unknown key, a block with no host, or a host given with a scheme, port,
+  path or wildcard is an error, as for `hubDevices`; a download while the
+  file has one answers `INTERNAL`.

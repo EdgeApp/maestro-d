@@ -2,13 +2,19 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
 // buildServers stands in for Mason and its Space: Mason checks the bearer
@@ -57,6 +63,16 @@ func newBuildServers(t *testing.T) *buildServers {
 	return b
 }
 
+// allowInstallHosts writes a config.json in the daemon's home whose
+// installApp block allows hosts.
+func allowInstallHosts(t *testing.T, hosts ...string) {
+	t.Helper()
+	data, _ := json.Marshal(map[string]any{"installApp": map[string]any{"allowHosts": hosts}})
+	if err := os.WriteFile(filepath.Join(Home(), netshape.ConfigFileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (b *buildServers) lastSpaceHeader() http.Header {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -68,6 +84,7 @@ func TestApps_InstallFromURL(t *testing.T) {
 	var calls appCalls
 	appDeps(env, &calls)
 	b := newBuildServers(t)
+	allowInstallHosts(t, "127.0.0.1")
 	ctx := context.Background()
 	req := InstallRequest{URL: b.mason.URL + "/api/v2/builds/7/download", AppID: "app.teamstation.develop",
 		Headers: map[string]string{"Authorization": "Bearer mason-key", "X-Mason-Extra": "x"}}
@@ -143,6 +160,7 @@ func TestApps_InstallFromURLErrors(t *testing.T) {
 	var calls appCalls
 	appDeps(env, &calls)
 	b := newBuildServers(t)
+	allowInstallHosts(t, "127.0.0.1")
 	ctx := context.Background()
 	good := b.mason.URL + "/download?token=hidden-query"
 	for name, c := range map[string]struct {
@@ -250,4 +268,130 @@ func TestInstallRecord_Broken(t *testing.T) {
 	// The record's directory gone: the write is logged.
 	t.Setenv(EnvHome, filepath.Join(t.TempDir(), "missing"))
 	env.s.noteInstalled("d", "a", `"e"`)
+}
+
+// TestApps_InstallAllowHosts: the owning daemon downloads only from
+// installApp.allowHosts, and follows a redirect only to one of them or to
+// a DigitalOcean Space over https. Without the block a local caller may
+// name any URL and a remote caller none.
+func TestApps_InstallAllowHosts(t *testing.T) {
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	var calls appCalls
+	appDeps(env, &calls)
+	ctx := context.Background()
+
+	// The Space and an outside host, reached by any name through the
+	// download client's dialer: *.digitaloceanspaces.com is the TLS
+	// Space, evil.example the other.
+	var mu sync.Mutex
+	hits := map[string]int{}
+	hit := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits[name]++
+			mu.Unlock()
+			w.Header().Set("ETag", `"`+name+`"`)
+			_, _ = w.Write([]byte("PK " + name))
+		}
+	}
+	space := httptest.NewTLSServer(hit("space"))
+	defer space.Close()
+	evil := httptest.NewServer(hit("evil"))
+	defer evil.Close()
+	saved := appHTTPClient
+	t.Cleanup(func() { appHTTPClient = saved })
+	appHTTPClient = &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, _, _ := net.SplitHostPort(addr)
+			switch {
+			case strings.HasSuffix(host, netshape.SpaceHostSuffix):
+				addr = space.Listener.Addr().String()
+			case host == "evil.example":
+				addr = evil.Listener.Addr().String()
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}}
+	// Mason redirects to whatever ?to= names.
+	mason := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if to := r.URL.Query().Get("to"); to != "" {
+			http.Redirect(w, r, to, http.StatusFound)
+			return
+		}
+		hit("mason")(w, r)
+	}))
+	defer mason.Close()
+	install := func(c *Client, rawURL string) (*InstallResult, error) {
+		return c.InstallApp(ctx, "emulator-5554", InstallRequest{URL: rawURL, AppID: "a", Reinstall: true})
+	}
+	direct := mason.URL + "/build.apk"
+	toSpace := mason.URL + "/d?to=" + url.QueryEscape("https://edge.nyc3.digitaloceanspaces.com/b/app.apk?sig=x")
+	forbiddenNotHit := func(name string, res *InstallResult, err error, server string) {
+		t.Helper()
+		wantErrCode(t, err, CodeForbidden)
+		mu.Lock()
+		defer mu.Unlock()
+		if res != nil || hits[server] != 0 {
+			t.Fatalf("%s: %+v, %s hit %d times", name, res, server, hits[server])
+		}
+	}
+
+	// No installApp block: a remote caller is refused before any request,
+	// a local one is not.
+	res, err := install(env.remote, direct)
+	forbiddenNotHit("remote without allowHosts", res, err, "mason")
+	if res, err := install(env.local, direct); err != nil || res.ETag != `"mason"` {
+		t.Fatalf("local without allowHosts: %+v %v", res, err)
+	}
+	if res, err := install(env.local, mason.URL+"/d?to="+url.QueryEscape(evil.URL+"/x.apk")); err != nil || res.ETag != `"evil"` {
+		t.Fatalf("local redirect without allowHosts: %+v %v", res, err)
+	}
+	mu.Lock()
+	hits = map[string]int{}
+	mu.Unlock()
+
+	// An allowed host.
+	allowInstallHosts(t, "127.0.0.1")
+	if res, err := install(env.remote, direct); err != nil || res.ETag != `"mason"` {
+		t.Fatalf("allowed host: %+v %v", res, err)
+	}
+	// An allowed redirect: to a Space over https.
+	if res, err := install(env.remote, toSpace); err != nil || res.ETag != `"space"` {
+		t.Fatalf("allowed redirect: %+v %v", res, err)
+	}
+	// Refused redirects: off the allowed hosts, and to a Space over http.
+	res, err = install(env.remote, mason.URL+"/d?to="+url.QueryEscape("http://evil.example/x.apk"))
+	forbiddenNotHit("redirect to another host", res, err, "evil")
+	if !strings.Contains(err.Error(), "evil.example") {
+		t.Fatalf("names the host: %v", err)
+	}
+	if got := (&refusedRedirect{host: "evil.example"}).Error(); got != "redirect to evil.example is not allowed" {
+		t.Fatalf("refusedRedirect: %s", got)
+	}
+	res, err = install(env.remote, mason.URL+"/d?to="+url.QueryEscape("http://edge.nyc3.digitaloceanspaces.com/x.apk"))
+	wantErrCode(t, err, CodeForbidden)
+	// The local caller is held to the block too.
+	res, err = install(env.local, mason.URL+"/d?to="+url.QueryEscape("http://evil.example/x.apk"))
+	forbiddenNotHit("local redirect off allowHosts", res, err, "evil")
+
+	// A refused host: nothing is fetched, for either caller.
+	allowInstallHosts(t, "mason.teamstation.app")
+	mu.Lock()
+	hits = map[string]int{}
+	mu.Unlock()
+	res, err = install(env.remote, direct)
+	forbiddenNotHit("refused host", res, err, "mason")
+	res, err = install(env.local, direct)
+	forbiddenNotHit("refused host, local", res, err, "mason")
+
+	// A config.json that cannot be read refuses every download.
+	if err := os.WriteFile(filepath.Join(Home(), netshape.ConfigFileName), []byte(`{"installApp": {}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err = install(env.local, direct)
+	wantErrCode(t, err, CodeInternal)
+	if len(calls.installs) != 4 {
+		t.Fatalf("installs: %v", calls.installs)
+	}
 }

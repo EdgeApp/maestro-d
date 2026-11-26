@@ -6,6 +6,12 @@ package daemon
 // ETag of the build last installed on each device, per app id, is kept in
 // <home>/installs.json, so a second install of the same build is answered
 // cached without a download.
+//
+// The hosts a build may come from are config.json's installApp.allowHosts:
+// with that block, the first request and every redirect must go to one of
+// them, except a redirect to a DigitalOcean Space (Mason's signed one).
+// Without it a local caller may name any URL, and a remote caller none, so
+// a client of a hub cannot make it fetch an arbitrary URL.
 
 import (
 	"context"
@@ -23,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
 // installsFileName is the ETag record's name in the daemon's home.
@@ -64,6 +71,10 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 	if strings.TrimSpace(req.AppID) == "" {
 		return nil, Errorf(CodeUsage, "install: appId is required with url").WithDetails("field", "appId")
 	}
+	allow, e := s.installAllowHosts(ctx, u)
+	if e != nil {
+		return nil, e
+	}
 	known := ""
 	if !req.Reinstall {
 		known = s.installedETag(id, req.AppID)
@@ -83,6 +94,9 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
+		if allow != nil && !allow.AllowsRedirect(next.URL.Scheme, next.URL.Hostname()) {
+			return &refusedRedirect{host: next.URL.Hostname()}
+		}
 		// The caller's headers (a bearer key) are for the URL it named,
 		// never for where that sends the download.
 		next.Header.Del("Authorization")
@@ -98,6 +112,10 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
+		}
+		var rr *refusedRedirect
+		if errors.As(err, &rr) {
+			return nil, forbidden("install: download %s redirects to %s, which installApp.allowHosts does not list", redactedURL(req.URL), rr.host).WithDetails("field", "url")
 		}
 		return nil, Errorf(CodeDeviceError, "install: download %s: %v", redactedURL(req.URL), err)
 	}
@@ -123,6 +141,33 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 		return nil, Errorf(CodeDeviceError, "install: download %s: %v", redactedURL(req.URL), err)
 	}
 	return &fetchedApp{dir: dir, path: file, etag: etag}, nil
+}
+
+// refusedRedirect stops a download redirected off the allowed hosts.
+type refusedRedirect struct{ host string }
+
+func (r *refusedRedirect) Error() string { return "redirect to " + r.host + " is not allowed" }
+
+// installAllowHosts is the allowHosts policy for a download from u: the
+// config's installApp block, which u's host must be in, or nil (anything
+// goes) for a local caller of a daemon without one. A remote caller of a
+// daemon without one is refused.
+func (s *Server) installAllowHosts(ctx context.Context, u *url.URL) (*netshape.InstallApp, *Error) {
+	cfg, _, err := s.deviceConfig().Load()
+	if err != nil {
+		return nil, Errorf(CodeInternal, "install: device config: %v", err)
+	}
+	allow := cfg.InstallApp
+	if allow == nil {
+		if CallerFrom(ctx).Remote {
+			return nil, forbidden("install: a remote caller may download only from installApp.allowHosts, and this daemon's config.json lists none").WithDetails("field", "url")
+		}
+		return nil, nil
+	}
+	if !allow.Allows(u.Hostname()) {
+		return nil, forbidden("install: url host %s is not in installApp.allowHosts", u.Hostname()).WithDetails("field", "url")
+	}
+	return allow, nil
 }
 
 func writeDownload(file string, body io.Reader) error {
