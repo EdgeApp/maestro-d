@@ -448,6 +448,25 @@ export interface CloudStatus {
   held: number
 }
 
+/** One entry from the hub's local device configuration. */
+export interface HubConfigDevice {
+  id: string
+  description?: string
+  trafficShaping: boolean
+  /** Whether the hub currently discovers this configured device. */
+  listed: boolean
+  lease?: DeviceLease
+  reservations?: DeviceLease[]
+}
+
+/** The local configuration file and its devices, in file order. */
+export interface HubDevicesResult extends Envelope {
+  path: string
+  /** A malformed hand edit leaves the last good device list in place. */
+  configError?: string
+  devices: HubConfigDevice[]
+}
+
 /** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
 export interface HubStatus {
   name: string

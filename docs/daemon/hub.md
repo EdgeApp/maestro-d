@@ -33,18 +33,20 @@ entry-to-owner hop; a bundled `run` costs a few round trips in all.
 # every machine: the same two secrets, in files only you can read
 umask 077; printf '%s\n' "$CLIENT_TOKEN" > ~/.maestro-d/hub-token; printf '%s\n' "$PEER_TOKEN" > ~/.maestro-d/peer-token
 
-# machine A
-maestro-d hub start --name hub-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token \
-  --share-device "iPhone 16"
+# machine A: configure the device by its stable ID
+maestro-d-hub devices add "$UDID" --description "Lab iPhone"
+maestro-d-hub start --name hub-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
 # machine B, on the same LAN: finds hub-a with mDNS at launch
-maestro-d hub start --name hub-b --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
+maestro-d-hub start --name hub-b --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
 # a machine on another network joins through --peer
-maestro-d hub start --name hub-c --no-mdns --peer hub-a.example.com:7433 \
+maestro-d-hub start --name hub-c --no-mdns --peer hub-a.example.com:7433 \
   --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
+
+# on a hub host
+maestro-d-hub status
 
 # any client
 export MAESTRO_D_TOKEN=$(cat ~/.maestro-d/hub-token)
-maestro-d hub status --target-hub=hub-b.local
 maestro-d device list --target-hub=hub-b.local            # every hub's devices: <id>@<hub>
 maestro-d lease --device "$UDID@hub-a" --target-hub=hub-b.local          # leasing is always explicit
 maestro-d tapOn General --target-hub=hub-b.local --device "$UDID@hub-a"   # attaches and runs on hub-a
@@ -52,6 +54,11 @@ maestro-d tapOn General --target-hub=hub-b.local --device "$UDID@hub-a"   # atta
 
 Every hub of a mesh uses the **same client token** (the owner checks the
 token of every request it is forwarded) and the **same peer token**.
+
+A machine runs one hub. Use `maestro-d-hub start`, `stop` and `status`
+on the device host. The `maestro-d hub` command forwards to this binary
+through 4.x. The client’s ordinary local daemon uses its own socket and
+can run alongside the hub.
 
 ## `hub start`
 
@@ -66,9 +73,7 @@ token of every request it is forwarded) and the **same peer token**.
 | `--peer-token P` / `--peer-token-file F` | required | The mesh's shared secret, sent on every peer link |
 | `--tls-cert F --tls-key F` | none | Serve HTTPS and WSS |
 | `--peer-ca F` | system roots | Trust root for peers' TLS |
-| `--share-device ID\|NAME` | none (repeatable) | Share this local device, by id or name. A hub shares only the devices named here, with `--share-tv` or in its [config.json](config.md)'s `hubDevices`; the rest stay private to this machine, and a hub that names none shares none. Never a TV: TVs join only through `--share-tv` or `hubDevices` |
-| `--share-tv ID\|NAME` | none (repeatable) | Share this Apple TV. A TV pairs with several Macs, so name each TV on exactly one hub; that hub is its one owner |
-| (the computer, `mac`) | never shared | The [computer device](../macos.md) is local only: neither `--share-device` nor `hubDevices` puts it in the pool. Local callers on the hub's socket lease it (`lease --device mac`, or a selector with `kind: computer` or `platform: macos`); peers and remote callers never see it |
+| The computer (`mac`) | private | A local client can lease the computer through the hub socket. Adding its config entry sets its local description. |
 | `--reservation-lead DURATION` | 24h | How far ahead a reservation (`POST /v1/reservations`) may start (`24h`, `90m`, or seconds); `hub status` reports it as `reservationLeadSec` |
 | `--lease-max [DEVICE=]DURATION` | 8h | The longest lease window (`8h`, `90m`, or seconds): the whole hub's, or one device's by id or name (repeatable). A longer `ttlSec` is `USAGE` naming it. A cloud device's lease is at most 150 minutes, its provider's session |
 | `--devicefarm` | off | Launch AWS Device Farm devices for the mesh's cloud leases ([Cloud devices](cloud.md#hub-mode-cloud-devices-for-every-client)), with this hub's AWS credentials: the standard chain, or the two flags below. At start the hub checks them with one account call and refuses to start when it fails |
@@ -78,10 +83,8 @@ token of every request it is forwarded) and the **same peer token**.
 | `--cloud-max-devices N` | 2 | How many cloud devices the hub holds at once, 0–20 (Device Farm allows 2 metered sessions per account by default). A cloud lease beyond it is `BUSY` |
 | `--allow-remote-shell` | off | Let remote callers run `runShell` |
 | `--pass-env NAME` | none (repeatable) | A variable of the hub's environment that sessions may import |
-| `--config FILE` | `<home>/config.json`, else `<home>/network.json` | The [device config](config.md): `hubDevices` lists the devices this hub shares (read at start), each with an optional `description` and [traffic-shaping](network.md) calls (read on every call). Each hub keeps the config for its own devices; listings show each device's `description`, and `trafficShaping: true` for the devices it can shape |
-| `--network-config FILE` | none | Deprecated: an older `network.json` (traffic-shaping calls only) in place of `--config` |
+| `--config FILE` | `<home>/config.json` | The hub shares devices listed in `hubDevices`, including Apple TVs, and reloads changes while running. See [Device config](config.md). |
 | `--foreground` | off | Run in the foreground, for launchd or another supervisor |
-| `--daemon NAME` | `hub` | The daemon name the hub runs under (its run directory and unix socket) |
 
 Token files must be mode 0600. A detached hub gets its tokens through its
 environment, never its command line, and `daemon.json` records the start
@@ -258,10 +261,10 @@ steps by bare id does not repeat the lookup for every step.
 - Sessions import none of the hub's environment except `--pass-env` names.
   Targeted clients send their `-e`/`--env-file` values (CLI) and `env` (JS),
   but not their own shell environment — the one difference from local use.
-- A device the hub does not name (`--share-device`, `--share-tv`,
-  `config.json`'s `hubDevices`) stays out of the mesh: peers never list it
-  or its leases, requests for it are `DEVICE_NOT_FOUND`, and its leases are
-  `LEASE_EXPIRED` to a peer, as an unknown lease is.
+- Use `maestro-d-hub devices` on the owner to list or change its configured
+  devices. The hub refuses config requests over TCP and peer links. Removing
+  a device by hand makes it private while preserving access for its current
+  lease holder. A forced CLI removal ends its lease and reservations.
 - On a LAN plain HTTP is accepted. Across the internet run with
   `--tls-cert/--tls-key` (or behind a TLS proxy) and dial `https://` peers.
 - A hub that serves TLS, or has `--peer-ca`, dials peers only over TLS, so
@@ -276,27 +279,23 @@ steps by bare id does not repeat the lookup for every step.
 ## A launchd service (macOS)
 
 ```sh
-maestro-d hub service install --name hub-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
-maestro-d hub service status
-maestro-d hub service uninstall [--purge]
+maestro-d-hub service install --name hub-a --token-file ~/.maestro-d/hub-token --peer-token-file ~/.maestro-d/peer-token
+maestro-d-hub service status
+maestro-d-hub service uninstall [--purge]
 ```
 
 - `install` takes `hub start`'s flags and installs a per-user LaunchAgent,
   `~/Library/LaunchAgents/app.edge.maestro-d.hub.plist` — an agent, not a
   system daemon, because simulators and WebDriverAgent need your GUI session
   (WebDriverAgent's first build signs with your login keychain, which a hub
-  started over SSH cannot use). Another home or `--daemon` name gets its own
-  agent: `app.edge.maestro-d.hub.<home>-<hash>.<daemon>`, with `<home>` the
-  home directory's name, `<hash>` eight hex digits of its full path, and each
-  part left out when it is the default (`~/.maestro-d`, `hub`). So two hubs
-  on one machine are two services.
+  started over SSH cannot use). A nondefault home gets its own service label
+  with the home directory name and a hash of its path.
   It runs `hub start --foreground` with `RunAtLoad` and
   `KeepAlive {SuccessfulExit: false}`: it starts at login and restarts after a
   crash, but not after a clean `hub stop`. Every launch is a hub launch, so it
   browses again.
 - The tokens never go into the plist: they are written to
-  `<home>/hub/secrets/token` and `peer-token`, or
-  `<home>/hub/daemons/<daemon>/secrets/` for a daemon other than `hub` (mode 0600, `<home>` is
+  `<home>/hub/secrets/token` and `peer-token` (mode 0600, `<home>` is
   `$MAESTRO_D_HOME`, else `~/.maestro-d`), and the plist passes
   `--token-file`/`--peer-token-file`. launchd starts with a bare environment,
   so `PATH`, `MAESTRO_D_HOME`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`,
@@ -323,7 +322,7 @@ Description=maestro-d hub
 After=network-online.target
 
 [Service]
-ExecStart=%h/.maestro-d/bin/maestro-d hub start --foreground --name hub-l \
+ExecStart=%h/.maestro-d/bin/maestro-d-hub start --foreground --name hub-l \
   --token-file %h/.maestro-d/hub-token --peer-token-file %h/.maestro-d/peer-token
 Environment=ANDROID_HOME=%h/Android/Sdk
 Restart=on-failure

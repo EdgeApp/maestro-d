@@ -64,8 +64,8 @@ and replace `--network-config` or `MAESTRO_D_NETWORK_CONFIG` with
 - A malformed file, an unknown key, an entry with no `id`, an id listed
   twice, or `trafficShaping` without both of its calls is an error naming the
   file, the device and the problem: `hub start` refuses to start, shaping
-  commands answer `USAGE`, and device listings log it and carry no
-  descriptions or shaping.
+  commands on the local daemon answer `USAGE`. A running hub keeps serving
+  its last valid config until the file is repaired.
 
 ## hubDevices
 
@@ -87,6 +87,33 @@ even when its entry supplies a local description.
 
 The local daemon uses the file for descriptions and shaping. Local commands
 can still use any device on this computer.
+
+### Editing the shared devices
+
+On the device host, run:
+
+```sh
+maestro-d-hub devices --json
+maestro-d-hub devices add "$UDID" --description "Rack 2"
+maestro-d-hub devices set "$UDID" --description "Camera bench"
+maestro-d-hub devices remove "$UDID"
+```
+
+The commands use the running hub's Unix socket and update the active file
+immediately. When the hub is stopped, the CLI locks the home and edits
+the file directly. Use `--config FILE` for a custom path. A running hub
+checks that the requested path matches its own active config.
+
+You can configure a device before connecting it. The listing's `listed`
+field tells you whether discovery sees it. Removal reports the holder and
+time window of each live lease or reservation. To end them and remove the
+device in one operation, pass `--end-leases` to `devices remove`.
+An ordinary hand edit that removes a device keeps existing grants usable
+by their holders until their windows end. New clients see the updated pool.
+
+The hub checks hand edits at most once a second. While a file is invalid,
+the hub retains its last valid list and reports the error in `configError`
+on the local config listing. Repairing the file clears that error.
 
 ### Descriptions and shaping
 

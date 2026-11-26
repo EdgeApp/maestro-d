@@ -32,6 +32,8 @@ import type {
   DeviceMinutes,
   DeviceQuery,
   Envelope,
+  HubConfigDevice,
+  HubDevicesResult,
   HubStatus,
   Lease,
   LeaseSelector,
@@ -542,6 +544,28 @@ export class MaestroD {
   async hubStatus(opts: { signal?: AbortSignal } = {}): Promise<HubStatus> {
     const res = await this.transport.json<Envelope & { hub: HubStatus }>('/v1/hub', { signal: this.sig(opts.signal) })
     return res.hub
+  }
+
+  /** Read the device config over the local hub socket. */
+  async hubDevices(opts: { signal?: AbortSignal } = {}): Promise<HubDevicesResult> {
+    return this.transport.json<HubDevicesResult>('/v1/config/devices', { signal: this.sig(opts.signal) })
+  }
+
+  /** Share a device or update its description. Omit description to keep it, or pass an empty string to clear it. */
+  async setHubDevice(id: string, opts: { description?: string; signal?: AbortSignal } = {}): Promise<HubConfigDevice> {
+    const res = await this.transport.json<Envelope & { device: HubConfigDevice }>(
+      `/v1/config/devices/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: { description: opts.description }, signal: this.sig(opts.signal) },
+    )
+    return res.device
+  }
+
+  /** Remove a configured device. endLeases also ends its lease and cancels its reservations. */
+  async removeHubDevice(id: string, opts: { endLeases?: boolean; signal?: AbortSignal } = {}): Promise<Envelope> {
+    return this.transport.json<Envelope>(
+      withQuery(`/v1/config/devices/${encodeURIComponent(id)}`, { endLeases: opts.endLeases }),
+      { method: 'DELETE', signal: this.sig(opts.signal) },
+    )
   }
 
   /**

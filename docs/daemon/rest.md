@@ -356,7 +356,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `reservations` | hub only: the device's [reservations](#post-v1reservations) that have not started, by start: `[{holder, startsAt, expiresAt}]`, never their lease ids |
 | `description` | Free text the device's host gives it in its [config.json](config.md); omitted when it has none |
 | `capabilities` | The JSON value the device's host gives it in its [config.json](config.md) (`hubDevices[].capabilities`), byte for byte as written, through every hub of the mesh and in lease answers too; maestro-d gives it no meaning. Omitted when it has none |
-| `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) (or older `network.json`) ([network](network.md)); omitted otherwise |
+| `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
 | `available` | on a plain daemon: `true` for a ready device that is attached by no daemon (an AVD that is not running is never available) |
@@ -396,18 +396,25 @@ On a hub, ids are qualified (`<localId>@<hub>`, with `hub` and `localId`)
 and the list covers every hub of the mesh, with `unreachable` naming a hub
 that did not answer; see [The hub mesh](#the-hub-mesh).
 
-On a hub, a remote caller sees only the shared devices (those that
-`--share-device`, `--share-tv` or [config.json](config.md)'s `hubDevices`
-name, and the cloud devices the hub launched), here and in
-`GET /v1/status`; every other device is
-`DEVICE_NOT_FOUND` on every route, and booting or creating one is refused.
-Its leases are left out of `GET /v1/leases`, and to that caller are
-`LEASE_EXPIRED` on the `/v1/leases/{lid}` routes, as an unknown lease is.
-The hub's unix socket sees every device. Whether an id is in the pool is
-looked up once, not per request or event: a device id is remembered for the
-hub's life, while an emulator serial (whichever AVD boots on that port next
-reuses it) and an id outside the pool are remembered for 30 s, or until a
-device is booted, stopped, created or deleted on the hub, or a lease ends.
+Remote callers see the configured shared devices and cloud devices the hub
+launched for a lease. After a hand edit removes a device, its holder can
+continue using it with its lease credential until expiry. Other remote
+callers see `DEVICE_NOT_FOUND`. The Unix socket also sees private devices.
+
+### Hub device configuration
+
+These routes use the hub's Unix socket. Every TCP and mesh request returns
+403 `FORBIDDEN`, including a loopback request carrying a client or peer token.
+
+| Request | Result |
+| --- | --- |
+| `GET /v1/config/devices` | 200 with `{ok, path, configError?, devices}`. Each configured row has `id`, optional `description`, `listed`, `trafficShaping` and any current lease or reservations. Only shaping availability is exposed. |
+| `PUT /v1/config/devices/{id}` | Send `{}` to share a device, or `{"description":"Rack 2"}` to set its description. Omission keeps the old description and an empty string clears it. Returns `{ok, device}` with 201 for a new entry or 200 for an update. |
+| `DELETE /v1/config/devices/{id}` | 200 with `{ok:true}`. A live lease or reservation returns 409 `DEVICE_IN_USE`. Use `?endLeases=true` to end all grants for that device. |
+
+Use the local device ID or its qualified ID on this hub. A different hub
+suffix returns `USAGE`. Edits persist in the configured file and take effect
+immediately. [Device config](config.md)
 
 ### `GET /v1/catalog[?platform=ios|android][&available=true][&location=cloud…]`
 
@@ -769,7 +776,7 @@ before.
   next 8 hours; ask for a `ttlSec` that ends by `nextStartsAt`.
 - **Maximum.** Each device has a maximum window: 8 hours, or the hub's
   `--lease-max DURATION`, or one device's `--lease-max DEVICE=DURATION` (by
-  id or name, as for `--share-device`). A `ttlSec` over it is `USAGE` naming
+  id or name). A `ttlSec` over it is `USAGE` naming
   the maximum (`details.maxSec`), and nothing is granted; the same goes for
   renew. Leases and device listings carry `maxSec`.
 - **Expiry.** At the end of the window the hub ends the lease: a request
