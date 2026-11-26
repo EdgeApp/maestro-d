@@ -15,6 +15,8 @@ type daemonOpts struct {
 	JSON, Verbose                                        bool
 	StartTimeout                                         int
 	PassEnv                                              []string
+	description                                          *string
+	endLeases                                            bool
 	explicit                                             map[string]bool
 	hub                                                  hubOpts
 	deps                                                 func() daemon.Deps
