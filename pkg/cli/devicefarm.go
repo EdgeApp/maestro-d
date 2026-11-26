@@ -83,7 +83,7 @@ func runStopOrphans(ctx context.Context, o *daemonOpts) error {
 		}
 		return m, nil
 	}
-	res, err := daemon.StopOrphans(ctx, daemon.OrphanOptions{ReleaseCloud: release})
+	res, err := daemon.StopOrphans(ctx, daemon.OrphanOptions{ReleaseCloud: release, HubProtected: daemon.HubOrphanGuard()})
 	if err != nil && res == nil {
 		return daemon.WrapErr(daemon.CodeDeviceError, err)
 	}

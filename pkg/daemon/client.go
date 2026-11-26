@@ -52,6 +52,7 @@ type Client struct {
 	// besides failed ("" for none): a request refused LEASE_NOT_STARTED or
 	// LEASE_EXPIRED under failed is sent once more with it.
 	OtherLease func(device, failed string) string
+	reattach   func(context.Context, string, string) (string, error)
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
 	// forgotten first. hint is the daemon's details.hint, the way to a new
@@ -140,6 +141,21 @@ func (c *Client) LeaseOf(device string) string {
 	c.leaseMu.Lock()
 	defer c.leaseMu.Unlock()
 	return c.leases[device]
+}
+
+// SetReattach installs the recovery for one targeted CLI invocation.
+func (c *Client) SetReattach(f func(context.Context, string, string) (string, error)) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	c.reattach = f
+}
+
+func (c *Client) takeReattach() func(context.Context, string, string) (string, error) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	f := c.reattach
+	c.reattach = nil
+	return f
 }
 
 // ClearLease stops sending a lease for device.
@@ -332,13 +348,19 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // do sends the request and returns the raw response. Transport failures
 // become DAEMON_UNAVAILABLE; a cancelled ctx becomes INTERRUPTED.
 func (c *Client) do(req *http.Request) (*http.Response, *Error) {
+	return c.send(req, true)
+}
+
+// send permits a leased request rejected with DEVICE_NOT_ATTACHED to recover
+// once before the response is delivered. A stream disables other retries.
+func (c *Client) send(req *http.Request, allowRetries bool) (*http.Response, *Error) {
 	swapped := false
 	for attempt := 0; ; attempt++ {
 		resp, err := c.http.Do(req)
 		if err != nil && req.Context().Err() != nil {
 			return nil, WrapErr(CodeInterrupted, req.Context().Err())
 		}
-		canRetry := c.retry && attempt < len(retryDelays) && retryable(req) && (req.Body == nil || req.GetBody != nil)
+		canRetry := allowRetries && c.retry && attempt < len(retryDelays) && retryable(req) && (req.Body == nil || req.GetBody != nil)
 		if err == nil && canRetry && (resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusGatewayTimeout) {
 			data, rerr := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -351,12 +373,45 @@ func (c *Client) do(req *http.Request) (*http.Response, *Error) {
 				err = rerr
 			}
 		} else if err == nil {
+			if req.Header.Get(HeaderLease) != "" && resp.Header.Get(HeaderErrorCode) == string(CodeDeviceNotAttached) && (req.Body == nil || req.GetBody != nil) {
+				if recover := c.takeReattach(); recover != nil {
+					resp.Body.Close()
+					id, err := recover(req.Context(), pathDevice(req.URL.EscapedPath()), req.Header.Get(HeaderLease))
+					if err != nil {
+						var de *Error
+						if errors.As(err, &de) {
+							return nil, de
+						}
+						return nil, WrapErr(CodeInternal, err)
+					}
+					next := req.Clone(req.Context())
+					parts := strings.SplitN(strings.TrimPrefix(req.URL.EscapedPath(), "/v1/devices/"), "/", 2)
+					parts[0] = url.PathEscape(id)
+					next.URL.RawPath = "/v1/devices/" + strings.Join(parts, "/")
+					next.URL.Path, _ = url.PathUnescape(next.URL.RawPath)
+					if req.GetBody != nil {
+						next.Body, err = req.GetBody()
+						if err != nil {
+							return nil, WrapErr(CodeInternal, err)
+						}
+					}
+					if next.Header.Get(HeaderRequestID) != "" {
+						next.Header.Set(HeaderRequestID, uuid.New().String())
+					}
+					req = next
+					continue
+				}
+			}
 			// Refused under a lease that has not started or has ended, while
 			// the client holds another on the device (a lease and the
 			// reservation after it, told apart by a clock up to a minute off
 			// the hub's): sent once more with that one. The hub refused before
 			// running anything.
-			if alt := c.otherLease(req, resp); alt != "" && !swapped && (req.Body == nil || req.GetBody != nil) {
+			var alt string
+			if allowRetries && !swapped && (req.Body == nil || req.GetBody != nil) {
+				alt = c.otherLease(req, resp)
+			}
+			if alt != "" {
 				swapped = true
 				c.noteLeaseExpired(req, resp)
 				resp.Body.Close()
@@ -516,8 +571,17 @@ func (c *Client) Ping(timeout time.Duration) error {
 // Shutdown asks the daemon to stop. The daemon detaches its devices, shuts
 // down the ones it booted and exits.
 func (c *Client) Shutdown(ctx context.Context) error {
+	return c.ShutdownHub(ctx, false)
+}
+
+// ShutdownHub optionally ends the active leases before stopping the hub.
+func (c *Client) ShutdownHub(ctx context.Context, endLeases bool) error {
+	path := "/v1/shutdown"
+	if endLeases {
+		path += "?endLeases=true"
+	}
 	var out Envelope
-	if e := c.call(ctx, http.MethodPost, "/v1/shutdown", nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodPost, path, nil, &out); e != nil {
 		return e
 	}
 	return nil
@@ -1172,8 +1236,8 @@ type StreamInfo struct {
 // the daemon ends it (the device was detached, the capture stopped). It
 // copies whole top-level MP4 boxes only, holding each moof until its mdat
 // is complete, so w always ends on a fragment boundary and plays. Ending
-// it through ctx after the stream started is not an error. It is never
-// retried: a stream that dropped is a new stream.
+// it through ctx after the stream started is not an error. Only an initial
+// DEVICE_NOT_ATTACHED rejection can be retried after reattaching the lease.
 func (c *Client) Stream(ctx context.Context, device string, opts StreamOptions, w io.Writer) (StreamInfo, error) {
 	q := url.Values{}
 	if opts.FPS != 0 {
@@ -1191,15 +1255,11 @@ func (c *Client) Stream(ctx context.Context, device string, opts StreamOptions, 
 		return StreamInfo{}, err
 	}
 	req.Header.Set("Accept", "video/mp4")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return StreamInfo{}, WrapErr(CodeInterrupted, ctx.Err())
-		}
-		return StreamInfo{}, Errorf(CodeDaemonUnavailable, "daemon %s: %v", c.describe(), unwrapURLError(err))
+	resp, e := c.send(req, false)
+	if e != nil {
+		return StreamInfo{}, e
 	}
 	defer resp.Body.Close()
-	c.noteLeaseExpired(req, resp)
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(resp.Body)
 		return StreamInfo{}, errorFromResponse(resp.StatusCode, resp.Header, data)

@@ -7,12 +7,14 @@ import (
 
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -298,6 +300,31 @@ const leaseHelperEnv = "MAESTRO_D_TEST_LEASE_WRITER"
 
 // Two processes sharing one home record leases at once: the advisory lock
 // on leases.json.lock keeps every record.
+// A restored emulator renewed while absent comes back without a device. The
+// refresh moves its window and keeps its target, aliases and attach settings.
+func TestLeaseFile_RefreshWithoutDeviceKeepsTarget(t *testing.T) {
+	t.Setenv(daemon.EnvHome, t.TempDir())
+	hub := "http://lab:7433"
+	soon := time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	later := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	writeLeaseRecord(hub, daemon.Lease{ID: "g1", Device: "emulator-5554@lab", ExpiresAt: soon, TTLSec: 60}, "avd:pixel", true)
+	rememberAttach(hub, "g1", daemon.AttachConfig{AppID: "real.app"})
+	refreshLease(hub, daemon.Lease{ID: "g1", ExpiresAt: later, TTLSec: 1800})
+	recs := leasesFor(hub)
+	if len(recs) != 1 {
+		t.Fatal(recs)
+	}
+	r := recs[0]
+	if r.Device != "emulator-5554@lab" || r.OriginalDevice != "" || r.RequestedDevice != "avd:pixel" || r.Attach == nil || r.Attach.AppID != "real.app" || r.ExpiresAt != later || r.TTLSec != 1800 {
+		t.Fatalf("%+v", r)
+	}
+	// Without a record there is nothing to refresh, and nothing is written.
+	refreshLease(hub, daemon.Lease{ID: "g2", ExpiresAt: later})
+	if len(leasesFor(hub)) != 1 {
+		t.Fatal(leasesFor(hub))
+	}
+}
+
 func TestLeaseFile_ConcurrentProcesses(t *testing.T) {
 	if who := os.Getenv(leaseHelperEnv); who != "" {
 		future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
@@ -324,5 +351,38 @@ func TestLeaseFile_ConcurrentProcesses(t *testing.T) {
 	}
 	if got := len(leasesFor("http://hub:7433")); got != 120 {
 		t.Fatalf("records kept: %d of 120", got)
+	}
+}
+
+// device stop --orphans sweeps a crashed hub's registry. A device the hub's
+// lease journal still covers stays booted, on record for its next start.
+func TestE2E_StopOrphansAfterHubCrash(t *testing.T) {
+	e := newE2E(t)
+	t.Setenv(daemon.EnvHome, e.home)
+	dir := daemon.HubRunDir()
+	if err := daemon.WriteInfo(&daemon.Info{Name: "hub", PID: 999999, RunDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	devices := `[{"id":"mock-free","platform":"mock","bootedBy":"daemon","attached":false},` +
+		`{"id":"mock-leased","platform":"mock","bootedBy":"daemon","attached":false}]`
+	if err := os.WriteFile(filepath.Join(dir, "devices.json"), []byte(devices), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	journal := fmt.Sprintf(`{"version":2,"leases":[{"id":"g1","device":"mock-leased","state":"active","expiresAt":%q}]}`, future)
+	if err := os.WriteFile(daemon.HubLeasesPath(), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := e.run("device", "stop", "--orphans", "--json")
+	var out struct {
+		OK      bool     `json:"ok"`
+		Stopped []string `json:"stopped"`
+	}
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &out) != nil || !out.OK || !slices.Equal(out.Stopped, []string{"mock-free"}) {
+		t.Fatalf("%+v", r)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "devices.json"))
+	if err != nil || !strings.Contains(string(data), "mock-leased") || strings.Contains(string(data), "mock-free") {
+		t.Fatalf("hub registry: %v %s", err, data)
 	}
 }

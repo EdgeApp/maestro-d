@@ -160,9 +160,17 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	s.idle.Hold()
 	defer s.idle.Release()
 	if req.Reinstall && appID != "" && s.deps.UninstallApp != nil {
+		if e := s.verifyBinding(r.Context(), id); e != nil {
+			WriteError(w, e)
+			return
+		}
 		if err := s.deps.UninstallApp(r.Context(), id, platform, appID); err != nil {
 			logger.Info("reinstall %s on %s: uninstall first failed (continuing): %v", appID, id, err)
 		}
+	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
 	}
 	logger.Info("Installing %s (%s) on %s for %s", filepath.Base(path), appID, id, DescribeCaller(CallerFrom(r.Context())))
 	if err := s.deps.InstallApp(r.Context(), id, platform, path); err != nil {
@@ -196,6 +204,10 @@ func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {
 	platform := strings.ToLower(r.URL.Query().Get("platform"))
 	if platform == "" {
 		platform = s.devicePlatform(id)
+	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
 	}
 	if err := s.deps.UninstallApp(r.Context(), id, platform, appID); err != nil {
 		WriteError(w, WrapErr(CodeDeviceError, err))

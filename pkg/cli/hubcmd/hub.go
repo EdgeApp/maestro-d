@@ -84,6 +84,7 @@ var hubStartFlags = common.FlagSet(outputFlags, []dflag{
 })
 
 var hubStopFlags = common.FlagSet(outputFlags, []dflag{
+	common.BoolFlag("end-leases", "End active leases and shut down devices they booted", nil, func(o *daemonOpts, v bool) { o.endLeases = v }),
 	common.IntFlag("timeout", "Seconds to wait for the hub to exit (default 30)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 })
 
@@ -576,7 +577,7 @@ func runHubStop(ctx context.Context, o *daemonOpts, _ []string) error {
 	if _, err = c.Hub(ctx); err != nil {
 		return err
 	}
-	if err = c.Shutdown(ctx); err != nil {
+	if err = c.ShutdownHub(ctx, o.endLeases); err != nil {
 		return err
 	}
 	if !daemon.WaitForExit(c.Info, startTimeout(o)) {

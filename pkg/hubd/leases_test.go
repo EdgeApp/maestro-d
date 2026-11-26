@@ -2284,7 +2284,9 @@ func TestLeases_HubShutdownEndsItsLeases(t *testing.T) {
 		devs, _ := env.local.Devices(ctx, "mock")
 		return len(devs) > 0 && devs[0].Busy
 	})
-	env.s.Server.Server.Shutdown("test")
+	if err := env.local.ShutdownHub(ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-done:
 		if err == nil {
@@ -2362,7 +2364,9 @@ func TestLeases_ShutdownWaitsForTeardownsOfStubbornWork(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the step never started")
 	}
-	env.s.Server.Server.Shutdown("test")
+	if err := env.local.ShutdownHub(ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-env.s.Done():
 		t.Fatal("the hub stopped while a lease teardown waited for work under it")
@@ -2864,5 +2868,101 @@ func TestLeases_ShareTransitionEvents(t *testing.T) {
 		if events[key] != 1 {
 			t.Fatalf("events %v", events)
 		}
+	}
+}
+
+func TestLeases_RestartKeepsBootAndAttachmentWindow(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	ctx := t.Context()
+	lease := env.lease(env.remote, daemon.LeaseRequest{
+		Select: &daemon.LeaseSelector{Name: "Spare Phone", Boot: true}, Holder: "alice", Description: "repeatable smoke test", TTLSec: 120,
+		Attach: &daemon.AttachConfig{Platform: "mock"},
+	}).Lease
+	env.s.Server.Server.Shutdown("signal TERM")
+	<-env.s.Done()
+	if l, ok := env.s.leases.get(lease.ID); !ok || l != lease || len(env.stopped) != 0 || !env.booted[lease.Device] || env.cleanups != 1 {
+		t.Fatalf("shutdown lost boot or failed to detach: lease=%+v stopped=%v cleaned=%d", l, env.stopped, env.cleanups)
+	}
+	state := stateOnDisk(t, env.s.Server)
+	if len(state.Leases) != 1 || state.Leases[0].Lease != lease {
+		t.Fatal(state)
+	}
+	env = newHubEnv(t, daemon.Config{})
+	env.booted[lease.Device] = true
+	loadRestartState(t, env, state)
+	env.remote.SetLease(lease.Device, lease.ID)
+	restored, err := env.remote.Lease(ctx, lease.ID)
+	want := lease
+	want.AwaitingAttach = true
+	if err != nil || restored.Lease != want {
+		t.Fatal(restored, err)
+	}
+	_, err = env.remote.Command(ctx, lease.Device, "tapOn", "x", true)
+	wantErrCode(t, err, daemon.CodeDeviceNotAttached)
+	if _, err := env.remote.Attach(ctx, lease.Device, daemon.AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err = env.remote.Lease(ctx, lease.ID); err != nil || restored.Lease.AwaitingAttach {
+		t.Fatal(restored, err)
+	}
+	if _, err = env.remote.Command(ctx, lease.Device, "tapOn", "x", true); err != nil {
+		t.Fatal(err)
+	}
+	env.clock.advance(10 * time.Second)
+	renewed, err := env.remote.RenewLease(ctx, lease.ID, 60)
+	if err != nil || renewed.Lease.ID != lease.ID || renewed.Lease.ExpiresAt != env.at(time.Minute) {
+		t.Fatal(renewed, err)
+	}
+	env.clock.advance(time.Minute)
+	env.sweep()
+	if !slices.Equal(env.stopped, []string{lease.Device}) {
+		t.Fatal(env.stopped)
+	}
+	if err := env.s.queueLeases(false).wait(); err != nil {
+		t.Fatal(err)
+	}
+	if state = stateOnDisk(t, env.s.Server); len(state.Leases) != 0 || len(state.BootDuties) != 0 {
+		t.Fatal(state)
+	}
+}
+
+type onFirstRead struct {
+	io.Reader
+	once sync.Once
+	run  func()
+}
+
+func (r *onFirstRead) Read(p []byte) (int, error) { r.once.Do(r.run); return r.Reader.Read(p) }
+
+func TestLeases_RestoredBindingCheckedAfterRequestBody(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	const id = "emulator-5554"
+	env.emuAVD = "Original"
+	l := daemon.Lease{ID: "held", Device: id, State: daemon.LeaseActive, StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Hour)}
+	loadRestartState(t, env, leaseFile{Version: 2, Leases: []leaseRecord{{Lease: l, AVD: "android:original", Shared: true}}})
+	var stepCalls int
+	env.onStep = func() { stepCalls++ }
+	for _, tc := range []struct{ path, body string }{{"attach", `{"platform":"mock"}`}, {"commands/tapOn", `"x"`}, {"apps", `{"app":"/tmp/test.apk","platform":"android"}`}} {
+		if tc.path == "commands/tapOn" {
+			env.local.SetLease(id, l.ID)
+			if _, err := env.local.Attach(t.Context(), id, daemon.AttachConfig{Platform: "mock"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		body := &onFirstRead{Reader: strings.NewReader(tc.body), run: func() {
+			env.mu.Lock()
+			env.emuAVD = "Replacement"
+			env.mu.Unlock()
+		}}
+		r := httptest.NewRequest(http.MethodPost, "/v1/devices/"+id+"/"+tc.path, body)
+		r.Header.Set(daemon.HeaderLease, l.ID)
+		w := httptest.NewRecorder()
+		env.s.Handler().ServeHTTP(w, r)
+		if !strings.Contains(w.Body.String(), string(daemon.CodeDeviceNotFound)) || stepCalls != 0 {
+			t.Fatalf("%s: %s (steps=%d)", tc.path, w.Body, stepCalls)
+		}
+		env.mu.Lock()
+		env.emuAVD = "Original"
+		env.mu.Unlock()
 	}
 }

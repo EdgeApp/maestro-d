@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,6 +164,104 @@ func TestCloudLedger_WritesWhileASweepHoldsItsLock(t *testing.T) {
 	defer unlockRunDir(f)
 	if err := addLedgerEntry(CloudEntry{Daemon: "d", ID: "df-1", ProviderRef: "arn:1"}); err != nil {
 		t.Fatalf("a ledger write during a sweep: %v", err)
+	}
+}
+
+// A crashed hub's registry is swept too. Devices its leases or boot duties
+// still cover stay on record for its next start; without a guard, or while
+// the hub runs, the registry is left alone.
+func TestStopOrphans_DeadHubRegistry(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	dir := HubRunDir()
+	devicesPath := filepath.Join(dir, devicesFile)
+	write := func(pid int) {
+		t.Helper()
+		if err := WriteInfo(&Info{Name: "hub", PID: pid, RunDir: dir}); err != nil {
+			t.Fatal(err)
+		}
+		if err := atomicWriteJSON(devicesPath, []DeviceInfo{
+			{ID: "mock-free", Platform: "mock", BootedBy: BootedByDaemon},
+			{ID: "mock-leased", Platform: "mock", BootedBy: BootedByDaemon},
+			{ID: "mock-external", Platform: "mock", BootedBy: BootedByExternal},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leased := func(d DeviceInfo) bool { return d.ID == "mock-leased" }
+	for _, tc := range []struct {
+		name    string
+		pid     int
+		guard   func(DeviceInfo) bool
+		stopped []string
+		kept    []string
+	}{
+		{"no guard", 999999, nil, nil, []string{"mock-free", "mock-leased", "mock-external"}},
+		{"live hub", os.Getpid(), leased, nil, []string{"mock-free", "mock-leased", "mock-external"}},
+		{"dead hub", 999999, leased, []string{"mock-free"}, []string{"mock-leased"}},
+		{"nothing covered", 999999, func(DeviceInfo) bool { return false }, []string{"mock-free", "mock-leased"}, nil},
+	} {
+		write(tc.pid)
+		res, err := StopOrphans(context.Background(), OrphanOptions{HubProtected: tc.guard})
+		if err != nil || !slices.Equal(res.Stopped, tc.stopped) {
+			t.Fatalf("%s: stopped %v, %v", tc.name, res.Stopped, err)
+		}
+		var kept []string
+		for _, d := range readDevicesAt(dir) {
+			kept = append(kept, d.ID)
+		}
+		if !slices.Equal(kept, tc.kept) {
+			t.Fatalf("%s: kept %v", tc.name, kept)
+		}
+		if _, err := os.Stat(devicesPath); (err == nil) != (tc.kept != nil) {
+			t.Fatalf("%s: devices.json %v", tc.name, err)
+		}
+	}
+}
+
+// device stop --orphans leaves what a stopped hub's journal still covers: an
+// unfinished window's device or AVD and every boot duty. An ended window frees
+// its device, and an unreadable journal keeps them all.
+func TestHubOrphanGuard(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	if HubOrphanGuard()(DeviceInfo{ID: "any"}) {
+		t.Fatal("an empty home protects nothing")
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	journal := fmt.Sprintf(`{"version":2,"leases":[
+		{"id":"live","device":"sim-live","state":"active","expiresAt":%[1]q},
+		{"id":"avd","device":"emulator-5554","state":"active","expiresAt":%[1]q,"avd":"android:pixel"},
+		{"id":"ended","device":"sim-ended","state":"active","expiresAt":%[2]q}],
+		"bootDuties":[{"device":"sim-duty"},{"device":"emulator-5560","avd":"android:tablet"}]}`, future, past)
+	if err := os.MkdirAll(filepath.Dir(HubLeasesPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(HubLeasesPath(), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard := HubOrphanGuard()
+	for _, tc := range []struct {
+		d    DeviceInfo
+		want bool
+	}{
+		{DeviceInfo{ID: "sim-live", Platform: "ios"}, true},
+		{DeviceInfo{ID: "sim-duty", Platform: "ios"}, true},
+		{DeviceInfo{ID: "emulator-5556", Platform: "android", Kind: "emulator", Name: "Pixel"}, true},
+		{DeviceInfo{ID: "emulator-5558", Platform: "android", Kind: "emulator", Name: "tablet"}, true},
+		{DeviceInfo{ID: "sim-ended", Platform: "ios"}, false},
+		{DeviceInfo{ID: "emulator-5562", Platform: "android", Kind: "emulator", Name: "other"}, false},
+	} {
+		if guard(tc.d) != tc.want {
+			t.Errorf("%+v: protected %v, want %v", tc.d, !tc.want, tc.want)
+		}
+	}
+	for _, bad := range []string{"{", `{"version":1}`} {
+		if err := os.WriteFile(HubLeasesPath(), []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !HubOrphanGuard()(DeviceInfo{ID: "sim-ended"}) {
+			t.Fatalf("%s: an unreadable journal must protect every device", bad)
+		}
 	}
 }
 

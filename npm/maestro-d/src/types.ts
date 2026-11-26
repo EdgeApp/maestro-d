@@ -237,6 +237,8 @@ export interface DeviceInfo {
   bootedBy?: 'daemon' | 'external' | string
   bootedAt?: string
   attached: boolean
+  /** Present on attach responses when the hub reports whether the existing driver was reused. */
+  attachReused?: boolean
   attachedAt?: string
   appId?: string
   /** The attached app's version and build number, as the driver read them. */
@@ -514,6 +516,8 @@ export interface DeviceLease {
 
 /** A hub's lease on one device (`POST /v1/leases`). */
 export interface Lease {
+  /** The hub restored this active grant and awaits its holder’s next attach. */
+  awaitingAttach?: boolean
   /** Sent as X-Maestro-Lease. */
   id: string
   device: string

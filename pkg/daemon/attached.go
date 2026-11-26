@@ -38,6 +38,7 @@ type DriverInfo struct {
 // bookkeeping the server needs.
 type attached struct {
 	id         string
+	lease      <-chan struct{} // owning grant window, nil on a plain daemon
 	cfg        AttachConfig
 	session    *executor.Session
 	cleanup    func()
@@ -81,7 +82,12 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 
 	reportDir := cfg.OutputDir
 	if reportDir == "" {
-		reportDir = filepath.Join(s.cfg.ReportsDir, unsafePath.ReplaceAllString(id, "_"), time.Now().Format("20060102-150405"))
+		name := time.Now().Format("20060102-150405")
+		if leaseEnded(ctx) != nil {
+			// Two holders can attach within one second. Each gets its own artifacts.
+			name += "-" + uuid.New().String()
+		}
+		reportDir = filepath.Join(s.cfg.ReportsDir, unsafePath.ReplaceAllString(id, "_"), name)
 	}
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return nil, WrapErr(CodeInternal, err)
@@ -125,6 +131,9 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		cfg.AppFile = ""
 	} else if strings.HasPrefix(id, "df:") {
 		return nil, Errorf(CodeUsage, "%s is a cloud model, not a device: launch it first (device create --provider devicefarm, or lease --location cloud)", id)
+	}
+	if e := s.verifyBinding(ctx, id); e != nil {
+		return nil, e
 	}
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
@@ -230,7 +239,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if name, ok := strings.CutPrefix(shaper.Alias, AVDPrefix); ok && name != "" {
 		info.Kind, info.Name = "emulator", name
 	}
-	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
+	a := &attached{id: id, lease: leaseEnded(ctx), cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}
 	daemonOwned, discard := cfg.OutputDir == "", cfg.DiscardReports
 	a.release = func() { s.releaseReportDir(reportKey, blobDir, daemonOwned && discard) }

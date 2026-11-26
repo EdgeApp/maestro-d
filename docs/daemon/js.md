@@ -136,6 +136,13 @@ hub unchanged once `maestro-d lease --device <id>` has run in the same home.
 process took (a shell's lease from `leases.json` stays); against a daemon
 that is not a hub, `release()` does nothing.
 
+`md.shutdown()` asks the hub to stop and keeps this client’s lease records.
+Use its local Unix socket for shutdown. A TCP refusal leaves the connection
+and its leased devices usable. After restart, a leased device can re-attach
+with its original options and retry a command once. Keep any local app
+file available at the path used for attach. Emulator handles resolve their
+grant by ID before addressing the device, including after a serial change.
+
 **Reservations.** `md.reserve({device | select, startAt, ttlSec, holder, description})`
 reserves a device for a window that starts later
 ([`POST /v1/reservations`](rest.md#post-v1reservations)) and resolves with
@@ -157,13 +164,10 @@ reservation that starts first. Every `Lease` carries `startsAt` and
 `state`, each `DeviceInfo` on a hub its `reservations`, and `hubStatus()`
 the hub's `reservationLeadSec`.
 
-`leases.json` locking: the CLI holds an advisory `flock` on
-`leases.json.lock` while it updates the file; Node cannot take one, so the
-library writes the whole file to a temporary file and renames it into
-place. A reader never sees a torn file, but a script and a CLI updating it
-at the same instant can lose one update. Cross-process safety is the
-CLI's: when several processes share a home and lease at once, lease from
-the shell.
+The library uses the local `maestro-d` binary to update `leases.json`.
+It holds the same `leases.json.lock` as the CLI from the read through the
+atomic rename, so concurrent scripts and CLI commands retain each other's
+lease records.
 
 On a hub each `DeviceInfo` also carries `maxSec`, and `machine` and
 `addresses`: the owning machine's host name, and its hub's advertised
