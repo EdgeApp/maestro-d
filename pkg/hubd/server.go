@@ -22,14 +22,13 @@ type Server struct {
 	teardowns      pending
 	cloudLaunching int
 
-	configEdits   sync.Mutex              // serializes socket mutations, including publication
-	removing      map[string]bool         // protected by leaseMu; includes verified aliases
-	removedLeases map[string]removedLease // protected by leaseMu
-	config        *configCache
-	shareMu       sync.Mutex
-	sharedIDs     map[string]bool
-	shareSeen     map[string]shareAnswer
-	shareGen      int
+	configEdits sync.Mutex      // serializes socket mutations, including publication
+	removing    map[string]bool // protected by leaseMu; includes verified aliases
+	config      *configCache
+	shareMu     sync.Mutex
+	sharedIDs   map[string]bool
+	shareSeen   map[string]shareAnswer
+	shareGen    int
 }
 
 func (s *Server) Bind(host *daemon.Server, cfg daemon.Config, deps daemon.Deps) {
@@ -38,7 +37,6 @@ func (s *Server) Bind(host *daemon.Server, cfg daemon.Config, deps daemon.Deps) 
 	s.leases = newLeaseTable()
 	s.writer.write = writeLeases
 	s.removing = make(map[string]bool)
-	s.removedLeases = make(map[string]removedLease)
 	s.sharedIDs = make(map[string]bool)
 	s.shareSeen = make(map[string]shareAnswer)
 }
@@ -71,8 +69,18 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/leases/{lid}", s.handleReleaseLease)
 }
 
-func (s *Server) Shutdown(ctx context.Context, endLeases bool) {
-	s.endAllLeases()
+// PrepareStop commits outstanding changes before an ordinary stop suspends
+// the surviving grants. An explicit end-leases stop also commits their removal.
+func (s *Server) PrepareStop(endLeases bool) error {
+	if endLeases {
+		s.startLeaseTeardowns(true)
+	}
+	return s.flushLeases()
+}
+
+// Shutdown drains already-ending grants and suspends grants kept across restart.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.stopLeases(false)
 }
 
 func (s *Server) DeviceStopped(ctx context.Context, deleted bool, ids ...string) *daemon.Error {

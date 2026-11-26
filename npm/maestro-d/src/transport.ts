@@ -18,7 +18,7 @@ import * as tls from 'node:tls'
 import { Readable, Transform, type TransformCallback } from 'node:stream'
 
 import { codeFromHeaders, MaestroError } from './errors.js'
-import type { Envelope } from './types.js'
+import type { Envelope, Lease } from './types.js'
 
 export const API_VERSION = '1'
 
@@ -46,6 +46,21 @@ export const LEASE_HEADER = 'X-Maestro-Lease'
 /** Waits before each retry: 0.5 s, then doubling, three retries in all. */
 export const RETRY_DELAYS = [500, 1000, 2000]
 
+/** Resolve a leased emulator by its stable grant immediately before each wire attempt. */
+type ResolveGrant = (signal?: AbortSignal) => Promise<Lease>
+export type DeviceBase = string | ResolveGrant
+export type RequestPath = string | { grant: ResolveGrant; suffix: string }
+
+export function devicePath(base: DeviceBase, suffix = ''): RequestPath {
+  return typeof base === 'string' ? base + suffix : { grant: base, suffix }
+}
+
+async function resolvePath(route: RequestPath, signal?: AbortSignal): Promise<{ path: string; lease?: string }> {
+  if (typeof route === 'string') return { path: route }
+  const lease = await route.grant(signal)
+  return { path: `/v1/devices/${encodeURIComponent(lease.device)}${route.suffix}`, lease: lease.id }
+}
+
 export interface TransportOptions {
   socketPath?: string
   /** `http://127.0.0.1:7788`, `127.0.0.1:7788` or `https://hub:7433`. */
@@ -64,8 +79,8 @@ export interface RequestOptions {
   body?: unknown
   accept?: string
   signal?: AbortSignal
-  /** Credential for a single device collection request. */
-  collectionLease?: string
+  /** Explicit credential for this request. Null sends it without a lease. */
+  lease?: string | null
   /** Milliseconds; 0 = none. */
   timeout?: number
   /** Sent as X-Maestro-Request-Id, and kept across retries. */
@@ -209,19 +224,17 @@ export class Transport {
     this.agent.destroy()
   }
 
-  /** Add the lease of the device a /v1/devices/{id}… path is for, if one is held. */
-  private leaseHeader(path: string, headers: http.OutgoingHttpHeaders): void {
-    const id = pathDevice(path)
-    const lease = id === undefined ? undefined : this.leases.get(id)
-    if (lease) headers[LEASE_HEADER] = lease
+  private cachedLease(path: string): string | undefined {
+    const device = pathDevice(path)
+    return device === undefined ? undefined : this.leases.get(device)
   }
 
   /** Forget a lease the daemon reported expired (409 LEASE_EXPIRED for a request that carried it). */
   private noteLeaseExpired(path: string, lease: string | undefined, res: RawResponse): void {
-    if (!lease || res.status !== 409) return
+    const id = pathDevice(path)
+    if (id === undefined || !lease || res.status !== 409) return
     // A HEAD's answer has no body: its code is in the X-Maestro-Error-Code header.
     if (MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code !== 'LEASE_EXPIRED') return
-    const id = pathDevice(path) as string
     if (this.leases.get(id) === lease) this.leases.delete(id)
     this.onLeaseExpired?.(id, lease)
   }
@@ -247,15 +260,18 @@ export class Transport {
   }
 
   /** Perform a request and return the raw response, retrying a dropped link. */
-  async raw(path: string, opts: RequestOptions = {}): Promise<RawResponse> {
-    const delays = this.retryable(path, opts) ? this.retryDelays : []
-    const id = pathDevice(path)
-    let lease = id === undefined ? undefined : this.leases.get(id)
+  async raw(route: RequestPath, opts: RequestOptions = {}): Promise<RawResponse> {
+    const initial = await resolvePath(route, opts.signal)
+    const delays = this.retryable(initial.path, opts) ? this.retryDelays : []
+    const id = pathDevice(initial.path)
+    const explicit = initial.lease ?? opts.lease
+    let lease = explicit === undefined ? this.cachedLease(initial.path) : explicit ?? undefined
     let swapped = false
     for (let attempt = 0; ; attempt++) {
+      const { path } = attempt > 0 && typeof route !== 'string' ? await resolvePath(route, opts.signal) : initial
       let res: RawResponse
       try {
-        res = await this.once(path, opts)
+        res = await this.once(path, { ...opts, lease })
       } catch (err) {
         if (opts.signal?.aborted || attempt >= delays.length || !isRetryableError(err)) {
           throw this.transportError(err, opts.signal)
@@ -271,7 +287,7 @@ export class Transport {
       // client holds another on the device (a lease and the reservation
       // after it, told apart by a clock up to a minute off the hub's): sent
       // once more with that one. The hub refused before running anything.
-      if (!swapped && lease && id !== undefined && res.status === 409 && this.otherLease) {
+      if (explicit === undefined && !swapped && lease && id !== undefined && res.status === 409 && this.otherLease) {
         const code = MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code
         const alt = code === 'LEASE_NOT_STARTED' || code === 'LEASE_EXPIRED' ? this.otherLease(id, lease) : undefined
         if (alt && alt !== lease) {
@@ -303,8 +319,7 @@ export class Transport {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     if (opts.requestId) headers[REQUEST_ID_HEADER] = opts.requestId
-    if (opts.collectionLease) headers[LEASE_HEADER] = opts.collectionLease
-    this.leaseHeader(path, headers)
+    if (opts.lease) headers[LEASE_HEADER] = opts.lease
     // On a hub this client names its output files and fetches them back.
     if (this.hub && method === 'POST') headers[CLIENT_OUTPUTS_HEADER] = '1'
 
@@ -333,7 +348,8 @@ export class Transport {
    * Content-Range when the file is not empty. Not retried here: the caller
    * asks the daemon how much it holds and resumes from there.
    */
-  putFile(path: string, file: string, offset: number, size: number, signal?: AbortSignal): Promise<RawResponse> {
+  async putFile(route: RequestPath, file: string, offset: number, size: number, signal?: AbortSignal): Promise<RawResponse> {
+    const { path, lease } = await resolvePath(route, signal)
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
       [CLIENT_MACHINE_HEADER]: machineName(),
@@ -343,7 +359,8 @@ export class Transport {
     }
     if (size > 0) headers['Content-Range'] = `bytes ${offset}-${size - 1}/${size}`
     if (this.token) headers.Authorization = `Bearer ${this.token}`
-    this.leaseHeader(path, headers)
+    const credential = lease ?? this.cachedLease(path)
+    if (credential) headers[LEASE_HEADER] = credential
     const reqOpts = { ...this.baseOptions('PUT', headers, signal), path }
     return new Promise<RawResponse>((resolve, reject) => {
       const req = this.request(reqOpts, (res) => {
@@ -368,7 +385,7 @@ export class Transport {
    * the body is itself a result envelope (a failed step) it is attached as
    * `result`.
    */
-  async json<T extends Envelope>(path: string, opts: RequestOptions = {}): Promise<T> {
+  async json<T extends Envelope>(path: RequestPath, opts: RequestOptions = {}): Promise<T> {
     const res = await this.raw(path, opts)
     const text = res.body.toString('utf8')
     let parsed: T | undefined
@@ -377,7 +394,7 @@ export class Transport {
         parsed = JSON.parse(text) as T
       } catch (err) {
         if (res.status < 300) {
-          throw MaestroError.of('INTERNAL', `decode ${opts.method ?? 'GET'} ${path}: ${(err as Error).message}`)
+          throw MaestroError.of('INTERNAL', `decode ${opts.method ?? 'GET'} ${typeof path === 'string' ? path : path.suffix}: ${(err as Error).message}`)
         }
       }
     }
@@ -386,13 +403,13 @@ export class Transport {
       throw MaestroError.fromResponse(res.status, text, result as never, codeFromHeaders(res.headers))
     }
     if (parsed === undefined) {
-      throw MaestroError.of('INTERNAL', `empty response from ${opts.method ?? 'GET'} ${path}`)
+      throw MaestroError.of('INTERNAL', `empty response from ${opts.method ?? 'GET'} ${typeof path === 'string' ? path : path.suffix}`)
     }
     return parsed
   }
 
   /** Binary request (screenshots, raw hierarchies). */
-  async bytes(path: string, opts: RequestOptions = {}): Promise<Buffer> {
+  async bytes(path: RequestPath, opts: RequestOptions = {}): Promise<Buffer> {
     const res = await this.raw(path, { accept: '*/*', ...opts })
     if (res.status >= 300) {
       throw MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers))
@@ -404,13 +421,14 @@ export class Transport {
    * Open a Server-Sent Events stream and yield each event's parsed `data`.
    * Ends when the signal fires or the daemon closes the stream.
    */
-  async *sse<T>(path: string, signal?: AbortSignal): AsyncGenerator<T, void, undefined> {
+  async *sse<T>(path: string, signal?: AbortSignal, lease?: string): AsyncGenerator<T, void, undefined> {
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
       [CLIENT_MACHINE_HEADER]: machineName(),
       Accept: 'text/event-stream',
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
+    if (lease) headers[LEASE_HEADER] = lease
     // An event stream holds its socket for as long as it runs, so it does
     // not take one of the pool's: a socket of its own, with the same trust
     // roots.
@@ -469,7 +487,7 @@ export class Transport {
    * Cancelling the body (or abandoning it in a `for await` or a failed
    * `pipeline`) closes the connection.
    */
-  async stream(path: string, opts: { signal?: AbortSignal; accept?: string } = {}): Promise<StreamResponse> {
+  async stream(route: RequestPath, opts: { signal?: AbortSignal; accept?: string } = {}): Promise<StreamResponse> {
     const { signal } = opts
     const headers: http.OutgoingHttpHeaders = {
       'X-Maestro-Api-Version': API_VERSION,
@@ -477,9 +495,10 @@ export class Transport {
       Accept: opts.accept ?? 'video/mp4',
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
-    this.leaseHeader(path, headers)
-    const id = pathDevice(path)
-    const lease = id === undefined ? undefined : this.leases.get(id)
+    const target = await resolvePath(route, signal)
+    const path = target.path
+    const lease = target.lease ?? this.cachedLease(path)
+    if (lease) headers[LEASE_HEADER] = lease
     // The signal is not handed to the request: aborting it would fail the
     // body. It ends the body here instead.
     const reqOpts: https.RequestOptions = { ...this.baseOptions('GET', headers), path, agent: false }
