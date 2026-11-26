@@ -141,12 +141,12 @@ func TestCapture_PhysicalScreenRecorder(t *testing.T) {
 		t.Fatalf("no capture: %v", err)
 	}
 
-	bin := t.TempDir()
-	os.WriteFile(filepath.Join(bin, "xcrun"), []byte("#!/bin/sh\necho simctl-called >&2\nexit 1\n"), 0o755)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// An unavailable xcrun reports the selected simulator command without
+	// depending on a child process exiting within the startup grace period.
+	t.Setenv("PATH", t.TempDir())
 	sim := NewDriver(nil, &core.PlatformInfo{IsSimulator: true}, "sim")
 	sim.SetCapture(nil, nil)
-	if err := sim.StartScreenRecording(); err == nil || !strings.Contains(err.Error(), "recordVideo") {
+	if err := sim.StartScreenRecording(); err == nil || !strings.Contains(err.Error(), "xcrun") || !strings.Contains(err.Error(), "start recordVideo") {
 		t.Fatalf("simulator must use simctl: %v", err)
 	}
 }
