@@ -30,8 +30,25 @@ func TestAVDEntries_NamesRunningAndListsShutDown(t *testing.T) {
 	}
 	// "pix" is running, so it is listed once, under its serial.
 	shut := got[3]
-	if shut.ID != "avd:other" || shut.Name != "other" || shut.State != "Shutdown" || shut.Ready || shut.Kind != "emulator" || shut.Platform != "android" {
+	if shut.ID != "avd:other" || shut.Name != "other" || shut.State != "Unknown" || shut.Ready || shut.Kind != "emulator" || shut.Platform != "android" {
 		t.Errorf("shut-down AVD = %+v", shut)
+	}
+}
+
+func TestAVDStateWhenADBIsUnavailable(t *testing.T) {
+	withAVDs(t, nil, []string{"maybe-running"})
+	for _, tc := range []struct {
+		entries []DeviceEntry
+		state   string
+	}{
+		{nil, "Unknown"},
+		{[]DeviceEntry{{Platform: "android", ID: "emulator-5554", State: "device", Ready: true}}, "Unknown"},
+		{[]DeviceEntry{}, "Shutdown"},
+	} {
+		rows := avdEntries(tc.entries, true)
+		if row := rows[len(rows)-1]; row.State != tc.state || row.ID != "avd:maybe-running" {
+			t.Fatalf("with entries %+v: %+v", tc.entries, row)
+		}
 	}
 }
 

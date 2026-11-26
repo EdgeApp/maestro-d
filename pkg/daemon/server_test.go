@@ -108,11 +108,13 @@ func TestServer_AttachCommandDetach(t *testing.T) {
 	ctx := context.Background()
 
 	info := env.attach("mock-1")
-	if !info.Attached || info.AppID != "com.example" || info.Driver != "mock" || info.ReportDir == "" {
+	if info.AttachReused == nil || *info.AttachReused || !info.Attached || info.AppID != "com.example" || info.Driver != "mock" || info.ReportDir == "" {
 		t.Fatalf("unexpected attach info: %+v", info)
 	}
 	// Second attach is a no-op.
-	env.attach("mock-1")
+	if again := env.attach("mock-1"); again.AttachReused == nil || !*again.AttachReused {
+		t.Fatalf("expected reused driver: %+v", again)
+	}
 
 	res, err := env.c.Command(ctx, "mock-1", "tapOn", "Login", true)
 	if err != nil {
