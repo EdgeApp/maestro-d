@@ -458,13 +458,21 @@ func readBodyMax(r *http.Request, limit int64) ([]byte, *daemon.Error) {
 // owner as the client sent it, and a reservation's strict decode judges
 // the client's own body.
 func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
-	self := rt.m.cfg.Name
-	reserve := r.URL.Path == "/v1/reservations"
 	body, e := readBody(r)
 	if e != nil {
 		writeError(w, 0, e)
 		return
 	}
+	if fwd == "" && r.Header.Get(daemon.HeaderRequestID) != "" && rt.m.cfg.SelectorJournal != nil {
+		rt.keyedAcquisition(w, r, body)
+		return
+	}
+	rt.routeAcquisition(w, r, fwd, body, false)
+}
+
+func (rt *router) routeAcquisition(w http.ResponseWriter, r *http.Request, fwd string, body []byte, keyed bool) {
+	self := rt.m.cfg.Name
+	reserve := r.URL.Path == "/v1/reservations"
 	var obj map[string]json.RawMessage
 	if len(bytes.TrimSpace(body)) == 0 || json.Unmarshal(body, &obj) != nil || obj == nil {
 		rt.serveLocal(w, withBody(r, body))
@@ -478,7 +486,8 @@ func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
 	switch {
 	case device != "":
 		local, hub := splitID(device)
-		if hub == "" && fwd == "" {
+		bare := hub == "" && fwd == ""
+		if bare {
 			var re *daemon.Error
 			if hub, re = rt.resolve(r, local); re != nil {
 				writeError(w, 0, re)
@@ -494,6 +503,16 @@ func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
 			return
 		}
 		obj["device"] = mustJSON(qualify(local, hub))
+		if bare && keyed {
+			// The bare name can resolve elsewhere after a restart. Pin this
+			// dispatch before the peer can grant the lease or reservation.
+			rid := r.Header.Get(daemon.HeaderRequestID)
+			attempt := daemon.SelectorAttempt{RequestID: rid, Owner: hub, Pass: "device", AttemptID: rid,
+				Path: r.URL.Path, OriginalBody: body, ForwardedBody: mustJSON(obj), StartedAt: time.Now().UTC()}
+			rec, _ := rt.dispatchSelector(r, attempt, true)
+			rec.copyTo(w)
+			return
+		}
 		if !reserve {
 			rt.forward(w, withBody(r, mustJSON(obj)), hub)
 			return
@@ -505,7 +524,7 @@ func (rt *router) acquire(w http.ResponseWriter, r *http.Request, fwd string) {
 		}
 		rec.copyTo(w)
 	case sel != nil && fwd == "":
-		rt.selectLease(w, r, obj, sel, reserve)
+		rt.selectLease(w, r, obj, sel, reserve, keyed, body)
 	default:
 		rt.serveLocal(w, withBody(r, body))
 	}
@@ -546,7 +565,7 @@ func noRouteBody(body []byte, path string) bool {
 // devices are tried on every hub before any shut-down one is booted; a
 // reservation boots nothing and launches no cloud device (its owner
 // refuses select.boot and select.location naming the field).
-func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel map[string]json.RawMessage, reserve bool) {
+func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel map[string]json.RawMessage, reserve, durable bool, originalBody []byte) {
 	m := rt.m
 	var desc daemon.LeaseSelector
 	if raw, err := json.Marshal(sel); err == nil {
@@ -554,13 +573,13 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel m
 	}
 	selHub := hubName(rawString(sel["hub"]))
 	desc.Hub = selHub
-	try := func(h string, boot *bool) *http.Request {
+	bodyFor := func(h string, boot *bool) []byte {
 		sel["hub"] = mustJSON(h)
 		if boot != nil {
 			sel["boot"] = mustJSON(*boot)
 		}
 		obj["select"] = mustJSON(sel)
-		return withBody(r, mustJSON(obj))
+		return mustJSON(obj)
 	}
 	if !reserve && strings.EqualFold(rawString(sel["location"]), daemon.LocationCloud) {
 		// A cloud lease launches a device, once: it goes to the one hub
@@ -571,7 +590,7 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel m
 			writeError(w, 0, e)
 			return
 		}
-		rt.capture(try(target, nil), target).copyTo(w)
+		rt.capture(withBody(r, bodyFor(target, nil)), target).copyTo(w)
 		return
 	}
 	hubs := []string{m.cfg.Name}
@@ -613,21 +632,32 @@ func (rt *router) selectLease(w http.ResponseWriter, r *http.Request, obj, sel m
 	var unavailable, noRoute []string
 	for _, boot := range passes {
 		for _, h := range hubs {
-			var tr *http.Request
-			if reserve {
-				tr = try(h, nil)
-			} else {
-				b := boot
-				tr = try(h, &b)
+			var bootFlag *bool
+			if !reserve {
+				bootFlag = &boot
 			}
-			if rid != "" {
-				pass := "ready"
-				if boot {
-					pass = "boot"
+			body := bodyFor(h, bootFlag)
+			pass := "ready"
+			if boot {
+				pass = "boot"
+			}
+			var rec *recorder
+			if durable {
+				attempt := daemon.SelectorAttempt{RequestID: rid, Owner: h, Pass: pass, AttemptID: rid + "/" + h + "/" + pass,
+					Path: r.URL.Path, OriginalBody: originalBody, ForwardedBody: body, StartedAt: time.Now().UTC()}
+				var finished bool
+				rec, finished = rt.dispatchSelector(r, attempt, true)
+				if finished {
+					rec.copyTo(w)
+					return
 				}
-				tr.Header.Set(daemon.HeaderRequestID, rid+"/"+h+"/"+pass)
+			} else {
+				tr := withBody(r, body)
+				if rid != "" {
+					tr.Header.Set(daemon.HeaderRequestID, rid+"/"+h+"/"+pass)
+				}
+				rec = rt.capture(tr, h)
 			}
-			rec := rt.capture(tr, h)
 			if rec.status == http.StatusOK {
 				rec.copyTo(w)
 				return
@@ -1313,6 +1343,12 @@ func (rt *router) forward(w http.ResponseWriter, r *http.Request, h string) {
 		writeError(w, 0, e)
 		return
 	}
+	rt.forwardOn(w, r, h, l)
+}
+
+// forwardOn uses the selected peer link for this dispatch.
+func (rt *router) forwardOn(w http.ResponseWriter, r *http.Request, h string, l *Link) {
+	m := rt.m
 	req := Request{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery, Header: m.peerHeaders(r.Header),
 		Principal: principal(r, m.cfg.Name)}
 	bulk := needsBulk(r)
