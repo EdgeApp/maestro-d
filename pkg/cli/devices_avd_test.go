@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -72,5 +74,27 @@ func TestCollectDevices_AVDEntriesAreAndroid(t *testing.T) {
 	}
 	if got := guessPlatform("avd:202611080630-unit-avd"); got != "android" {
 		t.Errorf("guessPlatform(avd:x) = %q", got)
+	}
+}
+
+func TestAVDHardwareProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ANDROID_AVD_HOME", home)
+	for _, name := range []string{"bench", "spare"} {
+		dir := filepath.Join(home, name+".avd")
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.ini"), []byte("hw.device.name = pixel_8\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withAVDs(t, map[string]string{"emulator-5554": "bench"}, []string{"bench", "spare"})
+	found := avdEntries([]DeviceEntry{{ID: "emulator-5554", Platform: "android", Kind: "emulator", Model: "sdk_gphone64_arm64"}}, true)
+	if len(found) != 2 || found[0].Model != "sdk_gphone64_arm64" || found[0].Name != "bench" || found[0].DeviceType != "pixel_8" || found[1].DeviceType != "pixel_8" {
+		t.Fatal(found)
+	}
+	if avdDeviceType("../outside") != "" || avdDeviceType("absent") != "" {
+		t.Fatal("unexpected profile")
 	}
 }

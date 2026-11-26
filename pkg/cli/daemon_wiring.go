@@ -307,7 +307,7 @@ func daemonListDevices(platform string) []daemon.DeviceInfo {
 	}
 	for _, e := range entries {
 		out = append(out, daemon.DeviceInfo{
-			ID: e.ID, Platform: e.Platform, Kind: e.Kind, Name: e.Name, Model: e.Model,
+			ID: e.ID, Platform: e.Platform, Kind: e.Kind, Name: e.Name, Model: e.Model, DeviceType: e.DeviceType,
 			OSVersion: e.OSVersion, State: e.State, Ready: e.Ready,
 		})
 	}
