@@ -23,13 +23,16 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { home } from './runfiles.js'
-import type { Lease } from './types.js'
+import type { AttachOptions, Lease } from './types.js'
 
 /** One entry of leases.json. */
 export interface LeaseRecord {
   hub: string
   device: string
   id: string
+  requestedDevice?: string
+  originalDevice?: string
+  attach?: AttachOptions
   holder?: string
   /** The window's start: later than now for a reservation. A record without it has started. */
   startsAt?: string
@@ -39,6 +42,11 @@ export interface LeaseRecord {
 
 /** Entries whose recorded expiry is this far past are dropped (as the CLI does). */
 const STALE_AFTER_MS = 7 * 24 * 3600 * 1000
+
+/** Android can assign an emulator's serial to another AVD after shutdown. */
+export function isEmulatorTarget(id: string): boolean {
+  return /^(?:emulator-\d+(?:@|$)|avd:)/i.test(id)
+}
 
 export function leasesPath(): string {
   return path.join(home(), 'leases.json')
@@ -124,13 +132,18 @@ export function findLease(hub: string, device: string): LeaseRecord | undefined 
  * device's other started entries: no two leases on a device overlap, so
  * those have ended.
  */
-export function recordLease(hub: string, lease: Lease): void {
+export function recordLease(hub: string, lease: Lease, attach?: AttachOptions, replaceStarted = true, requestedDevice?: string): void {
   const now = Date.now()
   const started = startOf({ hub, device: lease.device, id: lease.id, startsAt: lease.startsAt }, now).started
-  const recs = loadLeases().filter(
-    (r) => !(r.hub === hub && (r.id === lease.id || (started && r.device === lease.device && startOf(r, now).started))),
+  const existing = loadLeases()
+  const prior = existing.find((r) => r.hub === hub && r.id === lease.id)
+  const recs = existing.filter(
+    (r) => !(r.hub === hub && (r.id === lease.id || (replaceStarted && started && r.device === lease.device && startOf(r, now).started))),
   )
-  const rec: LeaseRecord = { hub, device: lease.device, id: lease.id }
+  const rec: LeaseRecord = { ...prior, hub, device: lease.device, id: lease.id }
+  if (prior && prior.device !== lease.device) rec.originalDevice = prior.originalDevice ?? prior.device
+  if (requestedDevice && isEmulatorTarget(requestedDevice) && requestedDevice !== lease.device) rec.requestedDevice ??= requestedDevice
+  if (attach !== undefined) rec.attach = attach
   if (lease.holder) rec.holder = lease.holder
   if (lease.startsAt) rec.startsAt = lease.startsAt
   if (lease.expiresAt) rec.expiresAt = lease.expiresAt

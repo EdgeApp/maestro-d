@@ -134,7 +134,7 @@ func runHubTest(ctx context.Context, cfg *RunConfig, opts daemonOpts) error {
 		if err != nil {
 			return err
 		}
-		id, info, err := leaseAndAttach(ctx, client, &workerOpts, device)
+		id, info, err := leaseAndAttach(ctx, client, &workerOpts, device, false)
 		if err != nil {
 			return err
 		}
