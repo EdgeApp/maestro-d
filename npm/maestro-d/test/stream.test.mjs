@@ -141,7 +141,7 @@ describe('streams on a hub', () => {
   before(() => {
     const hubDevices = ['mock-s1'].map(id => ({ id }))
     fs.writeFileSync(path.join(process.env.MAESTRO_D_HOME, 'config.json'), JSON.stringify({ hubDevices }), { mode: 0o600 })
-    const out = execFileSync(hubBin, ['start', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0',
+    const out = execFileSync(hubBin, ['start', '--web-port', '0', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0',
       '--token', token, '--peer-token', 'stream-peer', '--json'], { env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-s1' } })
     addr = JSON.parse(out.toString()).daemon.httpAddr
   })

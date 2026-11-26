@@ -216,6 +216,8 @@ export interface DeviceInfo {
   name?: string
   /** Hardware model: `ro.product.model` on Android (`Pixel 8`), the product type on iOS (`iPhone14,2`). */
   model?: string
+  /** Configured virtual hardware profile, when available. */
+  deviceType?: string
   osVersion?: string
   state?: string
   ready: boolean
@@ -454,6 +456,8 @@ export interface HubStatus {
   /** The --advertise address, when set. */
   addr?: string
   listen?: string
+  /** Address and port bound by the hub’s public HTTPS dashboard. */
+  webAddr?: string
   tls?: boolean
   /** False with --no-mdns. */
   mdns: boolean
@@ -675,6 +679,8 @@ export interface DaemonInfo {
   version: string
   socketPath: string
   httpAddr?: string
+  /** Address and port bound by the hub’s public HTTPS dashboard. */
+  webAddr?: string
   startedAt: string
   startArgs?: string[]
   runDir: string
