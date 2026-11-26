@@ -166,9 +166,11 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 		daemon.WriteError(w, e)
 		return
 	}
+	s.leases.mu.Lock()
+	entry.description = daemon.LeaseDescription(req.Description)
 	l := entry.view()
+	s.leases.mu.Unlock()
 	if entry.pending() {
-		s.saveReservations()
 		logger.Info("lease %s: %s reserved by %s from %s until %s", entry.id, entry.device, holder, l.StartsAt, l.ExpiresAt)
 		s.Events().Publish(daemon.Event{Type: "lease.scheduled", Device: entry.device, Message: holder})
 	} else {
@@ -182,7 +184,10 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 		s.ApplyDeviceConfig(devs)
 		info = &devs[0]
 	}
-	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
+	result := daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info}
+	if s.commitAcquisition(w, r, entry, result) {
+		daemon.WriteJSON(w, http.StatusOK, result)
+	}
 }
 
 // reservable returns the listed, shared device id names, refusing one no

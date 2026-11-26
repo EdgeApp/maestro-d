@@ -400,7 +400,10 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request, id s
 		WriteError(w, e)
 		return
 	}
-	s.deviceStopped(r.Context(), true, id, info.ID)
+	if err := s.deviceStopped(r.Context(), true, id, info.ID); err != nil {
+		WriteError(w, err)
+		return
+	}
 	s.events.Publish(Event{Type: "device.deleted", Device: info.ID, Message: info.Name})
 	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }
