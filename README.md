@@ -54,14 +54,14 @@ maestro-d copyTextFrom --id balance --json | jq -r .data
 maestro-d run steps.yaml                  # a batch, still on the open session
 ```
 
-**REST** — the same daemon over a unix socket, or TCP with a bearer token:
+**REST** — the local daemon over a Unix socket, or loopback TCP with a bearer token:
 
 ```sh
 maestro-d start --daemon api --http 127.0.0.1:7788 --token "$TOKEN"
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:7788/v1/devices/$UDID/commands/tapOn" \
   -d '{"text": "Login", "timeout": 5000, "optional": true}'
-curl -N "http://127.0.0.1:7788/v1/events"      # server-sent step and device events
+curl -N -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:7788/v1/events"      # server-sent step and device events
 ```
 
 **JavaScript** — `npm i maestro-d`, one method per command, errors as `Error`s:
@@ -114,11 +114,10 @@ can share one device session.
   clicks, drags, scrolling, keys and text, with `moveMouse`, `clickOn` and
   `scrollAt` for the mouse. Local only. See [docs/macos.md](docs/macos.md).
 - **Devices on another machine.** `--target-hub[=HOST[:PORT]]` (or
-  `$MAESTRO_D_HUB`) points any client command at a daemon started with
-  `serve --http ADDR --token T` (`--tls-cert`/`--tls-key` for HTTPS);
-  JavaScript connects with `MaestroD.connect({hub})`. Callers from beyond
-  loopback drive devices but not the host: `runShell` and host paths are
-  refused with `FORBIDDEN`, and the daemon's environment stays on the host.
+  `$MAESTRO_D_HUB`) points the client at a running `maestro-d-hub`.
+  JavaScript connects with `MaestroD.connect({hub})`. Every TCP caller is
+  remote. By default, the hub refuses `runShell` and host file paths with
+  `FORBIDDEN` and keeps its environment private.
   Request ids make a retried command over a lossy link run once.
 - **Files across machines.** Against another machine, a command's input
   files (`addMedia photo.png`, `runScript x.js`, `assertScreenshot ref.png`,
@@ -127,29 +126,40 @@ can share one device session.
   gave. `install FILE` and `uninstall APP_ID` manage apps without attaching,
   `get artifacts` fetches the session's report files, and `pack` shows the
   upload units.
-- **Whole flows on the device's host.** `run flow.yaml --target-hub=…` packs
+- **Whole flows on the device's host.** After leasing the device,
+  `maestro-d test flow.yaml --target-hub=HOST --device ID@HUB` runs the
+  flow on its owning hub and writes the local report. `run flow.yaml --target-hub=…` packs
   the flow with everything it uses (`pack --flow`: subflows, scripts, media,
   hooks), uploads what the host lacks, and runs it there in one request;
   its screenshots come back beside the flow. `runFlow sub/x.yaml` and the
   JavaScript `flow()`, `run(steps)` and `runYaml()` ship their closure the
   same way.
-- **A device hub.** `hub start --token-file F --share-device NAME` shares
-  this machine's devices on the network (`:7433`, every interface; every TCP
-  caller is remote). Clients lease a device explicitly before driving it:
+- **A device hub.** On the device host, run
+  `maestro-d-hub start --token-file CLIENT_FILE --peer-token-file PEER_FILE`,
+  then `maestro-d-hub devices add ID --description "Lab phone"`.
+  The hub listens on port 7433 and shares the local devices listed in
+  `config.json`. Use `devices set` to edit a description or `devices remove`
+  to stop sharing. These commands update the running hub through its local
+  Unix socket. Clients lease a device explicitly before driving it:
   `lease --device ID` or by selector (`--platform ios --kind simulator`);
   no command takes a lease on its own, and without one the hub answers
   `LEASE_REQUIRED`. A lease is a fixed window (`--ttl`, default 8 hours,
   at most the hub's `--lease-max`, hub-wide or per device); using it never
   extends it, only `renew` does, and at its end the hub detaches the device.
-  `device list` shows who holds what; `release` frees a device.
+  `device list` shows who holds what. `reserve` books a future window.
+  Local-device leases survive a hub restart with their original IDs and expiry.
+  The JS device and one-shot CLI automatically reattach once on the next
+  command. `release` frees a device.
   JavaScript: `md.lease({select})` and `device.renew()`; `attach()` on a hub
   uses a lease from `md.lease()` or `maestro-d lease`.
 - **A mesh of hubs.** Hubs on a LAN find each other with mDNS at launch, and
   hubs across networks join with `--peer HOST`; each passes its peers on, so
   the mesh fills from one seed. Connect to any hub: `device list` shows every
   hub's devices as `<id>@<hub>`, and a command for another hub's device is
-  forwarded to it. `hub status` shows each peer's link and RTT; `hub service
-  install` runs the hub as a macOS LaunchAgent. See
+  forwarded to it. Open `https://HOST:9400/` for the live, read-only table
+  of devices, current holders and upcoming reservations. The page requires
+  no login. `maestro-d-hub status` shows peer links and RTTs, and
+  `maestro-d-hub service install` runs the hub as a macOS LaunchAgent. See
   [docs/daemon/hub.md](docs/daemon/hub.md).
 - **Machine-readable failure.** One error table shared by all three interfaces:
   `COMMAND_FAILED` 1/422, `USAGE` 2/400, `FORBIDDEN` 2/403,
@@ -161,8 +171,7 @@ can share one device session.
 And everything upstream already gives it: Android via UIAutomator2 or the
 DeviceLab on-device driver, iOS simulators **and physical devices** via
 WebDriverAgent, desktop browsers via CDP, cloud grids via Appium, React Native
-and Flutter element finding, HTML/JUnit/Allure reports, and a single binary with
-no JVM.
+and Flutter element finding, and HTML/JUnit/Allure reports.
 
 ## Install
 
@@ -175,11 +184,13 @@ curl -fsSL https://github.com/EdgeApp/maestro-d/releases/latest/download/install
 
 It downloads the latest release's tarball for this computer, checks it
 against the release's `SHA256SUMS`, installs it into `~/.maestro-d`
-(`bin/maestro-d` and `drivers/`), and links `maestro-d` into
+(`bin/maestro-d`, `bin/maestro-d-hub` and `drivers/`), and links both binaries into
 `/usr/local/bin` or `/opt/homebrew/bin` when writable, else `~/.local/bin`.
 No sudo. Running it again upgrades in place and keeps `~/.maestro-d/cache`
 (WebDriverAgent builds). After an upgrade, `maestro-d stop --all` so running
-daemons pick up the new binary.
+daemons pick up the new binary. When upgrading a 3.x hub service, rerun
+`maestro-d-hub service install` with its hub options. The [4.0 breaking
+changes](CHANGELOG.md#breaking-changes) cover device configuration and leases.
 
 ```sh
 curl -fsSL …/install.sh | bash -s -- --version 2.0.0   # a specific release
@@ -194,7 +205,7 @@ are on the [releases page](https://github.com/EdgeApp/maestro-d/releases) too.
 
 ```sh
 git clone https://github.com/EdgeApp/maestro-d
-cd maestro-d && make build            # → ~/.maestro-d/bin/maestro-d
+cd maestro-d && make build            # installs both binaries in ~/.maestro-d/bin/
 export PATH="$HOME/.maestro-d/bin:$PATH"
 ```
 
