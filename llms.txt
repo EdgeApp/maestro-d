@@ -10,6 +10,18 @@ It runs the same Maestro YAML flow files with no migration — swap the binary, 
 - Built by: DeviceLab (https://devicelab.dev)
 - License: Apache 2.0
 
+## maestro-d device hubs
+
+Use `maestro-d` for local automation and as the network client. Use
+`maestro-d-hub` on the device host to manage its pool. The shared devices,
+descriptions and traffic-shaping calls live in `config.json`. The hub
+reloads edits while running.
+
+- List configured devices with `maestro-d-hub devices --json`.
+- Add, describe or remove a device with `maestro-d-hub devices add|set|remove ID`.
+- The JS client offers `hubDevices()`, `setHubDevice()` and `removeHubDevice()` after `MaestroD.connect({hubSocket: true})`.
+- The config API uses the local hub socket. TCP callers receive `FORBIDDEN`. See [Device config](docs/daemon/config.md) and [REST](docs/daemon/rest.md).
+
 ## What problem it solves
 
 Maestro CLI runs on the JVM. This causes:

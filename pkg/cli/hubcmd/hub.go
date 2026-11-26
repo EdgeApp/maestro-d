@@ -132,6 +132,7 @@ seed. Any hub lists and drives every hub's devices: <id>@<hub>.
 			SkipFlagParsing: true,
 			Action:          withArgs(hubStatusFlags, runHubStatus),
 		},
+		devicesCommand(withArgs),
 		serviceCommand(withArgs, withConfig),
 	}
 }
@@ -445,6 +446,10 @@ var newMesh = func(cfg hub.Config) *hub.Mesh { return hub.New(cfg) }
 // serveHub runs the hub in this process until it is stopped.
 func serveHub(o *daemonOpts, token, peerToken string) error {
 	pool, err := peerCAPool(o.hub.peerCA)
+	if err != nil {
+		return err
+	}
+	o.DeviceConfig, err = netshape.AbsoluteConfigPath(daemon.DeviceConfigPath(o.DeviceConfig))
 	if err != nil {
 		return err
 	}
