@@ -331,7 +331,11 @@ func runDeviceDelete(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 	if len(args) != 1 {
 		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device delete <id-or-name> [--force]")
 	}
-	dev, err := c.DeleteDevice(ctx, args[0], o.force)
+	id, err := resolveEmulatorTarget(ctx, c, o, args[0])
+	if err != nil {
+		return err
+	}
+	dev, err := c.DeleteDevice(ctx, id, o.force)
 	if err != nil {
 		return err
 	}

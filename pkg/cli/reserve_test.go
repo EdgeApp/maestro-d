@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -490,5 +491,42 @@ func TestRenew_PassesOverANotStartedReservation(t *testing.T) {
 	}
 	if got, _ := c.Lease(ctx, l.Lease.ID); got.Lease.TTLSec != 50 {
 		t.Fatalf("the live lease was not renewed: %+v", got.Lease)
+	}
+}
+
+func TestSessionSelectsActiveAlternateGrant(t *testing.T) {
+	for _, active := range []bool{true, false} {
+		t.Run(fmt.Sprint("active=", active), func(t *testing.T) {
+			_, url := leaseHub(t)
+			ctx := t.Context()
+			o := &daemonOpts{Target: url, Token: "t", JSON: true}
+			c := daemon.NewHTTPClient(url, "t", nil)
+			var next *daemon.LeaseResult
+			var err error
+			if active {
+				next, err = c.AcquireLease(ctx, daemon.LeaseRequest{Device: "mock-1"})
+			} else {
+				next, err = c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1", StartAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339), TTLSec: 60})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, device := leaseKey(c, o), next.Lease.Device
+			recordLease(key, daemon.Lease{ID: "ended", Device: device})
+			later := next.Lease
+			later.StartsAt = time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+			recordLease(key, later)
+			wireLeases(c, o)
+			_, _, err = leaseAndAttach(ctx, c, o, device, true)
+			if !active {
+				if !isCode(err, daemon.CodeLeaseNotStarted) {
+					t.Fatalf("scheduled alternate: %v", err)
+				}
+				return
+			}
+			if err != nil || c.LeaseOf(device) != next.Lease.ID {
+				t.Fatalf("alternate grant: %s, %v", c.LeaseOf(device), err)
+			}
+		})
 	}
 }
