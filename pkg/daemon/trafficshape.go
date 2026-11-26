@@ -52,15 +52,15 @@ func (s *Server) avdAlias(id string) string {
 		return ""
 	}
 	if d, ok := s.registry.Lookup(id); ok {
-		return avdEntryID(d)
+		return AVDEntryID(d)
 	}
 	return ""
 }
 
-// avdEntryID is the config entry that names a running emulator by its AVD,
+// AVDEntryID is the config entry that names a running emulator by its AVD,
 // avd:<name>, since its serial changes from boot to boot; "" for any other
 // device.
-func avdEntryID(d DeviceInfo) string {
+func AVDEntryID(d DeviceInfo) string {
 	if d.Kind != "emulator" || d.Name == "" || strings.HasPrefix(d.ID, AVDPrefix) {
 		return ""
 	}
@@ -80,14 +80,14 @@ func ConfigNames(entry string, d DeviceInfo) bool {
 		return d.Platform == "android" && d.Name != "" && !strings.HasPrefix(d.ID, AVDPrefix) &&
 			entry == AVDPrefix+d.Name
 	}
-	return entry != "" && entry == avdEntryID(d)
+	return entry != "" && entry == AVDEntryID(d)
 }
 
 // configEntries returns device d's config entries, its own id's first,
 // then a running emulator's AVD's.
 func configEntries(cfg *netshape.Config, d DeviceInfo) []netshape.Device {
 	var out []netshape.Device
-	for _, id := range []string{d.ID, avdEntryID(d)} {
+	for _, id := range []string{d.ID, AVDEntryID(d)} {
 		if id == "" {
 			continue
 		}
