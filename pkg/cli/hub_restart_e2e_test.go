@@ -101,11 +101,12 @@ func (h *restartHub) leases() []daemon.Lease {
 func TestE2E_HubTestReportAfterRestart(t *testing.T) {
 	e := newE2E(t)
 	h := newRestartHub(t, e, "report-restore", "mock-1")
+	h.env = append(h.env, `MAESTRO_D_MOCK_DEVICE_PROPS={"mock-1":{"kind":"emulator","name":"Pixel","model":"Pixel 8","osVersion":"16"}}`)
 	h.start()
 	h.cli("lease", "--device", "mock-1", "--platform", "mock")
 	id := "mock-1@" + h.name
 	want, err := h.client().Device(context.Background(), id)
-	if err != nil || want.Platform == "" {
+	if err != nil || want.Platform == "" || want.Kind != "emulator" {
 		t.Fatalf("initial inventory: %+v %v", want, err)
 	}
 	h.stop()
@@ -125,7 +126,7 @@ func TestE2E_HubTestReportAfterRestart(t *testing.T) {
 	}
 	got := index.Flows[0].Device
 	if index.Device.Platform != want.Platform || got.Platform != want.Platform || got.Model != want.Model ||
-		got.Name != want.Name || got.OSVersion != want.OSVersion || got.IsSimulator != (want.Kind == "emulator" || want.Kind == "simulator") {
+		got.Name != want.Name || got.OSVersion != want.OSVersion || !got.IsSimulator {
 		t.Fatalf("got report %+v; inventory %+v", got, want)
 	}
 }
