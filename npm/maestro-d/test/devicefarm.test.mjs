@@ -231,7 +231,7 @@ describe('hub mode', () => {
   // Asynchronously: hub-b's start check calls the fake, which runs in this
   // process's event loop.
   const start = async (name, extra) => {
-    const { stdout } = await execFileAsync(hubBin, ['start', '--name', `hub-${name}`, '--listen', '127.0.0.1:0',
+    const { stdout } = await execFileAsync(hubBin, ['start', '--web-port', '0', '--name', `hub-${name}`, '--listen', '127.0.0.1:0',
       '--no-mdns', '--token', 'jsdf-tok', '--peer-token', 'jsdf-peer', '--json', ...extra], { env: hubEnv(name) })
     return JSON.parse(stdout).daemon.httpAddr
   }
