@@ -122,7 +122,7 @@ type Server struct {
 	startedAt    time.Time
 	shuttingDown atomic.Bool
 	done         chan struct{}
-	shutdownOnce sync.Once
+	shutdownMu   sync.Mutex
 	listeners    []net.Listener
 	servers      []*http.Server
 	info         Info
@@ -417,43 +417,64 @@ func (s *Server) Done() <-chan struct{} { return s.done }
 // Shutdown detaches every device, shuts down daemon-booted devices,
 // removes the run files and closes the listeners. Idempotent.
 func (s *Server) Shutdown(reason string) {
-	s.shutdownOnce.Do(func() {
-		s.shuttingDown.Store(true)
-		if s.cancelLaunches != nil {
-			// Cloud launches under way stop, and release what they made.
-			s.cancelLaunches()
+	_ = s.shutdown(reason, false)
+}
+
+func (s *Server) shutdown(reason string, endLeases bool) error {
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	if s.shuttingDown.Load() {
+		if endLeases {
+			return Errorf(CodeDaemonUnavailable, "daemon %q is already stopping", s.cfg.Name)
 		}
-		s.idle.Stop()
-		go func() {
-			defer close(s.done)
-			// A hub's leases end first, while the mesh still carries their
-			// events to peers' clients and before daemon.shutdown: requests
-			// under them are cancelled, and every teardown (one that waits
-			// for work that ignores its cancellation too, for a while) is
-			// done before the devices are detached and shut down below.
-			if hub := s.cfg.Hub; hub != nil {
-				hub.Shutdown(context.Background(), true)
+		return nil
+	}
+	s.shuttingDown.Store(true)
+	hub := s.cfg.Hub
+	if hub != nil && endLeases {
+		// Keep the socket open on a journal failure so stop can retry.
+		if err := hub.EndActiveLeases(); err != nil {
+			s.shuttingDown.Store(false)
+			return err
+		}
+	}
+	if s.cancelLaunches != nil {
+		// Cloud launches under way stop, and release what they made.
+		s.cancelLaunches()
+	}
+	s.idle.Stop()
+	go func() {
+		defer close(s.done)
+		// Process the hub's leases while the mesh still carries their
+		// events to peers' clients and before daemon.shutdown: requests
+		// under them are cancelled, and every teardown (one that waits
+		// for work that ignores its cancellation too, for a while) is
+		// done before the devices are detached and shut down below.
+		if hub != nil {
+			if err := hub.Shutdown(context.Background()); err != nil {
+				logger.Warn("flushing leases at shutdown: %v", err)
 			}
-			if s.cfg.Mesh != nil {
-				s.cfg.Mesh.Close()
-			}
-			s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
-			s.detachAll()
-			s.releaseAllRemote("daemon-exit")
-			s.registry.ShutdownOwned()
-			_ = os.Remove(s.info.SocketPath)
-			_ = os.Remove(filepath.Join(s.cfg.RunDir(), infoFile))
-			_ = os.Remove(filepath.Join(s.cfg.RunDir(), devicesFile))
-			// Close listeners after cleanup so a `stop` caller can still
-			// read its response; give in-flight responses a moment.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			for _, srv := range s.servers {
-				_ = srv.Shutdown(ctx)
-			}
-			logger.Info("maestro-d %q stopped (%s)", s.cfg.Name, reason)
-		}()
-	})
+		}
+		if s.cfg.Mesh != nil {
+			s.cfg.Mesh.Close()
+		}
+		s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
+		s.detachAll()
+		s.releaseAllRemote("daemon-exit")
+		s.registry.ShutdownOwned()
+		_ = os.Remove(s.info.SocketPath)
+		_ = os.Remove(filepath.Join(s.cfg.RunDir(), infoFile))
+		_ = os.Remove(filepath.Join(s.cfg.RunDir(), devicesFile))
+		// Close listeners after cleanup so a `stop` caller can still
+		// read its response; give in-flight responses a moment.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for _, srv := range s.servers {
+			_ = srv.Shutdown(ctx)
+		}
+		logger.Info("maestro-d %q stopped (%s)", s.cfg.Name, reason)
+	}()
+	return nil
 }
 
 func (s *Server) detachAll() {
@@ -663,11 +684,11 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, e)
 		return
 	}
-	WriteJSON(w, http.StatusOK, Envelope{OK: true})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := s.shutdown("shutdown request", r.URL.Query().Get("endLeases") == "true"); err != nil {
+		WriteError(w, WrapErr(CodeInternal, err))
+		return
 	}
-	s.Shutdown("shutdown request")
+	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +784,10 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 		s.handleStopCloud(w, r, rd, req.Delete)
 		return
 	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
+	}
 	if req.Delete {
 		s.handleDeleteDevice(w, r, id, req.Force)
 		return
@@ -786,11 +811,36 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 // deleted, if this daemon holds one.
 func (s *Server) DetachForStop(id string) {
 	if a := s.takeAttached(id); a != nil {
-		defer s.finishDetach(a) // even if the teardown panics
-		a.close()
-		s.registry.MarkDetached(id)
-		s.events.Publish(Event{Type: "device.detached", Device: id})
+		s.closeAttachment(a)
 	}
+}
+
+// DetachLease closes the sessions opened by one grant, including sessions
+// on emulator serials which have disappeared or since changed identity.
+func (s *Server) DetachLease(lease <-chan struct{}) {
+	if lease == nil {
+		return
+	}
+	s.mu.Lock()
+	var owned []*attached
+	for _, a := range s.attached {
+		if a.lease == lease {
+			owned = append(owned, a)
+		}
+	}
+	s.mu.Unlock()
+	for _, session := range owned {
+		if a := s.takeAttachedIf(session); a != nil {
+			s.closeAttachment(a)
+		}
+	}
+}
+
+func (s *Server) closeAttachment(a *attached) {
+	defer s.finishDetach(a) // even if the teardown panics
+	a.close()
+	s.registry.MarkDetached(a.id)
+	s.events.Publish(Event{Type: "device.detached", Device: a.id})
 }
 
 func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
@@ -817,15 +867,17 @@ func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	a := s.takeAttached(id)
+	s.mu.Lock()
+	var a *attached
+	if current := s.attached[id]; current != nil && current.lease == leaseEnded(r.Context()) {
+		a = s.takeAttachedLocked(id)
+	}
+	s.mu.Unlock()
 	if a == nil {
 		WriteError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id))
 		return
 	}
-	defer s.finishDetach(a) // even if the teardown panics
-	a.close()
-	s.registry.MarkDetached(id)
-	s.events.Publish(Event{Type: "device.detached", Device: id})
+	s.closeAttachment(a)
 	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
@@ -876,23 +928,27 @@ func (s *Server) finishDetach(a *attached) {
 // AttachDevice opens the driver's session and returns the device information
 // that the local attach route and hub lease responses publish.
 func (s *Server) AttachDevice(ctx context.Context, id string, cfg *AttachConfig) (*DeviceInfo, *Error) {
-	a, err := s.ensureAttached(ctx, id, cfg)
+	a, reused, err := s.ensureAttached(ctx, id, cfg)
 	if err != nil {
 		return nil, err
 	}
 	device := s.deviceInfo(a)
+	device.AttachReused = &reused
 	return &device, nil
 }
 
 // ensureAttached returns the attached device, opening it when cfg is
 // given and it isn't attached yet. Concurrent attaches for one device
 // wait for the first.
-func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfig) (*attached, *Error) {
+func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfig) (*attached, bool, *Error) {
 	for {
 		s.mu.Lock()
 		if a := s.attached[id]; a != nil {
 			s.mu.Unlock()
-			return a, nil
+			if a.lease != leaseEnded(ctx) {
+				return nil, false, Errorf(CodeDeviceInUse, "device %s still has an attachment for another lease", id)
+			}
+			return a, true, nil
 		}
 		if ch := s.attaching[id]; ch != nil {
 			s.mu.Unlock()
@@ -900,12 +956,12 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, Errorf(CodeInterrupted, "attach %s cancelled", id)
+				return nil, false, Errorf(CodeInterrupted, "attach %s cancelled", id)
 			}
 		}
 		if cfg == nil {
 			s.mu.Unlock()
-			return nil, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).
+			return nil, false, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).
 				WithDetails("attached", s.attachedIDs())
 		}
 		ch := make(chan struct{})
@@ -932,7 +988,7 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 				s.mu.Unlock()
 				unlockInstall()
 				a.close()
-				return nil, Errorf(CodeDaemonUnavailable, "daemon is shutting down")
+				return nil, false, Errorf(CodeDaemonUnavailable, "daemon is shutting down")
 			}
 			s.attached[id] = a
 		}
@@ -944,7 +1000,7 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 			s.watchIdle(a, a.session.Driver())
 			s.watchConnection(a, a.session.Driver())
 		}
-		return a, e
+		return a, false, e
 	}
 }
 
@@ -961,7 +1017,8 @@ func (s *Server) attachedIDs() []string {
 func (s *Server) requireAttached(w http.ResponseWriter, r *http.Request) *attached {
 	id := r.PathValue("id")
 	a := s.getAttached(id)
-	if a == nil {
+	lease := leaseEnded(r.Context())
+	if a == nil || (lease != nil && a.lease != lease) {
 		if e := s.cloudGone(id); e != nil {
 			WriteError(w, e)
 			return nil
@@ -986,6 +1043,11 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, a *attached) bo
 		}
 	} else {
 		a.busy.Lock()
+	}
+	if e := s.verifyBinding(r.Context(), a.id); e != nil {
+		a.busy.Unlock()
+		WriteError(w, e)
+		return false
 	}
 	// A cloud device counts the request on its idle clock (remote.go).
 	if rd := s.remote(a.id); rd != nil {

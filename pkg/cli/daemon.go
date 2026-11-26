@@ -149,6 +149,9 @@ func attachIfNeeded(ctx context.Context, c *daemon.Client, o *daemonOpts, id str
 	if err != nil {
 		return nil, err
 	}
+	if lease := c.LeaseOf(id); o.Target != "" && lease != "" {
+		rememberAttach(leaseKey(c, o), lease, o.Attach)
+	}
 	if !o.JSON {
 		common.Progress("Attached %s (%s, %s) in %s", id, info.Platform, info.Driver, time.Since(start).Round(time.Millisecond))
 	}
@@ -166,7 +169,7 @@ func session(ctx context.Context, o *daemonOpts) (*daemon.Client, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	if id, _, err = leaseAndAttach(ctx, c, o, id); err != nil {
+	if id, _, err = leaseAndAttach(ctx, c, o, id, false); err != nil {
 		return nil, "", err
 	}
 	return c, id, nil
@@ -175,7 +178,48 @@ func session(ctx context.Context, o *daemonOpts) (*daemon.Client, string, error)
 // leaseAndAttach sends the device's lease on file, if this client holds
 // one (see lease.go; it never takes one: on a hub, without a lease the
 // attach fails LEASE_REQUIRED), then attaches the device if needed.
-func leaseAndAttach(ctx context.Context, c *daemon.Client, o *daemonOpts, id string) (string, *daemon.DeviceInfo, error) {
+func leaseAndAttach(ctx context.Context, c *daemon.Client, o *daemonOpts, id string, explicitAttach bool) (string, *daemon.DeviceInfo, error) {
+	if o.Target != "" {
+		rec, err := targetLeaseRecord(leaseKey(c, o), id)
+		if err != nil {
+			return id, nil, err
+		}
+		// Device Farm ends its session on shutdown. Its device route returns
+		// the provider-specific reason and reacquisition hint after release.
+		if rec != nil && startedRecord(*rec) && !strings.HasPrefix(rec.Device, "df-") {
+			rec, held, e := resolveSessionGrant(ctx, c, o, rec)
+			if e != nil {
+				return id, nil, e
+			}
+			id = held.Device
+			c.SetReattach(func(ctx context.Context, target, grant string) (string, error) {
+				if grant != rec.ID {
+					return "", daemon.Errorf(daemon.CodeLeaseExpired, "the original lease has ended")
+				}
+				live, err := resolveGrant(ctx, c, o, *rec)
+				if err != nil {
+					return "", err
+				}
+				if live.State != daemon.LeaseActive {
+					return "", daemon.Errorf(daemon.CodeLeaseExpired, "lease %s is no longer active", grant)
+				}
+				options := *o
+				if rec.Attach != nil {
+					options.Attach = *rec.Attach
+				}
+				if _, err = attachIfNeeded(ctx, c, &options, live.Device, nil); err != nil {
+					return "", err
+				}
+				common.Progress("re-attached %s (the hub restarted)", live.Device)
+				return live.Device, nil
+			})
+			if held.AwaitingAttach && !explicitAttach {
+				return id, &daemon.DeviceInfo{ID: id}, nil
+			}
+			info, err := ensureAttached(ctx, c, o, id)
+			return id, info, err
+		}
+	}
 	lid, info, err := heldLease(ctx, c, o, id)
 	if err != nil {
 		return id, nil, err
@@ -807,7 +851,11 @@ daemons that are no longer alive.`, deviceStopFlags),
 				if err != nil {
 					return err
 				}
-				res, err := client.StopDeviceResult(ctx, args[0], o.force)
+				id, err := resolveEmulatorTarget(ctx, client, o, args[0])
+				if err != nil {
+					return err
+				}
+				res, err := client.StopDeviceResult(ctx, id, o.force)
 				if err != nil {
 					return err
 				}
@@ -819,7 +867,7 @@ daemons that are no longer alive.`, deviceStopFlags),
 						common.PrintJSON(os.Stdout, res)
 					}
 				} else {
-					fmt.Printf("%s stopped%s\n", args[0], minutesNote(res.Device.DeviceMinutes))
+					fmt.Printf("%s stopped%s\n", id, minutesNote(res.Device.DeviceMinutes))
 				}
 				return nil
 			}),
@@ -851,7 +899,7 @@ explicitly to control the flags or to pay the driver start-up cost early.
 		if err != nil {
 			return err
 		}
-		_, dev, err := leaseAndAttach(ctx, client, o, o.Device)
+		_, dev, err := leaseAndAttach(ctx, client, o, o.Device, true)
 		if err != nil {
 			return err
 		}
@@ -898,6 +946,12 @@ var daemonDetachCommand = &cli.Command{
 			id, err := resolveDevice(ctx, client, o)
 			if err != nil {
 				return err
+			}
+			if o.Device != "" {
+				id, err = resolveEmulatorTarget(ctx, client, o, id)
+				if err != nil {
+					return err
+				}
 			}
 			ids = []string{id}
 		}

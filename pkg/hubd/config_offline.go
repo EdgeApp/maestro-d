@@ -2,6 +2,7 @@ package hubd
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -13,11 +14,13 @@ import (
 // OfflineConfig is used only while the caller owns the home's hub.lock.
 // Discovery is fresh: a cached serial can identify yesterday's emulator.
 type OfflineConfig struct {
-	path    string
-	config  *netshape.Config
-	devices []daemon.DeviceInfo
-	state   leaseFile
-	now     time.Time
+	path     string
+	config   *netshape.Config
+	devices  []daemon.DeviceInfo
+	discover func(string) []daemon.DeviceInfo
+	stop     func(daemon.DeviceInfo) error
+	state    leaseFile
+	now      time.Time
 }
 
 func OpenOfflineConfig(path string, deps daemon.Deps) (*OfflineConfig, error) {
@@ -25,7 +28,10 @@ func OpenOfflineConfig(path string, deps daemon.Deps) (*OfflineConfig, error) {
 	if err != nil {
 		return nil, daemon.WrapErr(daemon.CodeUsage, err)
 	}
-	f := &OfflineConfig{path: path, config: cfg, now: time.Now()}
+	f := &OfflineConfig{path: path, config: cfg, now: time.Now(), discover: deps.ListDevices, stop: deps.ShutdownDevice}
+	if f.stop == nil {
+		f.stop = daemon.NewRegistry("", nil).StopLeaseBoot
+	}
 	f.state, err = readLeases(LeasesPath("hub"))
 	if err != nil {
 		return nil, daemon.WrapErr(daemon.CodeUsage, err)
@@ -46,11 +52,22 @@ func (f *OfflineConfig) unfinished(r leaseRecord) bool {
 	return f.now.Before(end)
 }
 
+func (f *OfflineConfig) matchesGrant(r leaseRecord, id string, target daemon.DeviceInfo, matchesID bool) (bool, *daemon.Error) {
+	if r.State == daemon.LeaseActive && (r.AVD != "" || daemon.IsEmulatorSerial(r.Device)) {
+		return (bootDuty{Device: r.Device, AVD: r.AVD}).matchesConfigTarget(id, target, f.devices)
+	}
+	if key := avdKey(target); key != "" && r.AVD != "" {
+		return key == r.AVD, nil
+	}
+	return matchesID, nil
+}
+
 func (f *OfflineConfig) row(id string, entry netshape.Device) daemon.HubConfigDevice {
 	d, listed := listedConfigDevice(id, f.devices)
 	row := configDeviceRow(id, entry, listed)
 	for _, r := range f.state.Leases {
-		if f.unfinished(r) && (r.Device == id || r.Device == d.ID) {
+		matches, _ := f.matchesGrant(r, id, d, r.Device == id || r.Device == d.ID)
+		if f.unfinished(r) && matches {
 			window := daemon.DeviceLease{Holder: r.Holder, Description: r.Description, StartsAt: r.StartsAt, ExpiresAt: r.ExpiresAt}
 			if r.State == daemon.LeaseActive {
 				row.Lease = &window
@@ -90,6 +107,9 @@ func (f *OfflineConfig) serialAVD(serial string) string {
 	var key string
 	for _, r := range f.state.Leases {
 		if r.Device == serial && r.AVD != "" && f.unfinished(r) {
+			if current := (bootDuty{AVD: r.AVD}).runningSerial(f.devices); current != "" && current != serial {
+				continue
+			}
 			if key != "" && key != r.AVD {
 				return ""
 			}
@@ -127,11 +147,15 @@ func (f *OfflineConfig) removalAliases(id string) ([]string, error) {
 		default:
 			continue
 		}
+		stableKey := bootKey(daemon.DeviceInfo{ID: stableID})
+		if current := (bootDuty{AVD: stableKey}).runningSerial(f.devices); current != "" && current != serialID {
+			continue
+		}
 		stable := f.serialAVD(serialID)
 		if stable == "" {
 			return nil, daemon.Errorf(daemon.CodeUsage, "cannot verify whether %s and %s name the same AVD while the hub is stopped", serialID, stableID)
 		}
-		matches := stable == bootKey(daemon.DeviceInfo{ID: stableID})
+		matches := stable == stableKey
 		if live, ok := listedConfigDevice(serialID, f.devices); ok {
 			matches = daemon.ConfigNames(stableID, live)
 		}
@@ -156,29 +180,82 @@ func (f *OfflineConfig) Remove(id string, endLeases bool) error {
 	} else if daemon.IsEmulatorSerial(id) {
 		targetAVD = f.serialAVD(id)
 	}
+	matchesDevice := func(device, avd string) bool {
+		if avd != "" && targetAVD != "" {
+			return avd == targetAVD
+		}
+		return slices.Contains(aliases, device)
+	}
+	duties := slices.Clone(f.state.BootDuties)
+	removed := maps.Clone(f.state.Removed)
+	if removed == nil {
+		removed = make(removedWindows)
+	}
+	removed.prune(f.now)
 	var windows []string
 	keep := make([]leaseRecord, 0, len(f.state.Leases))
+	target, _ := listedConfigDevice(id, f.devices)
 	for _, r := range f.state.Leases {
-		matches := slices.Contains(aliases, r.Device)
-		if r.AVD != "" && targetAVD != "" {
-			matches = r.AVD == targetAVD
+		matches, matchErr := f.matchesGrant(r, id, target, matchesDevice(r.Device, r.AVD))
+		if matchErr != nil {
+			return matchErr
 		}
-		if matches && f.unfinished(r) {
-			windows = append(windows, fmt.Sprintf("%s (%s to %s)", daemon.HolderName(r.Holder), r.StartsAt, r.ExpiresAt))
+		if matches {
+			if expires, _ := time.Parse(time.RFC3339, r.ExpiresAt); f.now.Before(expires) {
+				device := r.Device
+				if r.AVD != "" || daemon.IsEmulatorSerial(r.Device) {
+					device = (bootDuty{Device: r.Device, AVD: r.AVD}).runningSerial(f.devices)
+				}
+				if device != "" {
+					removed[r.ID] = removedLease{Device: device, Until: expires}
+				}
+				windows = append(windows, fmt.Sprintf("%s (%s to %s)", daemon.HolderName(r.Holder), r.StartsAt, r.ExpiresAt))
+			}
+			if r.Booted {
+				duty := bootDuty{Device: r.Device, AVD: r.AVD}
+				if !slices.ContainsFunc(duties, func(d bootDuty) bool { return d.key() == duty.key() }) {
+					duties = append(duties, duty)
+				}
+			}
 		} else {
 			keep = append(keep, r)
 		}
 	}
-	if len(windows) != 0 {
-		if !endLeases {
-			return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is in use by %s", id, strings.Join(windows, ", "))
+	if len(windows) != 0 && !endLeases {
+		return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is in use by %s", id, strings.Join(windows, ", "))
+	}
+	if len(keep) != len(f.state.Leases) {
+		if err := removedWindowLimit(len(removed)); err != nil {
+			return err
 		}
 		next := f.state
-		next.Leases = keep
+		next.Leases, next.BootDuties, next.Removed = keep, duties, removed
 		if err := writeLeases(LeasesPath("hub"), next); err != nil {
 			return daemon.WrapErr(daemon.CodeInternal, err)
 		}
 		f.state = next
+	}
+	for _, d := range duties {
+		matches := matchesDevice(d.Device, d.AVD)
+		if d.AVD != "" || daemon.IsEmulatorSerial(d.Device) {
+			matches, _ = d.matchesConfigTarget(id, target, f.devices)
+		}
+		if !matches || f.discover == nil {
+			continue
+		}
+		info, found := d.resolve(f.discover(""))
+		if !found || (daemon.Config{HubProcess: true}).FindDeviceOwner(info.ID) != nil {
+			continue // The next hub retries once the device is discoverable and free.
+		}
+		if !strings.EqualFold(info.State, "Shutdown") && !strings.HasPrefix(info.ID, daemon.AVDPrefix) {
+			if err := f.stop(info); err != nil {
+				return daemon.WrapErr(daemon.CodeDeviceError, err)
+			}
+		}
+		f.state.BootDuties = slices.DeleteFunc(slices.Clone(f.state.BootDuties), func(other bootDuty) bool { return other.key() == d.key() })
+		if err := writeLeases(LeasesPath("hub"), f.state); err != nil {
+			return daemon.WrapErr(daemon.CodeInternal, err)
+		}
 	}
 	if err := netshape.RemoveDevices(f.path, id, aliases); err != nil {
 		return daemon.WrapErr(daemon.CodeInternal, err)
