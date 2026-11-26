@@ -17,7 +17,7 @@ func TestBinaryImports(t *testing.T) {
 		}
 		deps := strings.Fields(string(out))
 		for _, pkg := range []string{"hub", "hubd", "hubweb"} {
-			want := name == "maestro-d-hub" && pkg != "hubweb"
+			want := name == "maestro-d-hub"
 			if got := slices.Contains(deps, "github.com/devicelab-dev/maestro-runner/pkg/"+pkg); got != want {
 				t.Errorf("%s imports %s: %t, want %t", name, pkg, got, want)
 			}

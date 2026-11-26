@@ -45,13 +45,14 @@ Examples:
 // DeviceEntry is one row of `maestro-runner devices`. The JSON tags are a
 // public contract — scripts and CI read this shape.
 type DeviceEntry struct {
-	Platform  string `json:"platform"` // android | ios
-	Kind      string `json:"kind"`     // device | emulator | simulator | tv
-	ID        string `json:"id"`       // adb serial or iOS UDID — what --device takes
-	Name      string `json:"name,omitempty"`
-	Model     string `json:"model,omitempty"` // maestro-d: e.g. "Pixel 8", "iPhone14,2"
-	OSVersion string `json:"osVersion,omitempty"`
-	State     string `json:"state"` // device | offline | unauthorized | Booted | Shutdown
+	Platform   string `json:"platform"` // android | ios
+	Kind       string `json:"kind"`     // device | emulator | simulator | tv
+	ID         string `json:"id"`       // adb serial or iOS UDID — what --device takes
+	Name       string `json:"name,omitempty"`
+	Model      string `json:"model,omitempty"`      // maestro-d: e.g. "Pixel 8", "iPhone14,2"
+	DeviceType string `json:"deviceType,omitempty"` // configured virtual hardware profile
+	OSVersion  string `json:"osVersion,omitempty"`
+	State      string `json:"state"` // device | offline | unauthorized | Booted | Shutdown
 	// Ready is true when a run could target this entry as-is. An offline or
 	// unauthorized Android device and a shut-down simulator are all listed —
 	// knowing they exist is the point — but none of them is runnable yet.
