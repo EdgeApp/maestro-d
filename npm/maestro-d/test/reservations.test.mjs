@@ -23,6 +23,8 @@ let leaseState = 'scheduled'
 let noRoute = false
 /** True to fail the next attaches. */
 let failAttach = false
+let detachedCommand = false
+let attachReused
 
 const ok = (extra) => ({ ok: true, exitCode: 0, ...extra })
 const LEASE = {
@@ -60,9 +62,13 @@ function handler(req, res) {
     if (url.pathname === '/v1/devices/mock-1') return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: false } }))
     if (url.pathname.endsWith('/attach')) {
       if (failAttach) return send(502, { ok: false, exitCode: 4, error: { code: 'DEVICE_ERROR', message: 'driver died' } })
-      return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: true } }))
+      return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: true, attachReused } }))
     }
     if (url.pathname.includes('/commands/')) {
+      if (detachedCommand) {
+        detachedCommand = false
+        return send(404, { ok: false, error: { code: 'DEVICE_NOT_ATTACHED', message: 'closed' } })
+      }
       const lease = req.headers['x-maestro-lease']
       if (lease === 'later') {
         return send(409, { ok: false, exitCode: 5, error: { code: 'LEASE_NOT_STARTED', message: 'starts later', details: { startsAt: '2099-01-01T00:00:00Z' } } })
@@ -88,6 +94,7 @@ beforeEach(() => {
   requests = []
   leaseState = 'scheduled'
   noRoute = false
+  attachReused = undefined
   fs.rmSync(leasesPath(), { force: true })
 })
 
@@ -258,6 +265,51 @@ describe('leases.json with several leases per device', () => {
     recordLease('h', { id: 'new', device: 'g', startsAt: '2021-01-01T00:00:00Z', expiresAt: future, ttlSec: 3600 })
     const ids = loadLeases().filter((r) => r.device === 'g').map((r) => r.id).sort()
     assert.deepEqual(ids, ['go-1', 'new'])
+  })
+
+  test('two handles borrow the same shell lease and the second recovers independently', async () => {
+    leaseState = 'active'
+    const md = await MaestroD.connect({ hub: addr })
+    recordLease(md.leaseKey, LEASE)
+    const first = await md.attach({ device: LEASE.device })
+    const second = await md.attach({ device: LEASE.device })
+    assert.equal(first.lease.id, LEASE.id)
+    assert.equal(second.lease.id, LEASE.id)
+    detachedCommand = true
+    await second.tapOn('x')
+    assert.equal(requests.filter(r => r.url.endsWith('/attach')).length, 3)
+    await md.close()
+    assert.equal(leaseRequests('DELETE').length, 0)
+    assert.equal(findLease(md.leaseKey, LEASE.device)?.id, LEASE.id)
+  })
+
+  test('reused shell attachment keeps the effective options on disk and for JS recovery', async () => {
+    leaseState = 'active'
+    const md = await MaestroD.connect({ hub: addr })
+    const saved = { appId: 'shell.app', env: { COLOR: 'green' } }
+    recordLease(md.leaseKey, LEASE, saved)
+    attachReused = true
+    await md.attach({ device: LEASE.device })
+    const dev = await md.attach({ device: LEASE.device, appId: 'ignored' })
+    assert.deepEqual(findLease(md.leaseKey, LEASE.device).attach, saved)
+    detachedCommand = true
+    attachReused = false
+    await dev.tapOn('x')
+    assert.deepEqual(requests.filter(r => r.url.endsWith('/attach')).at(-1).body, saved)
+    await md.attach({ device: LEASE.device, appId: 'new.app' })
+    assert.deepEqual(findLease(md.leaseKey, LEASE.device).attach, { appId: 'new.app' })
+    await md.close()
+  })
+
+  test('static attach keeps connection options out of the driver request and the saved grant', async () => {
+    const hub = `http://${addr}`
+    recordLease(hub, { ...LEASE, startsAt: '2020-01-01T00:00:00Z' })
+    const driver = { platform: 'mock', appId: 'example.app', noAppInstall: true }
+    await MaestroD.attach({ url: hub, token: 'secret', log() {}, device: 'mock-1', ...driver })
+    const req = requests.find(r => r.url.endsWith('/attach'))
+    assert.equal(req.headers.authorization, 'Bearer secret')
+    assert.deepEqual(req.body, driver)
+    assert.deepEqual(findLease(hub, 'mock-1').attach, driver)
   })
 
   test('attach() sends the started lease on file, not a reservation; LEASE_NOT_STARTED keeps the record', async () => {
