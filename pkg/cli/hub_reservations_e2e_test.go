@@ -72,7 +72,7 @@ func TestE2E_HubReservations(t *testing.T) {
 	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 	// By id through hub-b, on hub-a's device.
-	res, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1@hub-a", StartAt: rfc(start), TTLSec: 30, Holder: "alice"})
+	res, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1@hub-a", StartAt: rfc(start), TTLSec: 30, Holder: "alice", Description: "routed reservation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestE2E_HubReservations(t *testing.T) {
 	}
 	devs, _ := c.Devices(ctx, "mock")
 	for _, d := range devs {
-		if d.ID == "mock-1@hub-a" && (len(d.Reservations) != 1 || d.Reservations[0].Holder != "alice") {
+		if d.ID == "mock-1@hub-a" && (len(d.Reservations) != 1 || d.Reservations[0].Holder != "alice" || d.Reservations[0].Description != "routed reservation") {
 			t.Fatalf("listing: %+v", d)
 		}
 	}
@@ -132,7 +132,7 @@ func TestE2E_HubReservations(t *testing.T) {
 
 // A hub keeps its reservations across a clean stop and a crash: one whose
 // start passed while it was down starts as it comes back; a lease that
-// had started is gone after the crash, as every started lease is.
+// had started is still present after the crash with the original expiry.
 func TestE2E_HubReservationsRestart(t *testing.T) {
 	e := newE2E(t)
 	home := filepath.Join(e.cwd, "restart-home")
@@ -170,7 +170,7 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	if r := e.runEnv(env, "maestro-d-hub", "stop"); r.code != 0 {
 		t.Fatalf("hub stop: %s%s", r.stdout, r.stderr)
 	}
-	path := filepath.Join(home, "hub", "scheduled-leases.json")
+	path := filepath.Join(home, "hub", "leases.json")
 	fi, err := os.Stat(path)
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("%s: %v %v", path, fi, err)
@@ -187,7 +187,7 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 		l2.Lease.ExpiresAt != soon.Lease.ExpiresAt || l1.Lease.ID != later.Lease.ID {
 		t.Fatalf("after a stop: %+v %v / %+v %v", l1, err1, l2, err2)
 	}
-	// A crash keeps the reservation and loses the started lease.
+	// A crash keeps both the future reservation and the one that started.
 	if p, err := os.FindProcess(info.PID); err == nil {
 		_ = p.Signal(syscall.SIGKILL)
 	}
@@ -195,7 +195,21 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	info = start()
 	c = daemon.NewHTTPClient("http://"+info.HTTPAddr, "rst-tok", nil)
 	ls, err := c.Leases(ctx)
-	if err != nil || len(ls) != 1 || ls[0].ID != later.Lease.ID || ls[0].State != daemon.LeaseScheduled {
+	if err != nil || len(ls) != 2 {
 		t.Fatalf("after a crash: %+v %v", ls, err)
+	}
+	for _, l := range ls {
+		switch l.ID {
+		case later.Lease.ID:
+			if l.State != daemon.LeaseScheduled || l.ExpiresAt != later.Lease.ExpiresAt {
+				t.Fatalf("future reservation after crash: %+v", l)
+			}
+		case soon.Lease.ID:
+			if l.State != daemon.LeaseActive || l.ExpiresAt != soon.Lease.ExpiresAt {
+				t.Fatalf("started reservation after crash: %+v", l)
+			}
+		default:
+			t.Fatalf("unexpected grant after crash: %+v", l)
+		}
 	}
 }

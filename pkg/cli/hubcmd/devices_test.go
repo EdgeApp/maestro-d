@@ -59,15 +59,16 @@ func requireCode(t *testing.T, err error, code daemon.Code, exit int) {
 
 func writeDeviceGrants(t *testing.T, records ...map[string]string) string {
 	t.Helper()
-	path := hubd.ReservationsPath("hub")
+	path := hubd.LeasesPath("hub")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range records {
+		r["state"] = "scheduled"
 		r["startsAt"] = time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 		r["expiresAt"] = time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
 	}
-	b, err := json.Marshal(map[string]any{"reservations": records})
+	b, err := json.Marshal(map[string]any{"version": 2, "leases": records})
 	if err != nil {
 		t.Fatal(err)
 	}
