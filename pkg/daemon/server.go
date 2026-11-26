@@ -774,7 +774,10 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// On a hub, stopping the device ends its lease.
-	s.deviceStopped(r.Context(), false, id)
+	if err := s.deviceStopped(r.Context(), false, id); err != nil {
+		WriteError(w, err)
+		return
+	}
 	s.events.Publish(Event{Type: "device.stopped", Device: id})
 	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }

@@ -482,7 +482,8 @@ export interface HubPeer {
 /** The lease state a hub's device listings carry. */
 export interface DeviceLease {
   holder?: string
-  /** RFC 3339: a reservation's start (in `reservations`). */
+  description?: string
+  /** RFC 3339 start of the grant or reservation. Older hubs omit the active start. */
   startsAt?: string
   /** RFC 3339: the end of the lease's fixed window. */
   expiresAt: string
@@ -494,6 +495,7 @@ export interface Lease {
   id: string
   device: string
   holder?: string
+  description?: string
   /** RFC 3339: the start of the window (the grant, for a lease taken now). A renew leaves it. */
   startsAt?: string
   /** RFC 3339: the end of the window. Using the lease never moves it; only `renew()` does. */

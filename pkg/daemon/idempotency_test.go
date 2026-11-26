@@ -439,3 +439,21 @@ func TestLeases_JoinedRetryAnsweredWhenTheLeaseEnds(t *testing.T) {
 		return err == nil && d.Available
 	})
 }
+
+func TestIdemCacheKeepsRunningKeysAtCapacity(t *testing.T) {
+	c := newIdemCache()
+	first, _ := c.begin("", "0")
+	for i := 1; i < idemPerDevice; i++ {
+		c.begin("", fmt.Sprint(i))
+	}
+	if e, run := c.begin("", "excess"); e != nil || run {
+		t.Fatal("unresolved request evicted")
+	}
+	if e, run := c.begin("", "0"); e != first || run {
+		t.Fatal("lost original running request")
+	}
+	c.finish(first, 200, nil, nil)
+	if _, run := c.begin("", "excess"); !run {
+		t.Fatal("completed request still occupies the last slot")
+	}
+}
