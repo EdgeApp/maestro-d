@@ -1032,3 +1032,84 @@ test('devices() lists both leased devices after their owner unshares them across
     await holder.close()
   }
 })
+
+test('local config methods use the recorded socket in each long home; TCP config requests are forbidden', async (t) => {
+  const token = 'config-sockets'
+  function cli(home, ...args) {
+    const result = execFileSync(hubBin, args, {
+      encoding: 'utf8',
+      env: { ...process.env, MAESTRO_D_HOME: home, MAESTRO_D_MOCK_DEVICES: 'mock-a,mock-b' },
+    }).trim()
+    if (args[0] === 'devices') t.diagnostic(`$ MAESTRO_D_HOME=${home} maestro-d-hub ${args.join(' ')}\n${result}`)
+    return result
+  }
+  async function start(name) {
+    const home = path.join(tmp, 'socket-fallback-'.repeat(7), name)
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 })
+    const { daemon: info } = JSON.parse(cli(home, 'start', '--name', name, '--no-mdns', '--listen', '127.0.0.1:0',
+      '--token', token, '--peer-token', 'config-peer', '--json'))
+    try {
+      assert.ok(!info.socketPath.startsWith(home + path.sep), 'expected a fallback socket outside the long home')
+      const savedHome = process.env.MAESTRO_D_HOME
+      let local
+      try {
+        process.env.MAESTRO_D_HOME = home
+        local = await MaestroD.connect({ hubSocket: true })
+      } finally {
+        process.env.MAESTRO_D_HOME = savedHome
+      }
+      t.diagnostic(`${name} opened its recorded Unix socket ${info.socketPath} from ${home}`)
+      return { home, info, local }
+    } catch (err) {
+      cli(home, 'stop')
+      throw err
+    }
+  }
+
+  const a = await start('config-a')
+  let aRunning = true
+  try {
+    const b = await start('config-b')
+    try {
+      assert.notEqual(a.info.socketPath, b.info.socketPath)
+      cli(a.home, 'devices', 'add', 'mock-a', '--description', 'first home')
+      const added = await b.local.setHubDevice('mock-b', { description: 'second home' })
+      t.diagnostic(`$ hub.setHubDevice('mock-b', { description: 'second home' })\n${JSON.stringify(added)}`)
+      assert.deepEqual(added, { id: 'mock-b', description: 'second home', listed: true, trafficShaping: false })
+      assert.equal((await b.local.setHubDevice('mock-b')).description, 'second home')
+      const first = await a.local.hubDevices()
+      const second = await b.local.hubDevices()
+      assert.equal(first.path, path.join(a.home, 'config.json'))
+      assert.deepEqual(first.devices.map(d => d.id), ['mock-a'])
+      assert.deepEqual(second.devices, [added])
+      assert.deepEqual(JSON.parse(cli(b.home, 'devices', '--json')).devices, [added])
+
+      const remote = await MaestroD.connect({ hub: b.info.httpAddr, token })
+      const oldBytes = fs.readFileSync(second.path)
+      try {
+        for (const call of [
+          () => remote.hubDevices(),
+          () => remote.setHubDevice('mock-b', { description: 'remote' }),
+          () => remote.removeHubDevice('mock-b', { endLeases: true }),
+        ]) {
+          await assert.rejects(call, err => isMaestroError(err, 'FORBIDDEN') && err.httpStatus === 403)
+        }
+      } finally {
+        await remote.close()
+      }
+      assert.deepEqual(fs.readFileSync(second.path), oldBytes)
+      cli(a.home, 'stop')
+      aRunning = false
+      assert.equal((await b.local.setHubDevice('mock-b', { description: '' })).description, undefined)
+      assert.equal((await b.local.removeHubDevice('mock-b', { endLeases: true })).ok, true)
+      assert.deepEqual((await b.local.hubDevices()).devices, [])
+      t.diagnostic('hub A stopped; hub B accepted its socket edit and returned an empty list after removal')
+    } finally {
+      await b.local.close()
+      cli(b.home, 'stop')
+    }
+  } finally {
+    await a.local.close()
+    if (aRunning) cli(a.home, 'stop')
+  }
+})

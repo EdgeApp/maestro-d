@@ -14,24 +14,6 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 )
 
-// A config row describes the named entry. Never serialize the shaper, whose
-// requests may include credentials. A disconnected device still has a row.
-type configDevice struct {
-	ID             string               `json:"id"`
-	Description    string               `json:"description,omitempty"`
-	TrafficShaping bool                 `json:"trafficShaping"`
-	Listed         bool                 `json:"listed"`
-	Lease          *daemon.DeviceLease  `json:"lease,omitempty"`
-	Reservations   []daemon.DeviceLease `json:"reservations,omitempty"`
-}
-
-type configListing struct {
-	daemon.Envelope
-	Path        string         `json:"path"`
-	ConfigError string         `json:"configError,omitempty"`
-	Devices     []configDevice `json:"devices"`
-}
-
 func (s *Server) localConfig(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if daemon.CallerFrom(r.Context()).Remote {
@@ -39,12 +21,16 @@ func (s *Server) localConfig(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if raw := r.PathValue("id"); raw != "" {
-			id, hub, qualified := strings.Cut(raw, "@")
-			if strings.TrimSpace(id) == "" || (qualified && !strings.EqualFold(hub, s.HubName())) {
-				daemon.WriteError(w, daemon.Errorf(daemon.CodeUsage, "device %q must name a local device on hub %s", raw, s.HubName()))
+			if err := daemon.CheckHubConfigPath(r.URL.Query().Get("expectedPath"), s.config.path); err != nil {
+				daemon.WriteError(w, err)
 				return
 			}
-			r.SetPathValue("id", strings.TrimSpace(id))
+			id, err := daemon.LocalConfigID(raw, s.HubName())
+			if err != nil {
+				daemon.WriteError(w, err)
+				return
+			}
+			r.SetPathValue("id", id)
 		}
 		next(w, r)
 	}
@@ -59,11 +45,14 @@ func listedConfigDevice(id string, devices []daemon.DeviceInfo) (daemon.DeviceIn
 	return daemon.DeviceInfo{ID: id}, false
 }
 
-func (s *Server) configRow(cfg *netshape.Config, id string, devices []daemon.DeviceInfo) configDevice {
+func configDeviceRow(id string, entry netshape.Device, listed bool) daemon.HubConfigDevice {
+	return daemon.HubConfigDevice{ID: id, Listed: listed, Description: entry.Description, TrafficShaping: entry.Shapeable()}
+}
+
+func (s *Server) configRow(cfg *netshape.Config, id string, devices []daemon.DeviceInfo) daemon.HubConfigDevice {
 	d, listed := listedConfigDevice(id, devices)
-	entry := cfg.Devices[id]
-	row := configDevice{ID: id, Listed: listed, Description: entry.Description, TrafficShaping: entry.Shapeable(),
-		Reservations: s.leases.reservations(d.ID)}
+	row := configDeviceRow(id, cfg.Devices[id], listed)
+	row.Reservations = s.leases.reservations(d.ID)
 	if l, ok := s.leases.liveFor(d.ID); ok {
 		row.Lease = &daemon.DeviceLease{Holder: l.Holder, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}
 	}
@@ -73,7 +62,7 @@ func (s *Server) configRow(cfg *netshape.Config, id string, devices []daemon.Dev
 func (s *Server) getConfigDevices(w http.ResponseWriter, r *http.Request) {
 	s.startDue()
 	cfg, err := s.config.snapshot(time.Now(), false)
-	res := configListing{Envelope: daemon.Envelope{OK: true}, Path: s.config.path, Devices: make([]configDevice, 0, len(cfg.Shared))}
+	res := daemon.HubConfigListing{Envelope: daemon.Envelope{OK: true}, Path: s.config.path, Devices: make([]daemon.HubConfigDevice, 0, len(cfg.Shared))}
 	if err != nil {
 		res.ConfigError = err.Error()
 	}
