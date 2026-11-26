@@ -35,6 +35,7 @@ import (
 type reservationRecord struct {
 	ID        string `json:"id"`
 	Device    string `json:"device"`
+	AVD       string `json:"avd,omitempty"` // verified avdKey when the grant identifies an emulator
 	Holder    string `json:"holder,omitempty"`
 	StartsAt  string `json:"startsAt"`
 	ExpiresAt string `json:"expiresAt"`
@@ -64,7 +65,7 @@ func (t *leaseTable) snapshot() []reservationRecord {
 	out := []reservationRecord{}
 	for _, list := range t.scheduled {
 		for _, e := range list {
-			out = append(out, reservationRecord{ID: e.id, Device: e.device, Holder: e.holder,
+			out = append(out, reservationRecord{ID: e.id, Device: e.device, AVD: e.avd, Holder: e.holder,
 				StartsAt: e.starts.UTC().Format(time.RFC3339), ExpiresAt: e.expires.UTC().Format(time.RFC3339),
 				TTLSec: int(e.ttl / time.Second), MaxSec: int(e.max / time.Second), Shared: e.sharedAtGrant.Load()})
 		}
@@ -127,7 +128,7 @@ func (t *leaseTable) restore(r reservationRecord) (*leaseEntry, bool) {
 	if !now.Before(expires) || t.byID[r.ID] != nil || t.overlapLocked(r.Device, starts, expires, nil) != nil {
 		return nil, false
 	}
-	e := &leaseEntry{id: r.ID, device: r.Device, holder: r.Holder, ttl: time.Duration(r.TTLSec) * time.Second,
+	e := &leaseEntry{id: r.ID, device: r.Device, avd: r.AVD, holder: r.Holder, ttl: time.Duration(r.TTLSec) * time.Second,
 		max: time.Duration(r.MaxSec) * time.Second, starts: starts, expires: expires, ended: make(chan struct{})}
 	e.sharedAtGrant.Store(r.Shared)
 	t.byID[e.id] = e
