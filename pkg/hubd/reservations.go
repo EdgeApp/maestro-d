@@ -153,10 +153,10 @@ func (s *Server) handleReserve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if start.IsZero() {
-			entry, e = s.leaseDevice(d, holder, req.TTLSec, claimNone)
+			entry, e = s.leaseDevice(daemon.CallerFrom(r.Context()).Remote, d, holder, req.TTLSec, claimNone)
 		} else {
 			s.leaseMu.Lock()
-			entry, e = s.reserveDeviceLocked(d, holder, start, req.TTLSec)
+			entry, e = s.reserveDeviceLocked(daemon.CallerFrom(r.Context()).Remote, d, holder, start, req.TTLSec)
 			s.leaseMu.Unlock()
 		}
 	} else {
@@ -232,7 +232,10 @@ func notReservableEmulator(id string) *daemon.Error {
 // DEVICE_IN_USE when another lease's window overlaps it. Whether the
 // device is attached or booting now does not matter: that is before the
 // window.
-func (s *Server) reserveDeviceLocked(d daemon.DeviceInfo, holder string, start time.Time, ttlSec int) (*leaseEntry, *daemon.Error) {
+func (s *Server) reserveDeviceLocked(remote bool, d daemon.DeviceInfo, holder string, start time.Time, ttlSec int) (*leaseEntry, *daemon.Error) {
+	if e := s.admitConfigDevice(remote, d); e != nil {
+		return nil, e
+	}
 	maxTTL := s.leaseMaxInfo(d)
 	window, we := leaseWindow(d.ID, ttlSec, maxTTL)
 	if we != nil {
@@ -283,9 +286,9 @@ func (s *Server) reserveSelect(r *http.Request, sel daemon.LeaseSelector, holder
 		var e *leaseEntry
 		var le *daemon.Error
 		if start.IsZero() {
-			e, le = s.leaseDeviceLocked(d, holder, ttlSec, claimNone)
+			e, le = s.leaseDeviceLocked(daemon.CallerFrom(r.Context()).Remote, d, holder, ttlSec, claimNone)
 		} else {
-			e, le = s.reserveDeviceLocked(d, holder, start, ttlSec)
+			e, le = s.reserveDeviceLocked(daemon.CallerFrom(r.Context()).Remote, d, holder, start, ttlSec)
 		}
 		if le == nil {
 			return e, nil
