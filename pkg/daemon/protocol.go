@@ -465,6 +465,8 @@ type DeviceInfo struct {
 	BootedAt string `json:"bootedAt,omitempty"`
 	// Attached is true while the daemon holds a driver for the device.
 	Attached bool `json:"attached"`
+	// AttachReused is set on attach responses. A reused driver kept its original options.
+	AttachReused *bool `json:"attachReused,omitempty"`
 	// AttachedAt / AppID / Driver / ReportDir describe the attachment.
 	AttachedAt string `json:"attachedAt,omitempty"`
 	AppID      string `json:"appId,omitempty"`

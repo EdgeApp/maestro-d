@@ -260,11 +260,12 @@ use it as their liveness check.
 
 ### `POST /v1/shutdown`
 
-Detaches every device, shuts down the simulators and emulators the daemon
-booted, and exits. Answers `{"ok": true}` first; the process is gone a
-moment later. No body. On a hub it is served only on the unix socket
-(`maestro-d hub stop`): a TCP caller, or a request a peer forwarded, gets
-`FORBIDDEN`.
+The local daemon detaches devices, shuts down the simulators and emulators
+it booted, and exits. On the hub, this route accepts Unix socket requests.
+TCP callers and forwarded requests receive `FORBIDDEN`. The default
+preserves active leases, reservations and devices booted for a live lease.
+`POST /v1/shutdown?endLeases=true` also ends active leases. The hub
+acknowledges the request before the process exits.
 
 ### `GET /v1/events` — server-sent events
 
@@ -304,7 +305,7 @@ and on a hub `lease.scheduled` (a reservation was granted),
 `lease.released` and `lease.expired` (`message` names the holder).
 `lease.expired` is a lease whose window ran out; every other end of a lease
 is `lease.released`: a release, its device stopped or deleted, the attach in
-its `POST /v1/leases` failing, the hub stopping, or a reservation cancelled or
+its `POST /v1/leases` failing, an explicit shutdown with `endLeases=true`, or a reservation cancelled or
 its device deleted. `message` carries free text where
 there is any. The stream never ends on its own; close the connection to
 stop.
@@ -348,6 +349,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | --- | --- |
 | `ready` | booted / online, so it can be attached |
 | `attached`, `attachedAt`, `appId`, `driver`, `reportDir` | this daemon's attachment |
+| `attachReused` | on an attach response, true when the existing driver kept its original attach options |
 | `busy` | a step is running on it right now |
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
@@ -900,7 +902,7 @@ it for the CLI, `md.claim(id)` for JavaScript), from any machine. A
 reservation is not renewed (`USAGE`); `DELETE /v1/leases/{lid}` cancels it
 (`lease.released`) without touching the device. Deleting the device ends its
 reservations; stopping it, or unplugging it, does not. Reservations outlive
-the hub process ([hub.md](hub.md#reservations-across-a-restart)): a hub that
+the hub process ([hub.md](hub.md#leases-across-a-restart)): a hub that
 stops or crashes has them again when it starts, under the same lease ids.
 
 A hub that predates reservations answers `USAGE` "no route for POST
@@ -917,6 +919,11 @@ and `state`), or one (`{lease}`); a lease that has ended is
 shared devices' leases: another device's lease
 is `LEASE_EXPIRED` to it here, on renew and on `DELETE`, and is left as it
 is.
+
+A restored active grant exposes `awaitingAttach: true` to its holder until a
+successful attach. On an emulator grant the holder lookup returns the AVD’s
+verified current device ID, or an empty `device` while the AVD is absent.
+Use this lookup before issuing a device command with a saved serial.
 
 ### `POST /v1/leases/{lid}/renew`
 
