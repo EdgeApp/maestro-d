@@ -727,6 +727,9 @@ type Info struct {
 	Hub string `json:"hub,omitempty"`
 }
 
+// ConfigLocalOnlyMessage is the refusal at both the mesh and the hub handler.
+const ConfigLocalOnlyMessage = "device config can be changed only on the hub's own machine, over its unix socket"
+
 // Event is one entry on the /v1/events stream.
 type Event struct {
 	// PreviouslyShared records public visibility at an unshare transition.
@@ -747,6 +750,7 @@ type Event struct {
 	Passed     bool   `json:"passed,omitempty"`
 	DurationMs int64  `json:"durationMs,omitempty"`
 	Error      string `json:"error,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 	Message    string `json:"message,omitempty"`
 	// DeviceMinutes, on device.released, is the device time the cloud
 	// session used.

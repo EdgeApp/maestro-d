@@ -68,7 +68,7 @@ func (s *Server) leaseCloud(r *http.Request, sel daemon.LeaseSelector, cloud *cl
 	}
 	// The device is bound to the lease as it is granted, under leaseMu: a
 	// lease ended at once (the hub stopping) still releases it.
-	entry, le := s.leaseDevice(d, holder, ttlSec, claimReserved, func(e *leaseEntry) {
+	entry, le := s.leaseDevice(daemon.CallerFrom(r.Context()).Remote, d, holder, ttlSec, claimReserved, func(e *leaseEntry) {
 		e.cloudDone = make(chan struct{})
 		e.releaseCloud = func() *cloudprov.DeviceMinutes {
 			return allocation.Release(true)

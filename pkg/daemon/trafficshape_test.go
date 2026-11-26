@@ -530,7 +530,7 @@ func TestServer_AVDEntryShapesTheRunningEmulator(t *testing.T) {
 		t.Errorf("an entry by name: %+v", d)
 	}
 	sh := env.s.trafficShaper("emulator-5554")
-	sh.Alias = avdEntryID(devs[0])
+	sh.Alias = AVDEntryID(devs[0])
 	if _, err := sh.Device(); err != nil {
 		t.Errorf("shaper: %v", err)
 	}
