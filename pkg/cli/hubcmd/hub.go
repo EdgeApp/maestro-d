@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +25,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/fsage"
 	"github.com/devicelab-dev/maestro-runner/pkg/hub"
 	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
+	"github.com/devicelab-dev/maestro-runner/pkg/hubweb"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/netshape"
 	"github.com/devicelab-dev/maestro-runner/pkg/version"
@@ -37,6 +39,7 @@ var hubStartFlags = common.FlagSet(outputFlags, []dflag{
 		func(o *daemonOpts, v string) { o.hub.name = v }),
 	common.StringFlag("listen", "Address of the client and peer listener (default :7433, every interface)", []string{"MAESTRO_D_LISTEN"},
 		func(o *daemonOpts, v string) { o.HTTPAddr = v }),
+	common.IntFlag("web-port", "HTTPS port for the read-only hub dashboard (default 9400; 0 picks an available port)", []string{"MAESTRO_D_HUB_WEB_PORT"}, func(o *daemonOpts, v int) { o.hub.webPort = &v }),
 	common.StringFlag("advertise", "HOST:PORT peers are told to dial (default: the address each peer reaches this hub at)", nil,
 		func(o *daemonOpts, v string) { o.hub.advertise = v }),
 	{Name: "peer", Kind: common.Slice, Usage: "A hub to link with, HOST[:PORT] (https:// for TLS); repeatable",
@@ -200,6 +203,9 @@ func checkHubFlags(o *daemonOpts) (token, peerToken string, err error) {
 	if o.hub.name == "" {
 		o.hub.name = daemon.DefaultHubName()
 	}
+	if p := o.hub.webPort; p != nil && (*p < 0 || *p > 65535) {
+		return "", "", daemon.Errorf(daemon.CodeUsage, "--web-port %d: give 0 to 65535", *p)
+	}
 	if !hub.ValidName(o.hub.name) {
 		return "", "", daemon.Errorf(daemon.CodeUsage, "--name %q: a hub name is 1-32 of a-z, 0-9 and -", o.hub.name)
 	}
@@ -288,6 +294,9 @@ func configShare(o *daemonOpts) ([]string, error) {
 // listing.
 func hubChildArgs(o *daemonOpts) []string {
 	args := []string{"start", "--foreground", "--name", o.hub.name, "--listen", o.HTTPAddr}
+	if o.hub.webPort != nil {
+		args = append(args, "--web-port", strconv.Itoa(*o.hub.webPort))
+	}
 	abs := func(p string) string {
 		a, _ := filepath.Abs(p)
 		return a
@@ -419,7 +428,17 @@ func printHub(o *daemonOpts, info *daemon.Info, state string) error {
 		scheme = "https"
 	}
 	fmt.Printf("hub %q %s (daemon %q, pid %d, %s://%s)\n", info.Hub, state, info.Name, info.PID, scheme, info.HTTPAddr)
+	printWebURL(os.Stdout, info.WebAddr)
 	return nil
+}
+
+func printWebURL(w io.Writer, addr string) {
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			host = daemon.MachineName()
+		}
+		fmt.Fprintf(w, "dashboard https://%s/\n", net.JoinHostPort(host, port))
+	}
 }
 
 // peerCAPool reads --peer-ca.
@@ -485,7 +504,14 @@ func serveHub(o *daemonOpts, token, peerToken string) error {
 		return err
 	}
 	srv := daemon.New(daemon.Config{
-		HubProcess:       true,
+		HubProcess: true,
+		OpenWeb: func() (daemon.WebListener, error) {
+			port := 9400
+			if o.hub.webPort != nil {
+				port = *o.hub.webPort
+			}
+			return hubweb.Listen(daemon.Home(), o.hub.advertise, o.TLSCert, o.TLSKey, port, policy, mesh)
+		},
 		Name:             o.Name,
 		HTTPAddr:         o.HTTPAddr,
 		Token:            token,
@@ -630,6 +656,7 @@ func printHubStatus(w io.Writer, h daemon.HubStatus) {
 		mdns = "no mDNS"
 	}
 	fmt.Fprintf(w, "hub %s: maestro-d %s, API %s, listening on %s (%s)\n", h.Name, h.Version, h.APIVersion, h.Listen, mdns)
+	printWebURL(w, h.WebAddr)
 	if h.ReservationLeadSec > 0 {
 		fmt.Fprintf(w, "reservations start up to %v ahead\n", time.Duration(h.ReservationLeadSec)*time.Second)
 	}

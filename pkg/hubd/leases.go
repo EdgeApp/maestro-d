@@ -993,10 +993,19 @@ func (s *Server) remoteEvent(ev daemon.Event) (daemon.Event, bool) {
 // a remote caller sees only the shared pool, and on a hub every entry
 // carries its lease state.
 func (s *Server) Visible(r *http.Request, devs []daemon.DeviceInfo) []daemon.DeviceInfo {
+	return s.visible(devs, daemon.CallerFrom(r.Context()).Remote, r.Header.Get(daemon.HeaderLease))
+}
+
+// PublicDevices projects a discovery result with the same sharing policy as
+// an uncredentialed remote listing, using the latest local leases and records.
+func (s *Server) PublicDevices(discovered []daemon.DeviceInfo) []daemon.DeviceInfo {
+	return s.visible(s.Registry().ListDiscovered("", discovered), true, "")
+}
+
+func (s *Server) visible(devs []daemon.DeviceInfo, remote bool, credential string) []daemon.DeviceInfo {
 	out := make([]daemon.DeviceInfo, 0, len(devs))
-	remote := daemon.CallerFrom(r.Context()).Remote
 	for _, d := range devs {
-		if remote && !s.sharedInfo(d) && !s.heldBy(r, s.leases.deviceKey(d)) {
+		if remote && !s.sharedInfo(d) && !s.leases.holds(credential, s.leases.deviceKey(d)) {
 			continue
 		}
 		out = append(out, d)
