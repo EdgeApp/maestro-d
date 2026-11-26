@@ -132,7 +132,7 @@ What does not work, and why:
   Zlib), never video, so the computer has no stream or recording
   (`CAPTURE_UNAVAILABLE`).
 - **Apps, traffic shaping.** `launchApp` and the other app steps are not
-  supported; `setTrafficShape` answers `UNSUPPORTED` unless `network.json`
+  supported; `setTrafficShape` answers `UNSUPPORTED` unless `config.json`
   configures `mac`.
 
 ## Screenshots
@@ -157,8 +157,8 @@ capture, and an 800 × 600 region about 10 ms. Flows (`takeScreenshot`,
   attaches again.
 - **One holder.** Like any device, `mac` belongs to one daemon at a time
   (`DEVICE_IN_USE`).
-- **Local only.** A hub never shares the computer, whatever `--share-device`
-  says: peers and remote callers cannot see, lease or attach it. Agents on
+- **Local only.** The computer stays private even when its ID appears in
+  `config.json`. Only clients on the Mac can see, lease or attach it. Agents on
   the Mac take turns through a hub's local socket: `maestro-d lease --device
   mac`, or a selector with `kind: computer` or `platform: macos`. A selector
   that names none of its kind, platform or name never picks it.
