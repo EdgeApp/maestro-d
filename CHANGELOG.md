@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 4.0.0 (2026-11-25)
+
+### Breaking changes
+
+- Run `maestro-d-hub` on the device host. Each release tarball and npm platform package includes both executables. The `maestro-d hub` alias forwards to the hub until 5.0. Each machine runs one hub, so drop `--daemon` from hub commands.
+- Move device settings from `network.json` to `config.json`. Use a `hubDevices` entry per device ID, with optional `description` and `trafficShaping`. Version 4 removes `--network-config`, `--share-device` and `--share-tv`. On the host, `maestro-d-hub devices add ID` writes the entry and shares the device immediately. See [Device config](docs/daemon/config.md).
+- `maestro-d serve --http` and `maestro-d start --http` accept only loopback addresses. Both commands drop `--tls-cert`, `--tls-key` and `--pass-env`. For network clients, configure these flags on `maestro-d-hub start` and connect with `maestro-d --target-hub=HOST`.
+- `maestro-d-hub stop` preserves active local-device leases. Use `maestro-d-hub stop --end-leases` to end them. Future reservations survive either stop. Stopping the hub releases its Device Farm sessions.
+- On a Mac with an existing hub LaunchAgent, rerun `maestro-d-hub service install` with your hub options so launchd starts the new binary.
+
+### Hub and client
+
+- Edit sharing through the host's Unix socket with `devices add|set|remove` or the REST and JavaScript clients. The hub reloads `config.json` while running. Peers see edits within their two-second listing cache. TCP config requests receive `FORBIDDEN`.
+- After a hub restart, holders keep the lease ID, description and expiry for the rest of the original window. The JavaScript device and one-shot CLI reattach once on the next device command. `maestro-d test flow.yaml --target-hub=HOST --device ID@HUB` runs a whole flow on the leased device's host.
+- Open `https://HOST:9400/` for a live, read-only view of shared devices, holders and upcoming reservations across the mesh. The page requires no login. Use `--web-port` to choose another port.
+
 ## 3.3.0 (2026-11-23)
 
 - added: Reservations: a hub lends a device for a window that starts later. `POST /v1/reservations` takes `device` or `select`, `startAt` (RFC 3339, at most the hub's `--reservation-lead` ahead, 24 hours by default), `clientTime` (the caller's clock, refused more than 60 s from the hub's with `reason: clock-skew`), `ttlSec` (at most the device's maximum, as for leases) and `holder`; its body is strict. The answer is a lease in the new `state` `scheduled` (every lease now carries `startsAt` and `state`), and device listings carry each device's `reservations`. No two leases on a device overlap in time: a lease, renew or reservation that would is `DEVICE_IN_USE` (with `nextStartsAt` for a reservation), so a lease taken now with the default 8-hour window is refused on a device reserved within 8 hours. Before its start a request under it is the new `LEASE_NOT_STARTED` (exit 5, 409); at the start the sweeper starts it (`lease.granted`, after `lease.scheduled` at the grant) with no connection waiting, and any client that has the id uses it. Cancel it with `DELETE /v1/leases/{lid}`; deleting its device ends it. A reservation boots, attaches and launches nothing, and takes no emulator or cloud device. The mesh routes the new route as it routes leases, forwarding every body key as sent; a hub that predates it answers "no route" (`reservations-unsupported` through the mesh). `hub status` reports `reservationLeadSec`; `Client.Reserve` in Go. See `docs/daemon/rest.md`.
