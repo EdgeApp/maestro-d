@@ -843,7 +843,10 @@ func (s *Server) handleStopCloud(w http.ResponseWriter, r *http.Request, rd *rem
 	}
 	minutes, e := s.releaseRemote(rd, reason)
 	s.forgetRemote(rd)
-	s.deviceStopped(r.Context(), del, rd.id)
+	if err := s.deviceStopped(r.Context(), del, rd.id); err != nil {
+		WriteError(w, err)
+		return
+	}
 	s.events.Publish(Event{Type: "device.stopped", Device: rd.id})
 	if del {
 		s.events.Publish(Event{Type: "device.deleted", Device: rd.id, Message: info.Name})

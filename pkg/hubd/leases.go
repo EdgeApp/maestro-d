@@ -52,8 +52,10 @@ import (
 const leaseSweepEvery = time.Second
 
 type leaseEntry struct {
-	id, device, holder string
-	ttl, max           time.Duration
+	id, device, holder, description string
+	durable                         bool // true once the successful grant and optional replay can be snapshotted
+	ttl, max                        time.Duration
+	cloud                           bool // cloud sessions cannot outlive their provider allocation
 	// starts is the window's start; started is set once it has begun
 	// (at once for a lease taken now, by the sweeper for a reservation).
 	starts, expires time.Time
@@ -216,6 +218,8 @@ func (t *leaseTable) tearingDown(id string) bool {
 
 // leaseTable holds a hub's live leases.
 type leaseTable struct {
+	replays  map[string]daemon.AcquisitionReplay
+	attempts map[string]daemon.SelectorAttempt
 	mu       sync.Mutex
 	now      func() time.Time
 	byID     map[string]*leaseEntry
@@ -334,7 +338,7 @@ func (t *leaseTable) markBooted(device string) bool {
 }
 
 func newLeaseTable() *leaseTable {
-	return &leaseTable{now: time.Now, byID: map[string]*leaseEntry{}, byDevice: map[string]*leaseEntry{},
+	return &leaseTable{replays: map[string]daemon.AcquisitionReplay{}, attempts: map[string]daemon.SelectorAttempt{}, now: time.Now, byID: map[string]*leaseEntry{}, byDevice: map[string]*leaseEntry{},
 		scheduled: map[string][]*leaseEntry{}, torn: map[string]chan struct{}{}, booting: map[string]bool{}, ending: map[string]bool{}, endingN: map[string]int{}}
 }
 
@@ -349,7 +353,7 @@ func (e *leaseEntry) view() daemon.Lease {
 	if e.pending() {
 		state = daemon.LeaseScheduled
 	}
-	return daemon.Lease{ID: e.id, Device: e.device, Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+	return daemon.Lease{ID: e.id, Device: e.device, Holder: e.holder, Description: e.description, StartsAt: e.starts.UTC().Format(time.RFC3339),
 		ExpiresAt: e.expires.UTC().Format(time.RFC3339), State: state,
 		TTLSec: int(e.ttl / time.Second), MaxSec: int(e.max / time.Second), Booted: e.booted}
 }
@@ -409,6 +413,9 @@ func (t *leaseTable) renew(id string, ttlSec int) (daemon.Lease, *daemon.Error) 
 	}
 	if e == nil || !e.liveAt(now) {
 		return daemon.Lease{}, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s has expired or was released", id).WithDetails("lease", id)
+	}
+	if !e.durable && !e.cloud {
+		return daemon.Lease{}, daemon.Errorf(daemon.CodeBusy, "lease %s is still being acquired", id)
 	}
 	ttl := e.ttl
 	if ttlSec != 0 {
@@ -480,7 +487,7 @@ func (t *leaseTable) reservations(device string) []daemon.DeviceLease {
 	defer t.mu.Unlock()
 	var out []daemon.DeviceLease
 	for _, e := range t.scheduled[device] {
-		out = append(out, daemon.DeviceLease{Holder: e.holder, StartsAt: e.starts.UTC().Format(time.RFC3339),
+		out = append(out, daemon.DeviceLease{Holder: e.holder, Description: e.description, StartsAt: e.starts.UTC().Format(time.RFC3339),
 			ExpiresAt: e.expires.UTC().Format(time.RFC3339)})
 	}
 	return out
@@ -1004,7 +1011,7 @@ func (s *Server) annotate(devs []daemon.DeviceInfo) {
 		}
 		d.Lease = nil
 		if l, ok := s.leases.liveFor(d.ID); ok {
-			d.Lease = &daemon.DeviceLease{Holder: l.Holder, ExpiresAt: l.ExpiresAt}
+			d.Lease = &daemon.DeviceLease{Holder: l.Holder, Description: l.Description, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}
 		}
 		d.Reservations = s.leases.reservations(d.ID)
 		d.MaxSec = int(s.leaseMaxInfo(*d) / time.Second)
@@ -1386,6 +1393,9 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 		daemon.WriteError(w, e)
 		return
 	}
+	s.leases.mu.Lock()
+	entry.description = daemon.LeaseDescription(req.Description)
+	s.leases.mu.Unlock()
 	logger.Info("lease %s: %s leased by %s for %v", entry.id, entry.device, holder, entry.ttl)
 	s.Events().Publish(daemon.Event{Type: "lease.granted", Device: entry.device, Message: holder})
 	var info *daemon.DeviceInfo
@@ -1415,9 +1425,14 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 	}
 	l, _ := s.leases.get(entry.id)
 	if l.ID == "" {
+		s.leases.mu.Lock()
 		l = entry.view()
+		s.leases.mu.Unlock()
 	}
-	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info})
+	result := daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l, Device: info}
+	if s.commitAcquisition(w, r, entry, result) {
+		daemon.WriteJSON(w, http.StatusOK, result)
+	}
 }
 
 // attachLeased is ensureAttached for a request: under a lease (ctx from
@@ -1564,6 +1579,7 @@ func (s *Server) leaseDeviceLocked(remote bool, d daemon.DeviceInfo, holder stri
 		}
 		return nil, ge
 	}
+	e.cloud = d.Provider != ""
 	e.sharedAtGrant.Store(s.sharedInfo(d))
 	return e, nil
 }
@@ -1806,6 +1822,7 @@ func (s *Server) disownBoot(info daemon.DeviceInfo) {
 		return
 	}
 	if s.leases.markBooted(info.ID) {
+		s.queueLeases(true)
 		logger.Info("lease: %s, booted for a selector lease, went to another lease; that lease shuts it down", info.ID)
 		return
 	}
@@ -1897,6 +1914,12 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 		daemon.WriteError(w, e)
 		return
 	}
+	if !le.cloud {
+		if err := s.saveLeases(); err != nil {
+			daemon.WriteError(w, daemon.WrapErr(daemon.CodeInternal, err))
+			return
+		}
+	}
 	logger.Info("lease %s: %s renewed until %s", l.ID, l.Device, l.ExpiresAt)
 	daemon.WriteJSON(w, http.StatusOK, daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l})
 }
@@ -1909,8 +1932,13 @@ func (s *Server) handleReleaseLease(w http.ResponseWriter, r *http.Request) {
 		s.leaseGone(w, id)
 		return
 	}
+	s.leases.mu.Lock()
 	l := e.view()
-	s.endLease(e, endReleased)
+	s.leases.mu.Unlock()
+	if err := s.endLease(e, endReleased); err != nil {
+		daemon.WriteError(w, daemon.WrapErr(daemon.CodeInternal, err))
+		return
+	}
 	res := daemon.LeaseResult{Envelope: daemon.Envelope{OK: true}, Lease: l}
 	if e.releaseCloud != nil {
 		// The cloud device's release runs in the lease's teardown, at once
@@ -1934,11 +1962,12 @@ var cloudLeaseReleaseWait = 30 * time.Second
 
 // endLease ends a lease: the device is detached, and shut down when the
 // hub booted it for the lease.
-func (s *Server) endLease(e *leaseEntry, reason string) {
+func (s *Server) endLease(e *leaseEntry, reason string) error {
 	s.leaseMu.Lock()
 	teardown := s.endLeaseLocked(e, reason)
 	s.leaseMu.Unlock()
 	teardown()
+	return s.queueLeases(false).wait()
 }
 
 // endLeaseLocked removes e with Server.leaseMu held and returns its
@@ -1951,6 +1980,9 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 	pending := e.pending()
 	if !s.leases.remove(e) {
 		return func() {}
+	}
+	if e.durable {
+		s.queueLeases(true)
 	}
 	if pending {
 		return s.endReservationLocked(e, reason)
@@ -2048,7 +2080,7 @@ func (s *Server) handBootOn(e *leaseEntry) bool {
 		return false
 	}
 	logger.Info("lease %s: %s stays booted for lease %s, which shuts it down when it ends", e.id, e.device, next.id)
-	s.saveReservations()
+	s.queueLeases(true)
 	return true
 }
 
@@ -2060,10 +2092,8 @@ func (s *Server) handBootOn(e *leaseEntry) bool {
 // no lease started on it, the device is shut down then.
 func (s *Server) endReservationLocked(e *leaseEntry, reason string) (teardown func()) {
 	logger.Info("lease %s: reservation on %s %s (holder %s)", e.id, e.device, reason, daemon.HolderName(e.holder))
-	// The reservations file is written in the teardown, which the caller
-	// runs after it unlocks Server.leaseMu.
+	// The caller publishes the event after releasing Server.leaseMu.
 	publish := func() {
-		s.saveReservations()
 		s.publishLeaseEnd(e, reason)
 	}
 	if !e.booted || reason == endDeleted {
@@ -2122,7 +2152,7 @@ func (s *Server) stillLeasedAVD(e *leaseEntry) bool {
 // teardown detaches what is left and does not shut the device down again.
 // The request's own work on its lease ends first, so unless other work
 // runs under the lease, the teardown is done before the request answers.
-func (s *Server) endStoppedLease(ctx context.Context, reason string, devices ...string) {
+func (s *Server) endStoppedLease(ctx context.Context, reason string, devices ...string) error {
 	ended := map[*leaseEntry]bool{}
 	end := func(e *leaseEntry) {
 		if e != nil && !ended[e] {
@@ -2152,6 +2182,7 @@ func (s *Server) endStoppedLease(ctx context.Context, reason string, devices ...
 			}
 		}
 	}
+	return s.queueLeases(false).wait()
 }
 
 // sweepLeases ends every lease whose time ran out. The entries are removed
@@ -2186,8 +2217,8 @@ func (s *Server) sweepLeases() {
 	}
 	s.leaseMu.Unlock()
 	// Written after unlocking: file I/O never holds up a lease call.
-	if len(started)+len(missed) > 0 {
-		s.saveReservations()
+	if err := s.queueLeases(len(started)+len(missed) > 0).wait(); err != nil {
+		logger.Warn("persisting lease sweep: %v", err)
 	}
 	for _, e := range missed {
 		logger.Info("lease %s: the window of the reservation on %s passed before it could start", e.id, e.device)
@@ -2259,6 +2290,9 @@ func (s *Server) endAllLeases() {
 	}
 	if !s.teardowns.wait(leaseShutdownWait) {
 		logger.Warn("lease teardowns still run after %v; stopping beside them", leaseShutdownWait)
+	}
+	if err := s.queueLeases(false).wait(); err != nil {
+		logger.Warn("flushing leases at shutdown: %v", err)
 	}
 }
 

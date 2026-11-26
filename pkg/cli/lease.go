@@ -367,6 +367,9 @@ func isCode(err error, code daemon.Code) bool {
 // ---------------------------------------------------------------------------
 // lease / release
 
+var leaseDescriptionFlag = common.StringFlag("description", "What the lease is for (up to 200 characters in listings)", nil,
+	func(o *daemonOpts, v string) { o.lease.description = v })
+
 var leaseFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], common.One(deviceFlag), attachFlags, targetFlags, []dflag{
 	common.StringFlag("kind", "Select a device of this kind: simulator, emulator, device", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Kind = v }),
@@ -388,6 +391,7 @@ var leaseFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], common.
 	common.StringFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
 		func(o *daemonOpts, v string) { o.lease.appiumVersion = v }),
 	ttlFlag("The lease's window: a duration (8h, 90m) or seconds (default the hub's, 8h or the device's maximum); using the lease never extends it"),
+	leaseDescriptionFlag,
 	common.StringFlag("holder", "Who holds the lease, as listings show it (default user@host)", nil,
 		func(o *daemonOpts, v string) { o.lease.holder = v }),
 	{Name: "attach", Kind: common.Bool, Value: "true", Usage: "Attach the device once leased (default true; --no-attach only reserves it)",
@@ -435,7 +439,7 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		return daemon.Errorf(daemon.CodeUsage, "%s is not a hub and has no leases (start one with `maestro-d hub start`)", targetLabel(o))
 	}
 	key := leaseKey(c, o)
-	req := daemon.LeaseRequest{TTLSec: o.lease.ttl, Holder: o.holder()}
+	req := daemon.LeaseRequest{TTLSec: o.lease.ttl, Holder: o.holder(), Description: o.lease.description}
 	if o.Device != "" {
 		id, _, err := lookupDevice(ctx, c, o.Device)
 		if err != nil {
