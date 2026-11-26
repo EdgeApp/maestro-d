@@ -64,8 +64,8 @@ export interface RequestOptions {
   body?: unknown
   accept?: string
   signal?: AbortSignal
-  /** Credential for a single device collection request. */
-  collectionLease?: string
+  /** Explicit credential for this request. Null sends it without a lease. */
+  lease?: string | null
   /** Milliseconds; 0 = none. */
   timeout?: number
   /** Sent as X-Maestro-Request-Id, and kept across retries. */
@@ -218,10 +218,10 @@ export class Transport {
 
   /** Forget a lease the daemon reported expired (409 LEASE_EXPIRED for a request that carried it). */
   private noteLeaseExpired(path: string, lease: string | undefined, res: RawResponse): void {
-    if (!lease || res.status !== 409) return
+    const id = pathDevice(path)
+    if (id === undefined || !lease || res.status !== 409) return
     // A HEAD's answer has no body: its code is in the X-Maestro-Error-Code header.
     if (MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code !== 'LEASE_EXPIRED') return
-    const id = pathDevice(path) as string
     if (this.leases.get(id) === lease) this.leases.delete(id)
     this.onLeaseExpired?.(id, lease)
   }
@@ -250,7 +250,8 @@ export class Transport {
   async raw(path: string, opts: RequestOptions = {}): Promise<RawResponse> {
     const delays = this.retryable(path, opts) ? this.retryDelays : []
     const id = pathDevice(path)
-    let lease = id === undefined ? undefined : this.leases.get(id)
+    const cached = id === undefined ? undefined : this.leases.get(id)
+    let lease = opts.lease === undefined ? cached : opts.lease ?? undefined
     let swapped = false
     for (let attempt = 0; ; attempt++) {
       let res: RawResponse
@@ -271,7 +272,7 @@ export class Transport {
       // client holds another on the device (a lease and the reservation
       // after it, told apart by a clock up to a minute off the hub's): sent
       // once more with that one. The hub refused before running anything.
-      if (!swapped && lease && id !== undefined && res.status === 409 && this.otherLease) {
+      if (opts.lease === undefined && !swapped && lease && id !== undefined && res.status === 409 && this.otherLease) {
         const code = MaestroError.fromResponse(res.status, res.body.toString('utf8'), undefined, codeFromHeaders(res.headers)).code
         const alt = code === 'LEASE_NOT_STARTED' || code === 'LEASE_EXPIRED' ? this.otherLease(id, lease) : undefined
         if (alt && alt !== lease) {
@@ -303,8 +304,8 @@ export class Transport {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     if (opts.requestId) headers[REQUEST_ID_HEADER] = opts.requestId
-    if (opts.collectionLease) headers[LEASE_HEADER] = opts.collectionLease
-    this.leaseHeader(path, headers)
+    if (opts.lease === undefined) this.leaseHeader(path, headers)
+    else if (opts.lease) headers[LEASE_HEADER] = opts.lease
     // On a hub this client names its output files and fetches them back.
     if (this.hub && method === 'POST') headers[CLIENT_OUTPUTS_HEADER] = '1'
 

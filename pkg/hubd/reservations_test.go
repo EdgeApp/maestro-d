@@ -745,7 +745,9 @@ func TestReservations_HubStopHandsNoBootOn(t *testing.T) {
 	end, _ := time.Parse(time.RFC3339, a.ExpiresAt)
 	r := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "SIM-DOWN", StartAt: end.Add(10 * time.Second).UTC().Format(time.RFC3339), TTLSec: 60})
 	env.clock.advance(55 * time.Second) // r is within the grace of now
-	env.s.endAllLeases()
+	if err := env.s.stopLeases(true); err != nil {
+		t.Fatal(err)
+	}
 	if l, err := env.local.Lease(context.Background(), r.ID); err != nil || l.Lease.Booted {
 		t.Fatalf("the reservation took a duty at hub stop: %+v %v", l, err)
 	}
