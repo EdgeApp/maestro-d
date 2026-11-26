@@ -694,6 +694,16 @@ func (se *ScriptEngine) expandStringMap(m map[string]string) map[string]string {
 
 func (se *ScriptEngine) ExpandStep(step flow.Step) {
 	switch s := step.(type) {
+	case *flow.SetStatusBarStep: // maestro-d
+		s.Mode = se.ExpandVariables(s.Mode)
+		s.Time = se.ExpandVariables(s.Time)
+	case *flow.StartSamplerStep: // maestro-d
+		s.Kind = se.ExpandVariables(s.Kind)
+		s.AppID = se.ExpandVariables(s.AppID)
+	case *flow.StopSamplerStep: // maestro-d
+		s.Kind = se.ExpandVariables(s.Kind)
+	case *flow.AssertWithAIStep: // maestro-d
+		s.Assertion = se.ExpandVariables(s.Assertion)
 	case *flow.InputTextStep:
 		s.Text = se.ExpandVariables(s.Text)
 		s.Selector = *se.expandSelector(&s.Selector)

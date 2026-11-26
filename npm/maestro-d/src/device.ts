@@ -18,6 +18,7 @@ import type {
   DeviceMinutes,
   Envelope,
   HierarchyNode,
+  InstallAppResult,
   Lease,
   PlatformInfo,
   Step,
@@ -358,8 +359,37 @@ export class MaestroDevice {
    * Install an app (.apk, .app or .ipa) without attaching. On a hub the
    * file is uploaded first, unless the hub already has it. Resolves to the
    * app id when the daemon can read it.
+   *
+   * With `{ url, headers?, appId }` instead of a file, nothing is uploaded:
+   * the device's own hub downloads the build, following a redirect without
+   * forwarding `Authorization`, and skips the install (`cached: true`) when
+   * it already installed the download with the same ETag. Pass a bearer
+   * key in `headers`, never in the URL.
    */
-  async installApp(file: string, opts: CallOptions & { reinstall?: boolean; platform?: string } = {}): Promise<{ appId?: string }> {
+  async installApp(file: string, opts?: CallOptions & { reinstall?: boolean; platform?: string }): Promise<{ appId?: string }>
+  async installApp(
+    from: { url: string; headers?: Record<string, string>; appId?: string; reinstall?: boolean; platform?: string },
+    opts?: CallOptions,
+  ): Promise<InstallAppResult>
+  async installApp(
+    file: string | { url: string; headers?: Record<string, string>; appId?: string; reinstall?: boolean; platform?: string },
+    opts: CallOptions & { reinstall?: boolean; platform?: string } = {},
+  ): Promise<InstallAppResult> {
+    if (file !== null && typeof file === 'object') {
+      const { url, headers, appId, reinstall, platform } = file
+      if (typeof url !== 'string' || url === '') throw new TypeError('installApp({url}) needs a url')
+      const res = await this.transport.json<Envelope & InstallAppResult>(`${this.base}/apps`, {
+        method: 'POST',
+        body: { url, headers, appId, reinstall: reinstall === true || undefined, platform },
+        signal: this.sig(opts),
+        requestId: this.requestId(),
+      })
+      const out: InstallAppResult = {}
+      if (res.appId !== undefined) out.appId = res.appId
+      if (res.cached !== undefined) out.cached = res.cached
+      if (res.etag !== undefined) out.etag = res.etag
+      return out
+    }
     if (typeof file !== 'string' || file === '') throw new TypeError('installApp() takes a file path')
     let app = path.resolve(opts.cwd ?? process.cwd(), file)
     if (this.transport.hub) app = (await uploadPath(this.transport, this.base, app, this.sig(opts))).ref
@@ -370,6 +400,15 @@ export class MaestroDevice {
       requestId: this.requestId(),
     })
     return res.appId !== undefined ? { appId: res.appId } : {}
+  }
+
+  /**
+   * Whether `setStatusBar` can change this device's status bar: iOS
+   * simulators and Android emulators and phones can; a physical iPhone,
+   * iPad or Apple TV answers UNSUPPORTED.
+   */
+  supportsStatusBar(): boolean {
+    return supportsStatusBar(this.info)
   }
 
   /** Uninstall an app by bundle id or package name. */
@@ -599,6 +638,28 @@ export class MaestroDevice {
     await this.transport.json<Envelope>(this.base, { method: 'DELETE', body: { force: opts.force === true }, signal: this.sig(opts) })
     this.info = { ...this.info, attached: false, state: 'Shutdown' }
   }
+}
+
+/**
+ * Whether `setStatusBar` can change a device's status bar: iOS and tvOS
+ * simulators, and Android emulators and phones. A physical iPhone, iPad or
+ * Apple TV has no status-bar override (the step answers UNSUPPORTED:
+ * `status bar override on a physical iOS device`), and web, macOS and cloud
+ * devices have no status bar maestro-d sets. Rigs ask before calling, and
+ * mask the status bar instead where this is false.
+ */
+export function supportsStatusBar(device: Pick<DeviceInfo, 'platform' | 'kind'> | { info: Pick<DeviceInfo, 'platform' | 'kind'> }): boolean {
+  const info = 'info' in device ? device.info : device
+  const platform = (info.platform ?? '').toLowerCase()
+  const kind = (info.kind ?? '').toLowerCase()
+  switch (platform) {
+    case 'ios':
+    case 'tvos':
+      return kind === 'simulator'
+    case 'android':
+      return kind !== 'cloud'
+  }
+  return false
 }
 
 function checkResult<T extends Envelope>(res: T): T {

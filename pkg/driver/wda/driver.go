@@ -404,6 +404,10 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 
 	// Airplane mode
+	case *flow.SetStatusBarStep: // maestro-d (devicesteps.go)
+		result = d.setStatusBar(s)
+	case *flow.KeyboardVisibleStep: // maestro-d (devicesteps.go)
+		result = d.keyboardVisibleResult()
 	case *flow.SetDarkModeStep:
 		result = d.setDarkMode(s)
 	case *flow.ToggleDarkModeStep:

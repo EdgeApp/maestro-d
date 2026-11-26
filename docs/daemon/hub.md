@@ -202,7 +202,23 @@ steps by bare id does not repeat the lookup for every step.
   is `USAGE`. Follow one device (`?device=`) or one hub (`?scope=local`) to
   resume.
 - `POST /v1/devices` (boot or create) and `GET /v1/catalog` take `hub` in the
-  body or query; the CLI's `device catalog|create|start` take `--hub NAME`.
+  body or query; the CLI's `device catalog|create|start` take `--hub NAME`,
+  for an Android emulator as for an iOS simulator
+  (`device create --platform android --name ci-pixel --hub hub-a` makes and
+  boots an AVD on hub-a's machine and answers `emulator-5554@hub-a`).
+- **What runs on the owner.** Every command runs on the hub the device is
+  plugged into: `setStatusBar`, `keyboardVisible`, the samplers and the AI
+  checks among them, so an AI check's screenshot is taken there and judged
+  with that hub's own `ai` keys ([config.md](config.md#ai)). A hub strips
+  the `ai` keys from an attach it forwards, so a client's keys never reach
+  another hub. An install from a URL (`installApp --url`) is downloaded by
+  the owner too, which caches it by `ETag`.
+- **Device config across the mesh.** A device's `description` and
+  `capabilities` come from the hub it is plugged into and reach every hub's
+  `device list`, `GET /v1/devices/{id}` and lease answers unchanged:
+  `capabilities` byte for byte, never re-encoded or rewritten (a hub
+  qualifies the `id` and `device` fields of an answer, never anything
+  inside `capabilities`).
 - Uploads over 1 MiB, artifacts, screenshots, screen streams and event
   streams travel on a short-lived link of their own, so a large APK never
   delays another device's `tapOn` or the pings. At most 4 transfers run at

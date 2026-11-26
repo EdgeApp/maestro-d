@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/aicheck"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -61,6 +62,9 @@ type SessionConfig struct {
 	// TrafficShaper sends the device's setTrafficShape and resetTrafficShape
 	// calls. Nil answers both steps with UNSUPPORTED.
 	TrafficShaper TrafficShaper
+	// AI runs assertWithAI and assertNoDefectsWithAI with the keys the
+	// daemon chose for this session. Nil runs them with no keys: unsure.
+	AI *aicheck.Checker
 }
 
 // StepOutcome is the result of executing one step through a Session. It is
@@ -213,6 +217,7 @@ func NewSession(ctx context.Context, driver core.Driver, rc RunnerConfig, sc Ses
 		totalFlows:  1,
 		rec:         stepRecording{inReport: true},
 		shaper:      sc.TrafficShaper,
+		ai:          sc.AI,
 	}
 
 	// Prelude — mirrors FlowRunner.Run() up to the first step.
@@ -569,6 +574,7 @@ func (s *Session) Close() {
 	}
 	s.closed = true
 	_ = s.fr.finishRecording()
+	s.fr.stopSamplers() // maestro-d
 	status := report.StatusPassed
 	if s.failed {
 		status = report.StatusFailed

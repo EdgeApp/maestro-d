@@ -24,6 +24,12 @@ type InstallRequest struct {
 	Reinstall bool `json:"reinstall,omitempty"`
 	// Platform overrides the platform inferred from the file and device.
 	Platform string `json:"platform,omitempty"`
+	// URL, in place of App, is a build the device's own daemon downloads
+	// (appurl.go): Headers go with that request only, never to a redirect
+	// target, and AppID, required with it, keys the ETag cache.
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	AppID   string            `json:"appId,omitempty"`
 }
 
 // InstallResult answers an install.
@@ -33,6 +39,11 @@ type InstallResult struct {
 	// AppID is the installed app's bundle id or package name; empty when
 	// it cannot be read (an .apk on a host without aapt2).
 	AppID string `json:"appId,omitempty"`
+	// Cached, for an install from a URL, is true when the build's ETag is
+	// the one last installed on the device, so nothing was downloaded or
+	// installed; ETag is the build's.
+	Cached bool   `json:"cached,omitempty"`
+	ETag   string `json:"etag,omitempty"`
 }
 
 // appPlatform infers the platform an app file is for.
@@ -64,12 +75,36 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, e)
 		return
 	}
-	if req.App == "" {
-		writeError(w, Errorf(CodeUsage, "install: app is required (a blob: ref, or a path for local callers)"))
+	var fetched *fetchedApp
+	switch {
+	case req.URL != "" && req.App != "":
+		writeError(w, Errorf(CodeUsage, "install: give app or url, not both").WithDetails("field", "url"))
+		return
+	case req.URL != "":
+		f, e := s.fetchApp(r.Context(), id, req)
+		if e != nil {
+			if e.Code == CodeForbidden {
+				s.logForbidden(r, e)
+			}
+			writeError(w, e)
+			return
+		}
+		if f.cached {
+			logger.Info("Install of %s on %s skipped: ETag %s is installed", req.AppID, id, f.etag)
+			writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: req.AppID, Cached: true, ETag: f.etag})
+			return
+		}
+		defer os.RemoveAll(f.dir)
+		fetched = f
+		req.App = f.path
+	case req.App == "":
+		writeError(w, Errorf(CodeUsage, "install: app is required (a blob: ref, or a path for local callers), or url"))
 		return
 	}
 	path := req.App
-	if strings.HasPrefix(path, "blob:") {
+	if fetched != nil {
+		// The daemon's own download: neither a blob nor the caller's path.
+	} else if strings.HasPrefix(path, "blob:") {
 		if _, _, err := executor.ParseBlobRef(path); err != nil {
 			e := forbidden("app %s: %v", path, err).WithDetails("field", "app")
 			s.logForbidden(r, e)
@@ -98,6 +133,8 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	if rd := s.remote(id); rd != nil {
 		// A cloud device: the provider installs it (remote.go), before and
 		// instead of the reinstall's uninstall, which it has no use for.
+		// A download from a URL is not cached for it: each session is a
+		// new device.
 		s.handleInstallCloud(w, r, rd, path)
 		return
 	}
@@ -112,8 +149,8 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	if platform == "" {
 		platform = s.devicePlatform(id)
 	}
-	appID := ""
-	if s.deps.AppID != nil {
+	appID := req.AppID
+	if appID == "" && s.deps.AppID != nil {
 		if v, err := s.deps.AppID(path); err == nil {
 			appID = v
 		} else {
@@ -132,8 +169,13 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
+	res := InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID}
+	if fetched != nil {
+		s.noteInstalled(id, req.AppID, fetched.etag)
+		res.ETag = fetched.etag
+	}
 	s.events.Publish(Event{Type: "app.installed", Device: id, Message: appID})
-	writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID})
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {

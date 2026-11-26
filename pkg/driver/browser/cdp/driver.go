@@ -677,10 +677,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = unsupportedResult("clearKeychain is not supported on web platform")
 	case *flow.SetPermissionsStep:
 		result = unsupportedResult("setPermissions is not supported on web platform")
-	case *flow.AssertNoDefectsWithAIStep:
-		result = unsupportedResult("assertNoDefectsWithAI is not supported on web platform")
-	case *flow.AssertWithAIStep:
-		result = unsupportedResult("assertWithAI is not supported on web platform")
+	// assertWithAI and assertNoDefectsWithAI never reach a driver: the
+	// executor runs them on the driver's screenshot (maestro-d, aicheck.go).
 	case *flow.ExtractTextWithAIStep:
 		result = unsupportedResult("extractTextWithAI is not supported on web platform")
 
