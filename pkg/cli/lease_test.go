@@ -326,3 +326,24 @@ func TestLeaseFile_ConcurrentProcesses(t *testing.T) {
 		t.Fatalf("records kept: %d of 120", got)
 	}
 }
+
+func TestMockDeviceMetadata(t *testing.T) {
+	t.Setenv(envMockDevices, "mock-1,mock-2")
+	t.Setenv("MAESTRO_D_MOCK_DEVICE_PROPS", `{"mock-1":{"name":"Tablet","platform":"ios","kind":"simulator","model":"iPad16,3","osVersion":"26.3","id":"impostor"},"private":{"platform":"ios"}}`)
+	devices := mockDevices()
+	d := devices[0]
+	if len(devices) != 2 || d.ID != "mock-1" || d.Platform != "ios" || d.Model != "iPad16,3" || d.Name != "Tablet" || d.Kind != "simulator" || d.OSVersion != "26.3" {
+		t.Fatal(devices)
+	}
+	if plain := daemonListDevices("mock"); len(plain) != 1 || plain[0].ID != "mock-2" {
+		t.Fatal(plain)
+	}
+	cfg := attachToRunConfig("mock-1", daemon.AttachConfig{Platform: "ios"})
+	if cfg.Platform != "mock" || isMockDevice("impostor") || isMockDevice("private") {
+		t.Fatal(cfg)
+	}
+	t.Setenv("MAESTRO_D_MOCK_DEVICE_PROPS", "{malformed")
+	if m := mockDevices(); len(m) != 2 || m[0].Platform != "mock" || m[0].Name != "mock-1" {
+		t.Fatal(m)
+	}
+}
