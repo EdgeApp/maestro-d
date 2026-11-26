@@ -93,7 +93,12 @@ func (r *Registry) Live(platform string) []DeviceInfo {
 // tagged with bootedBy/attached from the records; records for devices that
 // vanished are dropped.
 func (r *Registry) List(platform string) []DeviceInfo {
-	live := r.Live(platform)
+	return r.ListDiscovered(platform, r.Live(platform))
+}
+
+// ListDiscovered applies the current registry records to a discovery result.
+// The dashboard can reflect a lease or attachment while the next scan runs.
+func (r *Registry) ListDiscovered(platform string, live []DeviceInfo) []DeviceInfo {
 	created := loadCreated()
 	r.mu.Lock()
 	defer r.mu.Unlock()
