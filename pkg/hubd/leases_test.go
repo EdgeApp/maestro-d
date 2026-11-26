@@ -1742,7 +1742,7 @@ func TestLeases_GrantNeverDropsAnUnendedLease(t *testing.T) {
 				}
 				return before.Add(6 * time.Second)
 			}
-			_, e := env.s.leaseDevice(daemon.DeviceInfo{ID: "mock-1"}, "bob", 0, claimNone)
+			_, e := env.s.leaseDevice(false, daemon.DeviceInfo{ID: "mock-1"}, "bob", 0, claimNone)
 			if e == nil || e.Code != daemon.CodeDeviceInUse {
 				t.Fatalf("leased a device an unended lease holds: %v", e)
 			}
