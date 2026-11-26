@@ -307,7 +307,7 @@ func TestCloudLease_StopUnderTheLease(t *testing.T) {
 func TestCloudLease_BindRunsUnderTheLeaseLock(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
 	var held, published bool
-	e, le := env.s.leaseDevice(daemon.DeviceInfo{ID: "mock-1"}, "bob", 0, claimNone, func(e *leaseEntry) {
+	e, le := env.s.leaseDevice(false, daemon.DeviceInfo{ID: "mock-1"}, "bob", 0, claimNone, func(e *leaseEntry) {
 		if env.s.leaseMu.TryLock() {
 			env.s.leaseMu.Unlock()
 		} else {

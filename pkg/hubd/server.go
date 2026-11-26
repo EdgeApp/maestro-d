@@ -22,17 +22,22 @@ type Server struct {
 	teardowns      pending
 	cloudLaunching int
 
-	config    *configCache
-	shareMu   sync.Mutex
-	sharedIDs map[string]bool
-	shareSeen map[string]shareAnswer
-	shareGen  int
+	configEdits   sync.Mutex              // serializes socket mutations, including publication
+	removing      map[string]bool         // protected by leaseMu; includes verified aliases
+	removedLeases map[string]removedLease // protected by leaseMu
+	config        *configCache
+	shareMu       sync.Mutex
+	sharedIDs     map[string]bool
+	shareSeen     map[string]shareAnswer
+	shareGen      int
 }
 
 func (s *Server) Bind(host *daemon.Server, cfg daemon.Config, deps daemon.Deps) {
 	s.Server, s.cfg, s.deps = host, cfg, deps
-	s.config = newConfigCache(daemon.DeviceConfigPath(cfg.DeviceConfig), s.configChanged)
+	s.config = newConfigCache(daemon.DeviceConfigPath(cfg.DeviceConfig), s.forgetShares, s.configChanged)
 	s.leases = newLeaseTable()
+	s.removing = make(map[string]bool)
+	s.removedLeases = make(map[string]removedLease)
 	s.sharedIDs = make(map[string]bool)
 	s.shareSeen = make(map[string]shareAnswer)
 }
@@ -52,6 +57,9 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/config/devices", s.localConfig(s.getConfigDevices))
+	mux.HandleFunc("PUT /v1/config/devices/{id}", s.localConfig(s.putConfigDevice))
+	mux.HandleFunc("DELETE /v1/config/devices/{id}", s.localConfig(s.deleteConfigDevice))
 	mux.HandleFunc("POST /v1/leases", s.Idempotent(s.handleAcquireLease))
 	mux.HandleFunc("POST /v1/reservations", s.Idempotent(s.handleReserve))
 	mux.HandleFunc("GET /v1/leases", s.handleListLeases)

@@ -132,7 +132,7 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 		{"config.json TV", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t, "TV-1")}, false, true},
 		{"names alone do not share", daemon.Config{Hub: &Server{}, DeviceConfig: daemontest.DeviceConfig(t, "Lab Pixel", "Lab TV")}, false, false},
 	} {
-		s := &Server{config: newConfigCache(daemon.DeviceConfigPath(c.cfg.DeviceConfig), nil)}
+		s := &Server{config: newConfigCache(daemon.DeviceConfigPath(c.cfg.DeviceConfig), nil, nil)}
 		if got := s.sharedInfo(phone); got != c.phone {
 			t.Errorf("%s: phone shared %v", c.name, got)
 		}
@@ -140,7 +140,7 @@ func TestSharedInfo_ExplicitOnly(t *testing.T) {
 			t.Errorf("%s: TV shared %v", c.name, got)
 		}
 	}
-	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "a", "t", "c"), nil)}
+	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "a", "t", "c"), nil, nil)}
 	if got := s.shareList(); got != "config.json a, t, c" {
 		t.Errorf("shareList = %q", got)
 	}
@@ -182,7 +182,7 @@ func TestLeases_ShareConfigShares(t *testing.T) {
 // an android boot or create by its bare name. An entry is an id: a device's name
 // shares nothing.
 func TestSharedInfo_ConfigAVDEntry(t *testing.T) {
-	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "avd:ci-pixel", "Lab Pixel"), nil)}
+	s := &Server{config: newConfigCache(daemontest.DeviceConfig(t, "avd:ci-pixel", "Lab Pixel"), nil, nil)}
 	for _, c := range []struct {
 		d    daemon.DeviceInfo
 		want bool
