@@ -52,6 +52,7 @@ type Client struct {
 	// besides failed ("" for none): a request refused LEASE_NOT_STARTED or
 	// LEASE_EXPIRED under failed is sent once more with it.
 	OtherLease func(device, failed string) string
+	reattach   func(context.Context, string, string) (string, error)
 	// OnLeaseExpired is told when the daemon answers LEASE_EXPIRED to a
 	// request that carried this client's lease for device; the lease is
 	// forgotten first. hint is the daemon's details.hint, the way to a new
@@ -140,6 +141,21 @@ func (c *Client) LeaseOf(device string) string {
 	c.leaseMu.Lock()
 	defer c.leaseMu.Unlock()
 	return c.leases[device]
+}
+
+// SetReattach installs the recovery for one targeted CLI invocation.
+func (c *Client) SetReattach(f func(context.Context, string, string) (string, error)) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	c.reattach = f
+}
+
+func (c *Client) takeReattach() func(context.Context, string, string) (string, error) {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	f := c.reattach
+	c.reattach = nil
+	return f
 }
 
 // ClearLease stops sending a lease for device.
@@ -351,6 +367,35 @@ func (c *Client) do(req *http.Request) (*http.Response, *Error) {
 				err = rerr
 			}
 		} else if err == nil {
+			if req.Header.Get(HeaderLease) != "" && resp.Header.Get(HeaderErrorCode) == string(CodeDeviceNotAttached) && (req.Body == nil || req.GetBody != nil) {
+				if recover := c.takeReattach(); recover != nil {
+					resp.Body.Close()
+					id, err := recover(req.Context(), pathDevice(req.URL.EscapedPath()), req.Header.Get(HeaderLease))
+					if err != nil {
+						var de *Error
+						if errors.As(err, &de) {
+							return nil, de
+						}
+						return nil, WrapErr(CodeInternal, err)
+					}
+					next := req.Clone(req.Context())
+					parts := strings.SplitN(strings.TrimPrefix(req.URL.EscapedPath(), "/v1/devices/"), "/", 2)
+					parts[0] = url.PathEscape(id)
+					next.URL.RawPath = "/v1/devices/" + strings.Join(parts, "/")
+					next.URL.Path, _ = url.PathUnescape(next.URL.RawPath)
+					if req.GetBody != nil {
+						next.Body, err = req.GetBody()
+						if err != nil {
+							return nil, WrapErr(CodeInternal, err)
+						}
+					}
+					if next.Header.Get(HeaderRequestID) != "" {
+						next.Header.Set(HeaderRequestID, uuid.New().String())
+					}
+					req = next
+					continue
+				}
+			}
 			// Refused under a lease that has not started or has ended, while
 			// the client holds another on the device (a lease and the
 			// reservation after it, told apart by a clock up to a minute off
@@ -516,8 +561,17 @@ func (c *Client) Ping(timeout time.Duration) error {
 // Shutdown asks the daemon to stop. The daemon detaches its devices, shuts
 // down the ones it booted and exits.
 func (c *Client) Shutdown(ctx context.Context) error {
+	return c.ShutdownHub(ctx, false)
+}
+
+// ShutdownHub optionally ends the active leases before stopping the hub.
+func (c *Client) ShutdownHub(ctx context.Context, endLeases bool) error {
+	path := "/v1/shutdown"
+	if endLeases {
+		path += "?endLeases=true"
+	}
 	var out Envelope
-	if e := c.call(ctx, http.MethodPost, "/v1/shutdown", nil, &out); e != nil {
+	if e := c.call(ctx, http.MethodPost, path, nil, &out); e != nil {
 		return e
 	}
 	return nil

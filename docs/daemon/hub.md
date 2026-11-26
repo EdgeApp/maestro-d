@@ -94,10 +94,22 @@ arguments with tokens redacted.
 `--peer` has had its answer, or after 10 s. If every `--peer` refused it and
 mDNS found no other hub, it exits with the refusal's code (below).
 
-`hub stop` shuts the hub down cleanly: its leases in progress end (reservations stay; see below), its devices are
-detached, and they leave every peer's listing as soon as the links close.
+### Leases across a restart
 
-### Reservations across a restart
+`maestro-d-hub stop` preserves active local-device leases and future
+reservations. The hub interrupts running commands, detaches drivers and
+closes its peer links. A device booted for a live lease stays running.
+Use `maestro-d-hub stop --end-leases` to end active leases and shut down
+devices they booted. Future reservations survive either form.
+
+A holder who reconnects during the original window keeps the same ID and
+expiry. The hub marks the grant `awaitingAttach` until the next successful
+attach. A leased JavaScript device and a targeted one-shot CLI command can
+repeat the attach with their saved options and then retry the command once.
+The CLI prints `re-attached <device> (the hub restarted)` on stderr. It
+re-uploads a local app file if needed, so keep that file accessible at its
+original path. A restored Android emulator follows the verified AVD even
+when Android assigns a different serial.
 
 The hub saves active leases and future reservations in
 `<home>/hub/leases.json` (mode 0600). It acknowledges a change after the
