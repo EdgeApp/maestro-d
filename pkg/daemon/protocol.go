@@ -450,15 +450,16 @@ type DeviceInfo struct {
 	ID string `json:"id"`
 	// Hub and LocalID, on a hub, split ID: the hub that owns the device
 	// and the device's id on that hub's machine.
-	Hub       string `json:"hub,omitempty"`
-	LocalID   string `json:"localId,omitempty"`
-	Platform  string `json:"platform"`       // android | ios | web | mock
-	Kind      string `json:"kind,omitempty"` // device | emulator | simulator | tv
-	Name      string `json:"name,omitempty"`
-	Model     string `json:"model,omitempty"` // hardware: "Pixel 8" (ro.product.model), "iPhone14,2"
-	OSVersion string `json:"osVersion,omitempty"`
-	State     string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
-	Ready     bool   `json:"ready"`
+	Hub        string `json:"hub,omitempty"`
+	LocalID    string `json:"localId,omitempty"`
+	Platform   string `json:"platform"`       // android | ios | web | mock
+	Kind       string `json:"kind,omitempty"` // device | emulator | simulator | tv
+	Name       string `json:"name,omitempty"`
+	Model      string `json:"model,omitempty"`      // hardware: "Pixel 8" (ro.product.model), "iPhone14,2"
+	DeviceType string `json:"deviceType,omitempty"` // configured virtual hardware profile
+	OSVersion  string `json:"osVersion,omitempty"`
+	State      string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
+	Ready      bool   `json:"ready"`
 	// BootedBy is "daemon" for devices this daemon booted, "external" for
 	// everything else.
 	BootedBy string `json:"bootedBy,omitempty"`
@@ -715,6 +716,7 @@ type Info struct {
 	Version    string   `json:"version"`
 	SocketPath string   `json:"socketPath"`
 	HTTPAddr   string   `json:"httpAddr,omitempty"`
+	WebAddr    string   `json:"webAddr,omitempty"`
 	StartedAt  string   `json:"startedAt"`
 	StartArgs  []string `json:"startArgs,omitempty"`
 	RunDir     string   `json:"runDir"`

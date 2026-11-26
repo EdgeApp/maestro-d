@@ -41,6 +41,7 @@ func avdEntries(entries []DeviceEntry, includeShutdown bool) []DeviceEntry {
 		}
 		if name := bySerial[e.ID]; name != "" {
 			e.Name = name
+			e.DeviceType = avdDeviceType(name)
 			running[name] = true
 		}
 	}
@@ -52,12 +53,22 @@ func avdEntries(entries []DeviceEntry, includeShutdown bool) []DeviceEntry {
 			continue
 		}
 		entries = append(entries, DeviceEntry{
-			Platform: "android",
-			Kind:     "emulator",
-			ID:       daemon.AVDPrefix + name,
-			Name:     name,
-			State:    "Shutdown",
+			Platform:   "android",
+			Kind:       "emulator",
+			ID:         daemon.AVDPrefix + name,
+			Name:       name,
+			DeviceType: avdDeviceType(name),
+			State:      "Shutdown",
 		})
 	}
 	return entries
+}
+
+// avdDeviceType distinguishes the configured hardware profile from both the
+// user's AVD name and the generic model returned by the emulator's adb.
+func avdDeviceType(name string) string {
+	if !emulator.ValidAVDName(name) {
+		return ""
+	}
+	return readAVDValue(emulator.AVDConfigPath(name), "hw.device.name")
 }
