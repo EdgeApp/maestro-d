@@ -108,7 +108,7 @@ func TestConfigDeviceFieldsAndWindows(t *testing.T) {
 	if len(env.s.leases.list()) != 0 || len(list().Devices) != 1 {
 		t.Fatal("forced removal kept a grant or config row")
 	}
-	if bytes.Contains(configFileBytes(t, ReservationsPath(env.s.cfg.Name)), []byte("Grace")) {
+	if f, err := readLeases(LeasesPath(env.s.cfg.Name)); err != nil || len(f.Leases) != 0 {
 		t.Fatal("forced removal left a persisted reservation")
 	}
 	n := 0
@@ -280,7 +280,10 @@ func TestConfigRemoveDuringActivation(t *testing.T) {
 func TestConfigRemoveRetryAfterStateWriteFailure(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
 	env.lease(env.remote, daemon.LeaseRequest{Device: "mock-1", Holder: "Ada"})
-	path := ReservationsPath(env.s.cfg.Name)
+	path := LeasesPath(env.s.cfg.Name)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(path, 0700); err != nil {
 		t.Fatal(err)
 	}
