@@ -16,7 +16,7 @@ import (
 
 // DeviceFields describes an edit. An omitted description keeps its old value.
 type DeviceFields struct {
-	Description *string
+	Description *string `json:"description,omitempty"`
 }
 
 // UpsertDevice updates a listed device in place or appends a new one.
