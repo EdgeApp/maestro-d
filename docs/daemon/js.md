@@ -136,6 +136,13 @@ hub unchanged once `maestro-d lease --device <id>` has run in the same home.
 process took (a shell's lease from `leases.json` stays); against a daemon
 that is not a hub, `release()` does nothing.
 
+`md.shutdown()` asks the hub to stop and keeps this client’s lease records.
+Use its local Unix socket for shutdown. A TCP refusal leaves the connection
+and its leased devices usable. After restart, a leased device can re-attach
+with its original options and retry a command once. Keep any local app
+file available at the path used for attach. Emulator handles resolve their
+grant by ID before addressing the device, including after a serial change.
+
 **Reservations.** `md.reserve({device | select, startAt, ttlSec, holder, description})`
 reserves a device for a window that starts later
 ([`POST /v1/reservations`](rest.md#post-v1reservations)) and resolves with
