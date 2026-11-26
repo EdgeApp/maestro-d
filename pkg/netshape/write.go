@@ -22,12 +22,18 @@ type DeviceFields struct {
 
 // UpsertDevice updates a listed device in place or appends a new one.
 func UpsertDevice(path, id string, fields DeviceFields) (Device, error) {
-	return editDevice(path, id, &fields)
+	return editDevice(path, id, &fields, nil)
 }
 
 // RemoveDevice removes one entry. A missing device returns os.ErrNotExist.
 func RemoveDevice(path, id string) error {
-	_, err := editDevice(path, id, nil)
+	return RemoveDevices(path, id, nil)
+}
+
+// RemoveDevices removes id and its verified aliases in one locked file update.
+// The requested id must itself be present.
+func RemoveDevices(path, id string, aliases []string) error {
+	_, err := editDevice(path, id, nil, aliases)
 	return err
 }
 
@@ -39,7 +45,7 @@ type editableDevice struct {
 	TrafficShaping json.RawMessage `json:"trafficShaping,omitempty"`
 }
 
-func editDevice(path, id string, fields *DeviceFields) (Device, error) {
+func editDevice(path, id string, fields *DeviceFields, aliases []string) (Device, error) {
 	id = strings.TrimSpace(id)
 	if !utf8.ValidString(id) {
 		return Device{}, errors.New("device id must be valid UTF-8")
@@ -82,7 +88,10 @@ func editDevice(path, id string, fields *DeviceFields) (Device, error) {
 		if index < 0 {
 			return Device{}, fmt.Errorf("device %q: %w", id, os.ErrNotExist)
 		}
-		file.Devices = slices.Delete(file.Devices, index, index+1)
+		file.Devices = slices.DeleteFunc(file.Devices, func(d editableDevice) bool {
+			key := strings.TrimSpace(d.ID)
+			return key == id || slices.Contains(aliases, key)
+		})
 	case index < 0:
 		index = len(file.Devices)
 		file.Devices = append(file.Devices, editableDevice{ID: id})
