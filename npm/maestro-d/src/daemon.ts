@@ -106,6 +106,8 @@ export interface LeaseOptions {
   ttlSec?: number
   /** Who holds the lease, as listings show it (default user@host). */
   holder?: string
+  /** What the window is for, up to 200 characters in listings. */
+  description?: string
   /**
    * How to attach the leased device (default `{}`: attach it with the hub's
    * defaults). `false` only reserves it.
@@ -129,6 +131,8 @@ export interface ReserveOptions {
   ttlSec?: number
   /** Who holds it, as listings show it (default user@host). */
   holder?: string
+  /** What the window is for, up to 200 characters in listings. */
+  description?: string
   signal?: AbortSignal
 }
 
@@ -311,7 +315,7 @@ export class MaestroD {
       throw MaestroError.of('USAGE', `daemon ${this.name} is not a hub and has no leases (start one with \`maestro-d hub start\`)`)
     }
     const signal = this.sig(opts.signal)
-    const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
+    const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder(), description: opts.description }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
     if (opts.cloud) body.cloud = opts.cloud
@@ -371,7 +375,7 @@ export class MaestroD {
     }
     const signal = this.sig(opts.signal)
     const startAt = opts.startAt instanceof Date ? rfc3339(opts.startAt) : opts.startAt
-    const body: Record<string, unknown> = { startAt, ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
+    const body: Record<string, unknown> = { startAt, ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder(), description: opts.description }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
     body.clientTime = rfc3339(new Date())

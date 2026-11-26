@@ -1,10 +1,7 @@
 package hubd
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -16,11 +13,11 @@ import (
 // OfflineConfig is used only while the caller owns the home's hub.lock.
 // Discovery is fresh: a cached serial can identify yesterday's emulator.
 type OfflineConfig struct {
-	path         string
-	config       *netshape.Config
-	devices      []daemon.DeviceInfo
-	reservations []reservationRecord
-	now          time.Time
+	path    string
+	config  *netshape.Config
+	devices []daemon.DeviceInfo
+	state   leaseFile
+	now     time.Time
 }
 
 func OpenOfflineConfig(path string, deps daemon.Deps) (*OfflineConfig, error) {
@@ -29,21 +26,14 @@ func OpenOfflineConfig(path string, deps daemon.Deps) (*OfflineConfig, error) {
 		return nil, daemon.WrapErr(daemon.CodeUsage, err)
 	}
 	f := &OfflineConfig{path: path, config: cfg, now: time.Now()}
-	data, err := os.ReadFile(ReservationsPath("hub"))
-	if !errors.Is(err, os.ErrNotExist) {
-		var state reservationFile
-		if err == nil {
-			err = json.Unmarshal(data, &state)
+	f.state, err = readLeases(LeasesPath("hub"))
+	if err != nil {
+		return nil, daemon.WrapErr(daemon.CodeUsage, err)
+	}
+	for _, r := range f.state.Leases {
+		if _, err := time.Parse(time.RFC3339, r.ExpiresAt); err != nil {
+			return nil, daemon.Errorf(daemon.CodeUsage, "lease %s: %v", r.ID, err)
 		}
-		if err != nil {
-			return nil, daemon.Errorf(daemon.CodeUsage, "read %s: %v", ReservationsPath("hub"), err)
-		}
-		for _, r := range state.Reservations {
-			if _, err := time.Parse(time.RFC3339, r.ExpiresAt); err != nil {
-				return nil, daemon.Errorf(daemon.CodeUsage, "reservation %s: %v", r.ID, err)
-			}
-		}
-		f.reservations = state.Reservations
 	}
 	if deps.ListDevices != nil {
 		f.devices = deps.ListDevices("")
@@ -51,7 +41,7 @@ func OpenOfflineConfig(path string, deps daemon.Deps) (*OfflineConfig, error) {
 	return f, nil
 }
 
-func (f *OfflineConfig) unfinished(r reservationRecord) bool {
+func (f *OfflineConfig) unfinished(r leaseRecord) bool {
 	end, _ := time.Parse(time.RFC3339, r.ExpiresAt)
 	return f.now.Before(end)
 }
@@ -59,9 +49,14 @@ func (f *OfflineConfig) unfinished(r reservationRecord) bool {
 func (f *OfflineConfig) row(id string, entry netshape.Device) daemon.HubConfigDevice {
 	d, listed := listedConfigDevice(id, f.devices)
 	row := configDeviceRow(id, entry, listed)
-	for _, r := range f.reservations {
+	for _, r := range f.state.Leases {
 		if f.unfinished(r) && (r.Device == id || r.Device == d.ID) {
-			row.Reservations = append(row.Reservations, daemon.DeviceLease{Holder: r.Holder, StartsAt: r.StartsAt, ExpiresAt: r.ExpiresAt})
+			window := daemon.DeviceLease{Holder: r.Holder, Description: r.Description, StartsAt: r.StartsAt, ExpiresAt: r.ExpiresAt}
+			if r.State == daemon.LeaseActive {
+				row.Lease = &window
+			} else {
+				row.Reservations = append(row.Reservations, window)
+			}
 		}
 	}
 	return row
@@ -93,7 +88,7 @@ func (f *OfflineConfig) serialAVD(serial string) string {
 		return ""
 	}
 	var key string
-	for _, r := range f.reservations {
+	for _, r := range f.state.Leases {
 		if r.Device == serial && r.AVD != "" && f.unfinished(r) {
 			if key != "" && key != r.AVD {
 				return ""
@@ -114,7 +109,7 @@ func (f *OfflineConfig) removalAliases(id string) ([]string, error) {
 		return aliases, nil
 	}
 	candidates := slices.Clone(f.config.Shared)
-	for _, r := range f.reservations {
+	for _, r := range f.state.Leases {
 		if f.unfinished(r) {
 			candidates = append(candidates, r.Device)
 			if name, ok := strings.CutPrefix(r.AVD, "android:"); ok {
@@ -162,8 +157,8 @@ func (f *OfflineConfig) Remove(id string, endLeases bool) error {
 		targetAVD = f.serialAVD(id)
 	}
 	var windows []string
-	keep := make([]reservationRecord, 0, len(f.reservations))
-	for _, r := range f.reservations {
+	keep := make([]leaseRecord, 0, len(f.state.Leases))
+	for _, r := range f.state.Leases {
 		matches := slices.Contains(aliases, r.Device)
 		if r.AVD != "" && targetAVD != "" {
 			matches = r.AVD == targetAVD
@@ -178,9 +173,12 @@ func (f *OfflineConfig) Remove(id string, endLeases bool) error {
 		if !endLeases {
 			return daemon.Errorf(daemon.CodeDeviceInUse, "device %s is in use by %s", id, strings.Join(windows, ", "))
 		}
-		if err := writeReservations(ReservationsPath("hub"), keep); err != nil {
+		next := f.state
+		next.Leases = keep
+		if err := writeLeases(LeasesPath("hub"), next); err != nil {
 			return daemon.WrapErr(daemon.CodeInternal, err)
 		}
+		f.state = next
 	}
 	if err := netshape.RemoveDevices(f.path, id, aliases); err != nil {
 		return daemon.WrapErr(daemon.CodeInternal, err)
