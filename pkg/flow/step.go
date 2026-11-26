@@ -115,6 +115,12 @@ const (
 	StepSetTrafficShape   StepType = "setTrafficShape"
 	StepResetTrafficShape StepType = "resetTrafficShape"
 
+	// maestro-d: the status bar, the keyboard and the samplers (device_steps.go)
+	StepSetStatusBar    StepType = "setStatusBar"
+	StepKeyboardVisible StepType = "keyboardVisible"
+	StepStartSampler    StepType = "startSampler"
+	StepStopSampler     StepType = "stopSampler"
+
 	// maestro-d: the computer device's mouse (desktop_steps.go)
 	StepMoveMouse StepType = "moveMouse"
 	StepClickOn   StepType = "clickOn"
@@ -491,13 +497,23 @@ func (s *AssertConditionStep) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // AssertNoDefectsWithAIStep uses AI to check for visual defects.
+//
+// maestro-d: the executor runs it for every driver (pkg/aicheck), with the
+// built-in assertion that the screen shows no visual defect.
 type AssertNoDefectsWithAIStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep  `yaml:",inline"`
+	AIOptions `yaml:",inline"`
 }
 
 // AssertWithAIStep uses AI to verify an assertion.
+//
+// maestro-d: the executor runs it for every driver (pkg/aicheck): Jev, then
+// Claude Haiku, Sonnet and Opus, until one answers with confidence. Every
+// verdict (pass, fail, unsure) is a successful step with the result in its
+// data.
 type AssertWithAIStep struct {
 	BaseStep  `yaml:",inline"`
+	AIOptions `yaml:",inline"`
 	Assertion string `yaml:"assertion"`
 }
 
@@ -985,7 +1001,7 @@ type RemoveMediaStep struct {
 // screen lock state; UNLOCK does not bypass a passcode.
 type PressKeyStep struct {
 	BaseStep `yaml:",inline"`
-	Key      string `yaml:"key"`
+	Key      string `yaml:"key"` // The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device
 }
 
 // WaitForAnimationToEndStep waits for animations.

@@ -78,11 +78,13 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"assertNoDefectsWithAI": {Name: "assertNoDefectsWithAI", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Uses AI to check for visual defects.", Fields: []FieldSpec{
+	"assertNoDefectsWithAI": {Name: "assertNoDefectsWithAI", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "budgetUsd", Type: "float64", Doc: "The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall)."},
+		{Key: "thresholds", Type: "*AIThresholds", Doc: "Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there."},
 	}},
 	"assertNoJSErrors": {Name: "assertNoJSErrors", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Asserts that no console errors or uncaught exceptions occurred.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
@@ -198,11 +200,13 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 		{Key: "count", Type: "string", Doc: "Count asserts that the selector matches exactly N visible elements (Maestro #1363). A string so flows can write `count: ${N}`; empty means the ordinary at-least-one assertion."},
 	}},
-	"assertWithAI": {Name: "assertWithAI", Scalar: "assertion", BareField: "assertion", ValueLess: false, Compound: false, FreeForm: false, Doc: "Uses AI to verify an assertion.", Fields: []FieldSpec{
+	"assertWithAI": {Name: "assertWithAI", Scalar: "assertion", BareField: "assertion", ValueLess: false, Compound: false, FreeForm: false, Doc: "Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "budgetUsd", Type: "float64", Doc: "The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall)."},
+		{Key: "thresholds", Type: "*AIThresholds", Doc: "Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there."},
 		{Key: "assertion", Type: "string", Doc: ""},
 	}},
 	"back": {Name: "back", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Presses back.", Fields: []FieldSpec{
@@ -522,6 +526,12 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "delay", Type: "int", Doc: "Delay between repeats (ms)"},
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 	}},
+	"keyboardVisible": {Name: "keyboardVisible", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Reports whether the software keyboard is on screen, as data {visible}, on Android (uiautomator2 and devicelab drivers) and iOS (WebDriverAgent).", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+	}},
 	"killApp": {Name: "killApp", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Kills an app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -652,7 +662,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "key", Type: "string", Doc: ""},
+		{Key: "key", Type: "string", Doc: "The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device"},
 	}},
 	"removeMedia": {Name: "removeMedia", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Clears media added by addMedia (Android: MediaStore index).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
@@ -839,6 +849,15 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "appId", Type: "string", Doc: ""},
 		{Key: "permissions", Type: "map[string]string", Doc: ""},
 	}},
+	"setStatusBar": {Name: "setStatusBar", Scalar: "mode", BareField: "mode", ValueLess: false, Compound: false, FreeForm: false, Doc: "Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "mode", Type: "string", Doc: "demo or live"},
+		{Key: "time", Type: "string", Doc: "The clock demo mode shows, H:MM (default 9:41)"},
+		{Key: "battery", Type: "*int", Doc: "The battery level demo mode shows, 0–100 (default 100)"},
+	}},
 	"setTrafficShape": {Name: "setTrafficShape", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -857,6 +876,15 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "path", Type: "string", Doc: ""},
 	}},
+	"startSampler": {Name: "startSampler", Scalar: "kind", BareField: "kind", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "kind", Type: "string", Doc: "cpu, memory or frames"},
+		{Key: "appId", Type: "string", Doc: "The app to sample (default: the session's app)"},
+		{Key: "intervalMs", Type: "int", Doc: "Time between samples in milliseconds (default 1000, at least 100)"},
+	}},
 	"stopApp": {Name: "stopApp", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops an app.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
@@ -870,6 +898,13 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "path", Type: "string", Doc: ""},
+	}},
+	"stopSampler": {Name: "stopSampler", Scalar: "kind", BareField: "kind", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform.", Fields: []FieldSpec{
+		{Key: "optional", Type: "bool", Doc: ""},
+		{Key: "label", Type: "string", Doc: ""},
+		{Key: "timeout", Type: "int", Doc: ""},
+		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
+		{Key: "kind", Type: "string", Doc: "cpu, memory or frames"},
 	}},
 	"swipe": {Name: "swipe", Scalar: "direction", BareField: "direction", ValueLess: false, Compound: false, FreeForm: false, Doc: "", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

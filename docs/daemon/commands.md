@@ -16,13 +16,13 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`assertCondition`](#assertcondition) | — | Asserts a condition. Uses a custom UnmarshalYAML because both BaseStep and Condition have a "timeout" yaml tag — Condition.Timeout is the semantically correct one here (controls how long to wait for visible/notVisible condition checks). |
 | [`assertDarkMode`](#assertdarkmode) | _none_ | Asserts the system UI is currently in dark appearance. |
 | [`assertLightMode`](#assertlightmode) | _none_ | Asserts the system UI is currently in light appearance. |
-| [`assertNoDefectsWithAI`](#assertnodefectswithai) | — | Uses AI to check for visual defects. |
+| [`assertNoDefectsWithAI`](#assertnodefectswithai) | — | assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result. |
 | [`assertNoJSErrors`](#assertnojserrors) | _none_ | Asserts that no console errors or uncaught exceptions occurred. |
 | [`assertNotVisible`](#assertnotvisible) | `text` | Asserts element is not visible. |
 | [`assertScreenshot`](#assertscreenshot) | `path` | Compares a screenshot with a reference image. |
 | [`assertTrue`](#asserttrue) | `condition` | Asserts a script condition is true (alias for assertCondition). |
 | [`assertVisible`](#assertvisible) | `text` | Asserts element is visible. |
-| [`assertWithAI`](#assertwithai) | `assertion` | Uses AI to verify an assertion. |
+| [`assertWithAI`](#assertwithai) | `assertion` | Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data. |
 | [`back`](#back) | _none_ | Presses back. |
 | [`blockNetwork`](#blocknetwork) | — | Blocks network requests matching URL patterns. |
 | [`clearConsoleLogs`](#clearconsolelogs) | _none_ | Clears captured browser console logs. |
@@ -52,6 +52,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`inputRandomPersonName`](#inputrandompersonname) | _none_ | Generates random input. |
 | [`inputRandomText`](#inputrandomtext) | _none_ | Generates random input. |
 | [`inputText`](#inputtext) | `text` | Inputs text. |
+| [`keyboardVisible`](#keyboardvisible) | _none_ | Reports whether the software keyboard is on screen, as data {visible}, on Android (uiautomator2 and devicelab drivers) and iOS (WebDriverAgent). |
 | [`killApp`](#killapp) | `appId` | Kills an app. |
 | [`launchApp`](#launchapp) | `appId` | Launches an app. |
 | [`loadAuthState`](#loadauthstate) | `path` | Loads cookies + localStorage + sessionStorage from a JSON file. |
@@ -86,10 +87,13 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`setNetworkConditions`](#setnetworkconditions) | — | Simulates network throttling or offline mode. |
 | [`setOrientation`](#setorientation) | `orientation` | Sets device orientation. |
 | [`setPermissions`](#setpermissions) | — | Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all |
+| [`setStatusBar`](#setstatusbar) | `mode` | Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead. |
 | [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. |
 | [`startRecording`](#startrecording) | `path` | Starts recording. |
+| [`startSampler`](#startsampler) | `kind` | Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED. |
 | [`stopApp`](#stopapp) | `appId` | Stops an app. |
 | [`stopRecording`](#stoprecording) | `path` | Stops recording. |
+| [`stopSampler`](#stopsampler) | `kind` | Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform. |
 | [`swipe`](#swipe) | `direction` |  |
 | [`switchTab`](#switchtab) | `tabLabel` | Switches to another browser tab. |
 | [`takeScreenshot`](#takescreenshot) | `path` | Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro's takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot). |
@@ -197,7 +201,7 @@ await m.assertLightMode()
 
 ## `assertNoDefectsWithAI`
 
-Uses AI to check for visual defects.
+assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result.
 
 ```sh
 maestro-d assertNoDefectsWithAI --key value […]
@@ -212,6 +216,8 @@ await m.assertNoDefectsWithAI({ … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `budgetUsd` | `number` | The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall). |
+| `thresholds` | `AIThresholds` | Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there. |
 
 ## `assertNoJSErrors`
 
@@ -397,7 +403,7 @@ await m.assertVisible({ text: '<text>', … })
 
 ## `assertWithAI`
 
-Uses AI to verify an assertion.
+Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data.
 
 ```sh
 maestro-d assertWithAI <assertion>
@@ -414,6 +420,8 @@ await m.assertWithAI({ assertion: '<assertion>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `budgetUsd` | `number` | The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall). |
+| `thresholds` | `AIThresholds` | Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there. |
 | `assertion` | `string` |  |
 
 ## `back`
@@ -1103,6 +1111,24 @@ await m.inputText({ text: '<text>', … })
 | `delay` | `number` | Delay between repeats (ms) |
 | `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
 
+## `keyboardVisible`
+
+Reports whether the software keyboard is on screen, as data {visible}, on Android (uiautomator2 and devicelab drivers) and iOS (WebDriverAgent).
+
+```sh
+maestro-d keyboardVisible
+```
+```js
+await m.keyboardVisible()
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+
 ## `killApp`
 
 Kills an app.
@@ -1395,7 +1421,7 @@ await m.pressKey({ key: '<key>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `key` | `string` |  |
+| `key` | `string` | The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device |
 
 ## `removeMedia`
 
@@ -1876,6 +1902,29 @@ await m.setPermissions({ … })
 | `appId` | `string` |  |
 | `permissions` | `Record<string, string>` |  |
 
+## `setStatusBar`
+
+Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead.
+
+```sh
+maestro-d setStatusBar <mode>
+maestro-d setStatusBar --mode <mode> [--key value …]
+```
+```js
+await m.setStatusBar('<mode>')
+await m.setStatusBar({ mode: '<mode>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `mode` | `string` | demo or live |
+| `time` | `string` | The clock demo mode shows, H:MM (default 9:41) |
+| `battery` | `number` | The battery level demo mode shows, 0–100 (default 100) |
+
 ## `setTrafficShape`
 
 Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.
@@ -1920,6 +1969,29 @@ await m.startRecording({ path: '<path>', … })
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `path` | `string` |  |
 
+## `startSampler`
+
+Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED.
+
+```sh
+maestro-d startSampler <kind>
+maestro-d startSampler --kind <kind> [--key value …]
+```
+```js
+await m.startSampler('<kind>')
+await m.startSampler({ kind: '<kind>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `kind` | `string` | cpu, memory or frames |
+| `appId` | `string` | The app to sample (default: the session's app) |
+| `intervalMs` | `number` | Time between samples in milliseconds (default 1000, at least 100) |
+
 ## `stopApp`
 
 Stops an app.
@@ -1961,6 +2033,27 @@ await m.stopRecording({ path: '<path>', … })
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `path` | `string` |  |
+
+## `stopSampler`
+
+Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform.
+
+```sh
+maestro-d stopSampler <kind>
+maestro-d stopSampler --kind <kind> [--key value …]
+```
+```js
+await m.stopSampler('<kind>')
+await m.stopSampler({ kind: '<kind>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `kind` | `string` | cpu, memory or frames |
 
 ## `swipe`
 

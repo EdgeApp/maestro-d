@@ -56,6 +56,8 @@ func (d *Driver) executeStep(step flow.Step) *core.CommandResult {
 		return d.handleTakeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 	case *flow.PressKeyStep:
 		return d.handlePressKey(s)
+	case *flow.SetStatusBarStep: // maestro-d (devicesteps.go)
+		return d.setStatusBar(s)
 	case *flow.WaitForAnimationToEndStep:
 		return d.handleWaitForAnimation(s)
 	case *flow.EraseTextStep:

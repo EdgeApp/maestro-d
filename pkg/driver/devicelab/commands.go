@@ -2392,6 +2392,8 @@ func mapKeyCode(key string) int {
 		return uiautomator2.KeyCodeDpadRight
 	case "dpad_center":
 		return uiautomator2.KeyCodeDpadCenter
+	case "escape", "esc": // maestro-d
+		return uiautomator2.KeyCodeEscape
 	default:
 		return 0
 	}

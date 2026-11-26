@@ -21,7 +21,18 @@ maestro-d assertVisible Welcome --timeout 10000
 maestro-d back                            # value-less commands take nothing
 maestro-d launchApp co.edgesecure.app --clearState
 maestro-d setLocation --latitude 37.77 --longitude -122.41
+maestro-d setStatusBar demo --time 9:41 --battery 100   # live puts it back; UNSUPPORTED on a physical iPhone or iPad
+maestro-d keyboardVisible --json | jq .data.visible
+maestro-d startSampler memory --appId com.example.app --intervalMs 500
+maestro-d stopSampler memory --json | jq .data.mean
+maestro-d assertWithAI "A sign-in form with an email field is on screen" --json | jq .data.verdict
+maestro-d assertWithAI --assertion "…" --thresholds.jevPass 1.0 --budgetUsd 0.25
+maestro-d assertNoDefectsWithAI --json
 ```
+
+`assertWithAI` and `assertNoDefectsWithAI` exit 0 for every verdict
+(`pass`, `fail` or `unsure`): read `data.verdict` from `--json`
+([the AI checks](rest.md#ai-checks)).
 
 Rules:
 
@@ -308,7 +319,7 @@ maestro-d stop --all
 | `device list` (`ls`) `[--location local,mesh,cloud] [--provider P] [--kind K] [--name RE] [--os-min V] [--os-max V] [--available]` | connected devices, simulators (booted or not), running emulators under their AVD names, shut-down AVDs as `avd:<name>`, cloud devices, and on macOS the Mac itself as `mac` (the [computer device](../macos.md)), with attach state and a `LOCATION` column: `local`, `mesh (<machine>)` or `cloud (<provider>@<hub>)` relative to this computer (a `PROVIDER` column appears when a row is in the cloud); on a hub also a `LEASE` column: the holder and the time left, or `available`; with `--json` each entry also carries `location`, `machine`, and on a hub `maxSec` and `addresses`. The flags filter the list: `--name` is a case-insensitive regular expression on the name and id, `--os-min`/`--os-max` bound the OS version (`--os-max 17` admits 17.5), `--available` keeps devices a lease could take now. See [Cloud devices](cloud.md) |
 | `device catalog [--platform ios\|android] [--available] [--hub NAME] [--location cloud] [--provider P] [--name RE] [--os-min V] [--os-max V]` | what `device create` can use: iOS runtimes and device types (simctl), Android system images (sdkmanager; `--available` adds downloadable ones) and hardware profiles (avdmanager). With `--location cloud`, the models a cloud provider can launch instead, one row each (PROVIDER, HUB, ID, PLATFORM, NAME, OS, FORM, AVAILABILITY), filtered by the other flags (`--available`: only models available now) and answered in a mesh by the hub that would launch them |
 | `device create --platform ios --name N [--type T] [--runtime R] [--no-boot] [--hub NAME]` | create a simulator; defaults are the newest installed runtime and the newest iPhone it supports |
-| `device create --platform android --name N [--image I] [--profile P] [--data-size S] [--install-image --accept-licenses] [--no-boot]` | create an AVD; defaults are the newest installed `google_apis` image for the host's ABI, `pixel_8` and a 6G data partition (at most 10G) |
+| `device create --platform android --name N [--image I] [--profile P] [--data-size S] [--install-image --accept-licenses] [--no-boot] [--hub NAME]` | create an AVD; defaults are the newest installed `google_apis` image for the host's ABI, `pixel_8` and a 6G data partition (at most 10G). With `--hub`, on that hub's machine, as for a simulator |
 | `device start NAME [--platform ios\|android] [--boot-timeout N] [--hub NAME]` | boot a simulator (name or UDID) or emulator (AVD name or `avd:<name>`); recorded as daemon-owned. Without `--platform`, `avd:` means android and a listed name or UDID picks its platform |
 | `device create --provider devicefarm --platform android\|ios [--name MODEL] [--os-version V \| --os-min V --os-max V] [--app FILE\|ARN] [--auxiliary-app …]… [--app-id ID] [--appium-version 2\|3] [--caps FILE] [--idle-release DUR] [--boot-timeout S]` | launch a real phone on AWS Device Farm with this daemon's own AWS credentials (direct mode); `--name` is the model (exact name, catalog id or regular expression), `--idle-release` (Go duration or seconds, default 10m, 60s–150m) releases it after that long without a request. Not on a hub: lease one (`lease --location cloud`). See [Cloud devices](cloud.md) |
 | `device stop [ID] [--force] [--orphans [--devicefarm-credentials-file F \| --devicefarm-profile P]]` | shut a device down (detaching first); only daemon-booted ones without `--force`; a cloud device is released and the minutes it used printed. `--orphans` cleans up after dead daemons: it shuts down the simulators and emulators they booted and releases the cloud sessions the cloud ledger holds for them, with this shell's AWS credentials or the file or profile given; each session it releases is printed with its minutes, and one it cannot release is listed with its ARN, kept, and the command exits non-zero |
@@ -330,7 +341,13 @@ Attach flags map one to one onto maestro-runner's `test` flags:
 `--condition-timeout`, `--step-delay`, `--typing-frequency`,
 `--command-timeout`, `--new-command-timeout`, `--alert-monitor[=false]`,
 `--headed`, `--browser`, `--window-size`, `--user-data-dir`,
-`--android-tcp-forward`.
+`--android-tcp-forward`; and one of maestro-d's own, `--ai-keys-file FILE`:
+a JSON file `{"jevKey": "…", "anthropicKey": "…"}` (either may be left
+out), readable by its owner only (`chmod 600`; `USAGE` otherwise), whose
+keys the session's `assertWithAI` and `assertNoDefectsWithAI` spend when
+the daemon's own config.json has no `ai` block ([config.md](config.md#ai)).
+The keys go in the attach body, never on a command line, and are never
+printed.
 
 `device create` records what it makes in `<home>/created.json`
 (`$MAESTRO_D_HOME`, else `~/.maestro-d`), shared by every daemon of that
@@ -384,6 +401,7 @@ maestro-d eval 'maestro.copiedText'
 | command | |
 | --- | --- |
 | `install FILE [--reinstall] [--platform P]` | install an `.apk`, `.app` or `.ipa` on `--device` without attaching, and print its app id when it can be read (an `.apk`'s needs `aapt2`); with `--target-hub` the file is uploaded first, unless the daemon has it. On a cloud device the app is installed into the running session, which keeps its id (`.apk` or `.ipa`) |
+| `installApp --url URL --app-id ID [--headers-file FILE] [--reinstall] [--platform P]` | install a build the device's own daemon downloads from `URL` (`POST /v1/devices/{id}/apps` with `url`): on a hub, the hub the device is plugged into fetches it. `--headers-file` is a JSON object of request headers (`{"Authorization": "Bearer …"}`), readable by its owner only, so a key is never on a command line; the headers go to `URL` only, never to a redirect's target. Prints `Installed ID on DEVICE`, or `ID already installed on DEVICE (cached)` when the server's `ETag` matches the build installed last (`--reinstall` installs anyway); `--json` prints `{device, appId, cached, etag}` |
 | `uninstall APP_ID` | remove an app by bundle id or package name; a cloud device refuses it (`USAGE`) |
 | `pack PATH… [--json]` | print each file's upload unit: sha256, size and `blob:` ref. A directory (an iOS `.app`) is zipped with sorted entries and fixed timestamps, so it always hashes the same |
 | `pack --flow FILE… [--base DIR] [-e K=V] [--include GLOB] [--json]` | pack flow files (the first is the root) with their dependency closure into one bundle: `runFlow` files and `else`, `retry` files, the `onFlowStart`/`onFlowComplete` hooks, `runScript` `.js` files, `addMedia`, existing `assertScreenshot` references, the other file inputs, and the root flow's `config.yaml`. `${VAR}` in a path is expanded from `-e`; an unresolvable or absolute path, or an output path with `..`, is `USAGE` naming the step. Prints the manifest `{root, files: {relPath: sha256}}`, relative to the files' common directory, and its sha256. `--base DIR` places the first file as if it sat in `DIR` (the JS library's inline steps) |
@@ -391,6 +409,8 @@ maestro-d eval 'maestro.copiedText'
 ```sh
 maestro-d install drivers/android/settings_apk-debug.apk --device emulator-5554
 maestro-d install build/My.app --device "$UDID" --target-hub=192.168.64.1
+maestro-d installApp --url https://builds.example/api/v2/builds/42/download \
+  --headers-file ~/.config/builds/headers.json --app-id com.example.app --device R5CT1234567@hub-b
 maestro-d uninstall io.appium.settings --device emulator-5554
 maestro-d pack --flow e2e/testdata/hub/main.yaml --json
 maestro-d get artifacts --device "$UDID" --target-hub=192.168.64.1 -o artifacts/

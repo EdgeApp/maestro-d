@@ -747,3 +747,19 @@ func TestRouter_ViewerWithoutToken(t *testing.T) {
 		}
 	}
 }
+
+// A device entry's capabilities pass through the rewrite as written, even
+// where they look like ids; elsewhere the same shapes are qualified.
+func TestQualifyJSON_CapabilitiesUntouched(t *testing.T) {
+	in := `{"devices":[{"id":"d1","platform":"ios","ready":true,"capabilities":{"z":1,"a":{"id":"x","platform":"p","ready":true,"device":"y"},"n":1e400}}],` +
+		`"other":{"capabilities":{"device":"q"}},"attached":["d3",7],"s":"plain","b":true}`
+	got := string(qualifyJSON([]byte(in), "h", false))
+	want := `{"attached":["d3@h",7],"b":true,"devices":[{"capabilities":{"z":1,"a":{"id":"x","platform":"p","ready":true,"device":"y"},"n":1e400},` +
+		`"hub":"h","id":"d1@h","localId":"d1","platform":"ios","ready":true}],"other":{"capabilities":{"device":"q@h"}},"s":"plain"}`
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	if got := string(qualifyJSON([]byte(` "x" `), "h", false)); got != `"x"` {
+		t.Fatalf("scalar: %s", got)
+	}
+}

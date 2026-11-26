@@ -84,8 +84,11 @@ type Call struct {
 // are network.json's; config.json is read through hubDevice.
 type Device struct {
 	Description string `json:"-"`
-	Set         *Call  `json:"setTrafficShape,omitempty"`
-	Reset       *Call  `json:"resetTrafficShape,omitempty"`
+	// Capabilities is config.json's capabilities for the device: any JSON
+	// value, kept as written. maestro-d gives it no meaning.
+	Capabilities json.RawMessage `json:"-"`
+	Set          *Call           `json:"setTrafficShape,omitempty"`
+	Reset        *Call           `json:"resetTrafficShape,omitempty"`
 }
 
 // Shapeable reports whether the entry configures both of the device's
@@ -98,6 +101,9 @@ type Config struct {
 	// Shared lists config.json's hub devices, in file order: the devices a
 	// hub shares. network.json has none.
 	Shared []string `json:"-"`
+	// AI is config.json's ai block, nil without one (network.json has
+	// none).
+	AI *AI `json:"-"`
 }
 
 // Source is where a daemon reads its device config. Config (--config) is
@@ -191,6 +197,9 @@ func load(path string, parse func([]byte) (*Config, error)) (*Config, error) {
 		}
 		return nil, &ConfigError{Path: path, Err: err}
 	}
+	if cfg.AI != nil {
+		cfg.AI.resolve(filepath.Dir(path))
+	}
 	return cfg, nil
 }
 
@@ -213,8 +222,9 @@ func decode(data []byte, v any) error {
 
 // hubDevice is one entry of config.json's hubDevices.
 type hubDevice struct {
-	ID             string `json:"id"`
-	Description    string `json:"description,omitempty"`
+	ID             string          `json:"id"`
+	Description    string          `json:"description,omitempty"`
+	Capabilities   json.RawMessage `json:"capabilities,omitempty"`
 	TrafficShaping *struct {
 		Set   *Call `json:"setTrafficShape"`
 		Reset *Call `json:"resetTrafficShape"`
@@ -222,17 +232,24 @@ type hubDevice struct {
 }
 
 // ParseConfig decodes and validates a config.json: {"hubDevices": [{"id",
-// "description", "trafficShaping": {"setTrafficShape", "resetTrafficShape"}}]}.
-// Each id must be given once; description and trafficShaping are optional,
+// "description", "capabilities", "trafficShaping": {"setTrafficShape",
+// "resetTrafficShape"}}]}. Each id must be given once; description,
+// capabilities (any JSON value, a null one as if absent) and trafficShaping are optional,
 // and trafficShaping needs both calls.
 func ParseConfig(data []byte) (*Config, error) {
 	var file struct {
 		HubDevices []hubDevice `json:"hubDevices"`
+		AI         *AI         `json:"ai"`
 	}
 	if err := decode(data, &file); err != nil {
 		return nil, err
 	}
-	cfg := &Config{Devices: map[string]Device{}}
+	if file.AI != nil {
+		if err := file.AI.validate(); err != nil {
+			return nil, fmt.Errorf("ai: %w", err)
+		}
+	}
+	cfg := &Config{Devices: map[string]Device{}, AI: file.AI}
 	for i, e := range file.HubDevices {
 		id := strings.TrimSpace(e.ID)
 		if id == "" {
@@ -242,6 +259,9 @@ func ParseConfig(data []byte) (*Config, error) {
 			return nil, &ConfigError{Device: id, Err: errors.New("is listed twice in hubDevices")}
 		}
 		d := Device{Description: strings.TrimSpace(e.Description)}
+		if c := bytes.TrimSpace(e.Capabilities); len(c) > 0 && !bytes.Equal(c, []byte("null")) {
+			d.Capabilities = c
+		}
 		if t := e.TrafficShaping; t != nil {
 			d.Set, d.Reset = t.Set, t.Reset
 			if err := validateCalls(d); err != nil {

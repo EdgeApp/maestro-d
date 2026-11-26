@@ -181,6 +181,7 @@ const (
 	KeyCodeDpadLeft   = 21
 	KeyCodeDpadRight  = 22
 	KeyCodeDpadCenter = 23
+	KeyCodeEscape     = 111 // maestro-d
 )
 
 // Locator strategies.

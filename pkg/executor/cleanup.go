@@ -53,6 +53,7 @@ func (s *Session) Cleanup(ctx context.Context) {
 	// the cleanup undoes before the session closes.
 	s.ending = true
 	fr := s.fr
+	fr.stopSamplers() // maestro-d: nothing reads a sampler after this
 	if !fr.undo.airplane && !(fr.undo.shaped && fr.shaper != nil) {
 		return // nothing to undo: the common case, with no driver call
 	}

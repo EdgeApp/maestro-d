@@ -83,7 +83,8 @@ func modulePath(path string) (string, error) {
 // counted reports whether a repository path is measured.
 func counted(path string) bool {
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") &&
-		filepath.Base(path) != "commands_gen.go" && !strings.HasPrefix(path, "pkg/hub/hubtest/")
+		filepath.Base(path) != "commands_gen.go" && !strings.HasPrefix(path, "pkg/hub/hubtest/") &&
+		!strings.HasPrefix(path, "pkg/aicheck/aichecktest/")
 }
 
 var hunkRe = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
