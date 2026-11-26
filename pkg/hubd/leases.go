@@ -98,6 +98,7 @@ const (
 	endAttachFailed = "attach failed"
 	endStopped      = "ended (device stopped)"
 	endDeleted      = "ended (device deleted)"
+	endRemoved      = "ended (device removed)"
 	endHubStopped   = "ended (hub stopped)"
 	// endCloudReleased: the lease's cloud device was released by its idle
 	// timeout or the provider's session cap.
@@ -509,11 +510,14 @@ func (t *leaseTable) hasDue() bool {
 // whose earlier lease has ended (the sweeper ends expired leases first),
 // and drops one whose whole window passed before it could start (a hub
 // that was down). The caller holds Server.leaseMu.
-func (t *leaseTable) startDue() (started, missed []*leaseEntry) {
+func (t *leaseTable) startDue(removing map[string]bool) (started, missed []*leaseEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	for device, list := range t.scheduled {
+		if removing[device] {
+			continue
+		}
 		for len(list) > 0 && !list[0].starts.After(now) {
 			e := list[0]
 			if !now.Before(e.expires) {
@@ -1031,7 +1035,11 @@ func (s *Server) Gate(mode daemon.LeaseMode, h http.HandlerFunc) http.HandlerFun
 			// idle release, the session cap) answers a request under that
 			// lease LEASE_EXPIRED, so clients forget the lease. A device
 			// that still exists but is not shared stays not found.
-			if header := r.Header.Get(daemon.HeaderLease); mode != daemon.LeaseOpen && header != "" && !s.leases.isLive(header) && !s.known(id) {
+			if header := r.Header.Get(daemon.HeaderLease); header != "" && s.removedLeaseMatches(id, header) {
+				daemon.WriteError(w, daemon.Errorf(daemon.CodeLeaseExpired, "lease %s on %s %s", header, id, endRemoved).WithDetails("lease", header))
+				return
+			}
+			if header := r.Header.Get(daemon.HeaderLease); mode != daemon.LeaseOpen && header != "" && len(s.deps.Providers) > 0 && cloudIDPattern.MatchString(id) && !s.leases.isLive(header) && !s.known(id) {
 				daemon.WriteError(w, s.goneLeaseErr(header, id))
 				return
 			}
@@ -1371,7 +1379,7 @@ func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
 			daemon.WriteError(w, daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", req.Device))
 			return
 		}
-		entry, e = s.leaseDevice(d, holder, req.TTLSec, claimNone)
+		entry, e = s.leaseDevice(daemon.CallerFrom(r.Context()).Remote, d, holder, req.TTLSec, claimNone)
 	} else {
 		entry, e = s.leaseSelect(r, *req.Select, req.Cloud, holder, req.TTLSec)
 	}
@@ -1484,14 +1492,14 @@ const (
 // emulator's serial) is DEVICE_NOT_FOUND.
 // bind, when given, runs on the granted entry before leaseMu is released,
 // so nothing that ends the lease sees it half set up.
-func (s *Server) leaseDevice(d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim, bind ...func(*leaseEntry)) (*leaseEntry, *daemon.Error) {
+func (s *Server) leaseDevice(remote bool, d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim, bind ...func(*leaseEntry)) (*leaseEntry, *daemon.Error) {
 	device := d.ID
 	for range 3 {
 		s.leaseMu.Lock()
 		old := s.leases.expiredOn(device)
 		if old == nil {
 			defer s.leaseMu.Unlock()
-			e, le := s.leaseDeviceLocked(d, holder, ttlSec, claim)
+			e, le := s.leaseDeviceLocked(remote, d, holder, ttlSec, claim)
 			if le == nil {
 				for _, f := range bind {
 					f(e)
@@ -1521,7 +1529,10 @@ func (s *Server) leaseDevice(d daemon.DeviceInfo, holder string, ttlSec int, cla
 // background and the device is DEVICE_IN_USE until its teardown is done.
 // d is the device as the caller listed it: nothing here runs discovery,
 // which would hold leaseMu, and every other lease call, for seconds.
-func (s *Server) leaseDeviceLocked(d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim) (*leaseEntry, *daemon.Error) {
+func (s *Server) leaseDeviceLocked(remote bool, d daemon.DeviceInfo, holder string, ttlSec int, claim bootClaim) (*leaseEntry, *daemon.Error) {
+	if e := s.admitConfigDevice(remote, d); e != nil {
+		return nil, e
+	}
 	device := d.ID
 	maxTTL := s.leaseMaxInfo(d)
 	window, we := leaseWindow(device, ttlSec, maxTTL)
@@ -1654,7 +1665,7 @@ func (s *Server) leaseSelect(r *http.Request, sel daemon.LeaseSelector, cloud *c
 		if !d.Available || reserved {
 			continue
 		}
-		e, le := s.leaseDeviceLocked(d, holder, ttlSec, claimNone)
+		e, le := s.leaseDeviceLocked(daemon.CallerFrom(r.Context()).Remote, d, holder, ttlSec, claimNone)
 		if le == nil {
 			s.leaseMu.Unlock()
 			return e, nil
@@ -1756,7 +1767,7 @@ func (s *Server) leaseSelect(r *http.Request, sel daemon.LeaseSelector, cloud *c
 	} else {
 		logger.Info("lease: %s was started meanwhile by someone else; its lease will not shut it down", info.ID)
 	}
-	e, le := s.leaseDevice(info, holder, ttlSec, claim)
+	e, le := s.leaseDevice(daemon.CallerFrom(r.Context()).Remote, info, holder, ttlSec, claim)
 	if le != nil {
 		s.disownBoot(info)
 		return nil, le
@@ -1880,7 +1891,9 @@ func (s *Server) handleRenewLease(w http.ResponseWriter, r *http.Request) {
 	if done, ce := s.CloudBusy(le.device); ce == nil {
 		defer done()
 	}
+	s.leaseMu.Lock()
 	l, e := s.leases.renew(id, req.TTLSec)
+	s.leaseMu.Unlock()
 	if e != nil {
 		daemon.WriteError(w, e)
 		return
@@ -1973,7 +1986,7 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 			// The lease launched the device: it goes with the lease.
 			e.cloudMinutes = e.releaseCloud()
 			close(e.cloudDone)
-			s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
+			s.publishLeaseEnd(e, reason)
 			return
 		}
 		switch {
@@ -1994,7 +2007,7 @@ func (s *Server) endLeaseLocked(e *leaseEntry, reason string) (teardown func()) 
 				s.Events().Publish(daemon.Event{Type: "device.stopped", Device: e.device, Message: "lease " + reason})
 			}
 		}
-		s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
+		s.publishLeaseEnd(e, reason)
 	}
 	return func() {
 		if before != nil {
@@ -2052,7 +2065,7 @@ func (s *Server) endReservationLocked(e *leaseEntry, reason string) (teardown fu
 	// runs after it unlocks Server.leaseMu.
 	publish := func() {
 		s.saveReservations()
-		s.Events().Publish(daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)})
+		s.publishLeaseEnd(e, reason)
 	}
 	if !e.booted || reason == endDeleted {
 		return publish
@@ -2149,6 +2162,7 @@ func (s *Server) endStoppedLease(ctx context.Context, reason string, devices ...
 // until its teardown is done).
 func (s *Server) sweepLeases() {
 	s.leaseMu.Lock()
+	s.pruneRemovedLeases()
 	var teardowns []func()
 	for _, e := range s.leases.expired() {
 		teardowns = append(teardowns, s.endLeaseLocked(e, endExpired))
@@ -2156,7 +2170,7 @@ func (s *Server) sweepLeases() {
 	// Then the reservations whose start has come, now that the leases
 	// before them have ended: their teardowns may still run, and dev()
 	// holds the new lease's requests until they are done.
-	started, missed := s.leases.startDue()
+	started, missed := s.leases.startDue(s.removing)
 	// A missed reservation that held the shutdown of a device an earlier
 	// lease booted passes it on, as a cancel does: to a lease that has
 	// started (one may have in this very sweep) or one starting soon, else

@@ -104,6 +104,28 @@ func TestE2E_HubLiveShare(t *testing.T) {
 	if err != nil || strings.Count(string(data), "still sharing [mock-2]") != 1 {
 		t.Fatalf("invalid config warnings: %s %v", data, err)
 	}
+	local := hubConfigSocket(t, start.Daemon.SocketPath)
+	configError := func() string {
+		t.Helper()
+		raw := configRequest(t, local, "http://unix", "GET", "/v1/config/devices", "", "", 200, "")
+		var result struct {
+			ConfigError string `json:"configError"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.ConfigError
+	}
+	if configError() == "" {
+		t.Fatal("invalid edit missing from the admin listing")
+	}
+	write(`{"hubDevices":[{"id":"mock-2","description":"New lab phone"}]}`)
+	for configError() != "" {
+		if ctx.Err() != nil {
+			t.Fatal("admin listing still reported an error after the repair")
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 	st, err := public.Status(ctx)
 	if err != nil || st.Daemon.PID != start.Daemon.PID {
 		t.Fatalf("pid changed: %+v %v", st, err)
