@@ -99,18 +99,22 @@ detached, and they leave every peer's listing as soon as the links close.
 
 ### Reservations across a restart
 
-A hub keeps its reservations that have not started in
-`<home>/hub/scheduled-leases.json` (`<home>/hub/daemons/<daemon>/scheduled-leases.json`
-for a daemon other than `hub`, beside its `secrets/`), mode 0600, written
-through a temp file and a rename after every reservation, cancel, start and
-device delete that ends one. When the hub starts it reads them back under
-their own lease ids: one whose window is over is dropped (`lease.expired`
-is not published for it), one whose start passed while the hub was down
-starts at once and still ends at its own `expiresAt`, and the rest wait for
-their start. A reservation whose device is not listed now is kept. Leases
-that had started are not kept: `hub stop`, or a crash, ends them with their
-device sessions. A file that does not parse is moved to
-`scheduled-leases.json.bad` and the hub starts without it.
+The hub saves active leases and future reservations in
+`<home>/hub/leases.json` (mode 0600). It acknowledges a change after the
+new file is on disk. The first start with an old `scheduled-leases.json`
+imports its reservations and renames it to `scheduled-leases.json.migrated`.
+A file that cannot be parsed is moved to a sibling with the suffix `.bad`.
+
+After a crash the hub reads each window under its original lease ID. An
+expired window is dropped. A reservation that started while the hub was
+down becomes active and keeps its original expiry. Future reservations
+keep their place even when the device is temporarily absent. Cloud sessions
+belong to the running hub process and are excluded from this file.
+
+Both `lease` and `reserve` accept `--description TEXT`. The description
+appears alongside the holder in the device listing and follows the grant
+when a reservation starts. The hub removes control characters and surrounding
+space, then keeps up to 200 Unicode characters.
 
 `hub status [--target-hub…] [--json]` (REST `GET /v1/hub`) prints the hub's
 name, version and listener, and for each peer its address, link state

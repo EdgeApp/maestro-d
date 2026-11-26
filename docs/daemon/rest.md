@@ -352,8 +352,8 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `bootedBy`, `bootedAt` | the daemon that booted it (it will shut it down at exit) |
 | `owner` | another daemon has it attached — attaching here fails with `DEVICE_IN_USE` |
 | `createdBy` | `"maestro-d"` when `POST /v1/devices` with `create` made it (recorded in `<home>/created.json`) |
-| `lease` | hub only: `{holder, expiresAt}` while the device is leased |
-| `reservations` | hub only: the device's [reservations](#post-v1reservations) that have not started, by start: `[{holder, startsAt, expiresAt}]`, never their lease ids |
+| `lease` | hub only: `{holder, description?, startsAt, expiresAt}` while the device is leased |
+| `reservations` | hub only: the device's [reservations](#post-v1reservations) that have not started, by start: `[{holder, description?, startsAt, expiresAt}]`, never their lease ids |
 | `description` | Free text the device's host gives it in its [config.json](config.md); omitted when it has none |
 | `capabilities` | The JSON value the device's host gives it in its [config.json](config.md) (`hubDevices[].capabilities`), byte for byte as written, through every hub of the mesh and in lease answers too; maestro-d gives it no meaning. Omitted when it has none |
 | `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) ([network](network.md)); omitted otherwise |
@@ -818,6 +818,7 @@ curl -s -H "$H" -X POST $D/v1/leases -d '{"select":{"platform":"ios","kind":"sim
 | `select` | or the first free device that matches `{platform, kind, name, osVersion, hub, boot}`: platform and kind exactly, `name` the device's name (any case) or id, `osVersion` the version or a prefix (`"26"` matches `26.5`), `hub` this hub's name. A TV (`kind: "tv"`) matches only a selector that asks for `kind: "tv"` or names it. Free means ready and neither leased nor attached; with `boot: true` a shut-down simulator or AVD is a candidate too, after the ready ones, and the hub boots it for the lease (`booted: true`) and shuts it down when the lease ends |
 | `ttlSec` | the window: default 28800 (8 hours), or the device's maximum when that is shorter; over the maximum is `USAGE` naming it. A selector skips a candidate whose maximum is shorter, and answers that `USAGE` when none is left |
 | `holder` | who holds it, as listings show; default the caller's address |
+| `description` | optional purpose shown with the lease or reservation. The hub strips control characters, trims surrounding whitespace, and keeps up to 200 Unicode characters |
 | `attach` | an attach body ([`POST …/attach`](#post-v1devicesidattach)); the device is attached in the same call, and a failed attach ends the lease. Without it the device is only reserved |
 | `select.location`, `select.provider`, `select.osVersionMin`, `select.osVersionMax`, `cloud` | `osVersionMin`/`osVersionMax` bound the OS of any device, as `GET /v1/devices` filters do. `provider` and `cloud` apply only with `"location": "cloud"` (otherwise `USAGE`), which launches a cloud device for the lease instead: `platform` (required), `name` (the model: exact name, catalog id or regexp), `osVersion` (the version or a prefix, as above) or the range, and `provider` (default `devicefarm`) pick it; `cloud` takes `idleReleaseSec`, `appiumVersion`, `caps`, `appId` and `bootTimeoutSec`, but no app (install it under the lease). In a mesh it goes to the hub `select.hub` names, else the hub you ask when it has the provider, else the first linked hub by name that has it, and that hub's answer is final. The hub holds at most `--cloud-max-devices` (`BUSY` beyond), the window is at most 9000 s, and the device belongs to the lease: it is listed `available: false`, the lease's end releases it (`device.released`, `lease-end`), and its idle release or the session cap ends the lease (`lease.expired`, then `LEASE_EXPIRED`) |
 
@@ -839,7 +840,11 @@ naming the selector; one whose matches are all taken is `DEVICE_IN_USE`
 listing them in `details.candidates`. Through a mesh, when no hub grants
 and the only other answers came from hubs that are unreachable or stopping,
 it is `PEER_UNAVAILABLE` naming them in `details.hubs` (retry). The request takes an
-`X-Maestro-Request-Id`, so a retried request is granted once. With
+`X-Maestro-Request-Id`, so a retried request is granted once. The hub saves successful local-device
+acquisitions and their original replies together. During the replay window,
+a retry can recover that reply after a restart, renewal, or release. A mesh
+selector with an unresolved peer grant returns retryable `PEER_UNAVAILABLE`
+until the entry hub can check the same owner. With
 `attach`, the attach runs under the lease: if the window ends first, the
 answer is `LEASE_EXPIRED` at once, the attach is cancelled (or its driver
 discarded when it returns) and the device is left detached; it is
@@ -863,6 +868,7 @@ curl -s -H "$H" -X POST $D/v1/reservations \
 | `clientTime` | required, RFC 3339: the caller's clock when it sent the request. More than 60 s from the hub's clock is `USAGE` with `details.reason: "clock-skew"`, `clientTime`, `hubTime` and `skewSec` |
 | `ttlSec` | the window's length, as for `POST /v1/leases`: default 28800 or the device's maximum, over it `USAGE` |
 | `holder` | who holds it, as listings show; default the caller's address |
+| `description` | optional purpose shown with the lease or reservation. The hub strips control characters, trims surrounding whitespace, and keeps up to 200 Unicode characters |
 
 The body is strict: any other field (`attach`, `cloud`, a typo) is `USAGE`
 naming it in `details.field`. A window that overlaps another lease on the

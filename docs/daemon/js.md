@@ -117,7 +117,7 @@ with a `MaestroError` whose code is `FORBIDDEN` and HTTP status is 403.
 
 On a hub (`info.hub`, from `maestro-d-hub start`) devices are
 [leased](rest.md#leases-hubs), and leasing is always explicit: the library
-never takes a lease on its own. `md.lease({device | select, ttlSec, attach})`
+never takes a lease on its own. `md.lease({device | select, ttlSec, description, attach})`
 normalizes the id through `GET /v1/devices/{id}` (keeping an unlisted one,
 which the hub then refuses with `DEVICE_NOT_FOUND`), takes the lease and
 returns the device's handle, attached unless `attach: false`; the handle
@@ -136,7 +136,7 @@ hub unchanged once `maestro-d lease --device <id>` has run in the same home.
 process took (a shell's lease from `leases.json` stays); against a daemon
 that is not a hub, `release()` does nothing.
 
-**Reservations.** `md.reserve({device | select, startAt, ttlSec, holder})`
+**Reservations.** `md.reserve({device | select, startAt, ttlSec, holder, description})`
 reserves a device for a window that starts later
 ([`POST /v1/reservations`](rest.md#post-v1reservations)) and resolves with
 the lease, in `state: 'scheduled'`; `startAt` is a `Date` or an RFC 3339

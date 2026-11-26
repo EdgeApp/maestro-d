@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 )
@@ -25,9 +26,10 @@ const (
 // Lease is one lease, as the lease routes return it.
 type Lease struct {
 	// ID is what X-Maestro-Lease sends.
-	ID     string `json:"id"`
-	Device string `json:"device"`
-	Holder string `json:"holder,omitempty"`
+	ID          string `json:"id"`
+	Device      string `json:"device"`
+	Holder      string `json:"holder,omitempty"`
+	Description string `json:"description,omitempty"`
 	// StartsAt is RFC 3339: the start of the window (the grant, for a
 	// lease taken at once). A renew leaves it as it is.
 	StartsAt string `json:"startsAt"`
@@ -53,9 +55,10 @@ const (
 // DeviceLease is the lease state a hub's device listings carry: the
 // active lease, and each reservation, which carries StartsAt.
 type DeviceLease struct {
-	Holder    string `json:"holder,omitempty"`
-	StartsAt  string `json:"startsAt,omitempty"`
-	ExpiresAt string `json:"expiresAt"`
+	Holder      string `json:"holder,omitempty"`
+	Description string `json:"description,omitempty"`
+	StartsAt    string `json:"startsAt,omitempty"`
+	ExpiresAt   string `json:"expiresAt"`
 }
 
 // LeaseSelector picks a device by its properties. Every field set must
@@ -90,8 +93,9 @@ type LeaseRequest struct {
 	Select *LeaseSelector `json:"select,omitempty"`
 	// TTLSec is the window in seconds: default 8 hours (or the device's
 	// maximum, when that is shorter); over the maximum is USAGE.
-	TTLSec int    `json:"ttlSec,omitempty"`
-	Holder string `json:"holder,omitempty"`
+	TTLSec      int    `json:"ttlSec,omitempty"`
+	Holder      string `json:"holder,omitempty"`
+	Description string `json:"description,omitempty"`
 	// Attach, when given, attaches the device in the same call.
 	Attach *AttachConfig `json:"attach,omitempty"`
 	// Cloud tunes a cloud launch (Select.Location "cloud"): idle release,
@@ -147,8 +151,9 @@ type ReservationRequest struct {
 	// ClientTime is the caller's clock when it sent the request, RFC 3339.
 	ClientTime string `json:"clientTime"`
 	// TTLSec is the window's length, as for POST /v1/leases.
-	TTLSec int    `json:"ttlSec,omitempty"`
-	Holder string `json:"holder,omitempty"`
+	TTLSec      int    `json:"ttlSec,omitempty"`
+	Holder      string `json:"holder,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // String renders the selector for messages: {platform=ios kind=simulator}.
@@ -164,6 +169,26 @@ func (sel LeaseSelector) String() string {
 		parts = append(parts, "boot=true")
 	}
 	return "{" + strings.Join(parts, " ") + "}"
+}
+
+// LeaseDescription removes control characters and surrounding space and limits
+// the public description to 200 Unicode characters.
+func LeaseDescription(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	value = strings.TrimSpace(value)
+	n := 0
+	for i := range value {
+		if n == 200 {
+			return value[:i]
+		}
+		n++
+	}
+	return value
 }
 
 // HolderName is how a lease's holder reads in messages and listings:

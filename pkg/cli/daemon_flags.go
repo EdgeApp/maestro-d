@@ -91,10 +91,11 @@ type daemonOpts struct {
 // leaseOpts are lease's switches.
 type leaseOpts struct {
 	// ttl is --ttl in seconds (0: the hub's default window).
-	ttl      int
-	holder   string
-	noAttach bool
-	all      bool
+	ttl         int
+	holder      string
+	description string
+	noAttach    bool
+	all         bool
 	// id is release's and claim's --lease; startAt is reserve's
 	// --start-at as given.
 	id      string
