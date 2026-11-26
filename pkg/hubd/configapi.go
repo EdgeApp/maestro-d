@@ -54,7 +54,7 @@ func (s *Server) configRow(cfg *netshape.Config, id string, devices []daemon.Dev
 	row := configDeviceRow(id, cfg.Devices[id], listed)
 	row.Reservations = s.leases.reservations(d.ID)
 	if l, ok := s.leases.liveFor(d.ID); ok {
-		row.Lease = &daemon.DeviceLease{Holder: l.Holder, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}
+		row.Lease = &daemon.DeviceLease{Holder: l.Holder, Description: l.Description, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}
 	}
 	return row
 }
@@ -106,6 +106,9 @@ func (s *Server) putConfigDevice(w http.ResponseWriter, r *http.Request) {
 // admitConfigDevice is the final eligibility check, under leaseMu. Socket
 // callers can lease private devices, but even they wait for a removal in flight.
 func (s *Server) admitConfigDevice(remote bool, d daemon.DeviceInfo) *daemon.Error {
+	if s.ShuttingDown() {
+		return daemon.Errorf(daemon.CodeDaemonUnavailable, "hub is shutting down")
+	}
 	if s.removing[d.ID] || s.removing[daemon.AVDEntryID(d)] || (remote && !s.sharedInfo(d)) {
 		return daemon.Errorf(daemon.CodeDeviceNotFound, "device %s not found", d.ID)
 	}
@@ -229,7 +232,7 @@ func (s *Server) deleteConfigDevice(w http.ResponseWriter, r *http.Request) {
 		teardown()
 	}
 	// A previously interrupted cancellation may still need its disk flush.
-	if err := s.flushReservations(); err != nil {
+	if err := s.saveLeases(); err != nil {
 		daemon.WriteError(w, daemon.WrapErr(daemon.CodeInternal, err))
 		return
 	}

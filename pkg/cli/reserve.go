@@ -65,6 +65,7 @@ var reserveFlags = common.FlagSet(daemonSelectFlags, common.One(deviceFlag), tar
 	common.StringFlag("start-at", "When the window starts: an RFC 3339 time, or a duration from now (90m, 2h); required", nil,
 		func(o *daemonOpts, v string) { o.lease.startAt = v }),
 	ttlFlag("The window: a duration (8h, 90m) or seconds (default the hub's, 8h or the device's maximum)"),
+	leaseDescriptionFlag,
 	common.StringFlag("holder", "Who holds the reservation, as listings show it (default user@host)", nil,
 		func(o *daemonOpts, v string) { o.lease.holder = v }),
 })
@@ -114,7 +115,7 @@ func runReserve(ctx context.Context, o *daemonOpts, args []string) error {
 		return daemon.Errorf(daemon.CodeUsage, "%s is not a hub and has no reservations (start one with `maestro-d hub start`)", targetLabel(o))
 	}
 	req := daemon.ReservationRequest{StartAt: start.UTC().Format(time.RFC3339), ClientTime: time.Now().UTC().Format(time.RFC3339),
-		TTLSec: o.lease.ttl, Holder: o.holder()}
+		TTLSec: o.lease.ttl, Holder: o.holder(), Description: o.lease.description}
 	if o.Device != "" {
 		id, _, err := lookupDevice(ctx, c, o.Device)
 		if err != nil {
