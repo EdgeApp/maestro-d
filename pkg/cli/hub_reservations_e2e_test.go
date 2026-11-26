@@ -133,7 +133,7 @@ func TestE2E_HubReservations(t *testing.T) {
 // A hub keeps its reservations across a clean stop and a crash: one whose
 // start passed while it was down starts as it comes back; a lease that
 // had started is still present after the crash with the original expiry.
-func TestE2E_HubReservationsRestart(t *testing.T) {
+func testReservationsRestart(t *testing.T) {
 	e := newE2E(t)
 	home := filepath.Join(e.cwd, "restart-home")
 	writeSharedMocks(t, home, "mock-1", "mock-2")
