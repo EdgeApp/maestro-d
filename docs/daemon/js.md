@@ -94,7 +94,28 @@ adds files a flow opens dynamically; a path that cannot be packed rejects
 with `USAGE` naming the step, before anything is sent. `packFlow()`,
 `uploadBundle()` and `fetchBundleOutputs()` are exported for REST callers.
 
-On a hub (`info.hub`, from `maestro-d hub start`) devices are
+To edit this machine's device pool, connect through its hub socket:
+
+```js
+const hub = await MaestroD.connect({ hubSocket: true })
+try {
+  const { path, devices, configError } = await hub.hubDevices()
+  console.log(path, configError ?? devices)
+  const device = await hub.setHubDevice('avd:ci-pixel', { description: 'CI phone' })
+  await hub.removeHubDevice(device.id)
+} finally {
+  await hub.close()
+}
+```
+
+`hubDevices()` lists configured devices in file order and includes offline
+entries with `listed: false`. `setHubDevice(id)` adds a device, keeping any
+existing description. Pass `{description: ''}` to clear it.
+`removeHubDevice(id, {endLeases: true})` ends that device's lease and
+reservations before removal. Over a TCP connection these methods reject
+with a `MaestroError` whose code is `FORBIDDEN` and HTTP status is 403.
+
+On a hub (`info.hub`, from `maestro-d-hub start`) devices are
 [leased](rest.md#leases-hubs), and leasing is always explicit: the library
 never takes a lease on its own. `md.lease({device | select, ttlSec, attach})`
 normalizes the id through `GET /v1/devices/{id}` (keeping an unlisted one,
