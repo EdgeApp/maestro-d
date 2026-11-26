@@ -1,0 +1,4 @@
+{
+  "node-option": ["import=./test/setup.mjs"],
+  "spec": [".test-build/**/*.test.js"]
+}
