@@ -20,7 +20,7 @@ type Hub interface {
 	EventsHandler(http.ResponseWriter, *http.Request)
 	CheckBoot(*http.Request, BootRequest) *Error
 	Attach(context.Context, string, *AttachConfig) (*DeviceInfo, *Error)
-	DeviceStopped(context.Context, bool, ...string)
+	DeviceStopped(context.Context, bool, ...string) *Error
 	OnEvent(Event)
 	Shutdown(context.Context, bool)
 }
@@ -37,8 +37,9 @@ func (s *Server) HoldIdle() func() {
 // ShuttingDown reports whether the server has begun draining devices.
 func (s *Server) ShuttingDown() bool { return s.shuttingDown.Load() }
 
-func (s *Server) deviceStopped(ctx context.Context, deleted bool, ids ...string) {
+func (s *Server) deviceStopped(ctx context.Context, deleted bool, ids ...string) *Error {
 	if hub := s.cfg.Hub; hub != nil {
-		hub.DeviceStopped(ctx, deleted, ids...)
+		return hub.DeviceStopped(ctx, deleted, ids...)
 	}
+	return nil
 }

@@ -663,7 +663,7 @@ describe('leases', () => {
   test('lease() attaches by default; a second client gets DEVICE_IN_USE; close() releases', async () => {
     const a = await connectHub()
     assert.equal(a.leasing, true)
-    const d = await a.lease({ device: 'mock-h1', holder: 'alice' })
+    const d = await a.lease({ device: 'mock-h1', holder: 'alice', description: '  checkout run  ' })
     assert.equal(d.info.attached, true)
     assert.equal(d.lease.device, 'mock-h1@jsleases')
     // The default window is 8 hours, the hub's maximum.
@@ -674,6 +674,9 @@ describe('leases', () => {
     const onFile = JSON.parse(fs.readFileSync(path.join(process.env.MAESTRO_D_HOME, 'leases.json'), 'utf8')).leases
     assert.ok(onFile.some((r) => r.hub === `http://${addr}` && r.device === 'mock-h1@jsleases' && r.id === d.lease.id), JSON.stringify(onFile))
     const listed = (await a.devices({ platform: 'mock' })).find((x) => x.id === 'mock-h1@jsleases')
+    assert.equal(d.lease.description, 'checkout run')
+    assert.equal(listed.lease.description, d.lease.description)
+    assert.equal(listed.lease.startsAt, d.lease.startsAt)
     assert.equal(listed.lease.holder, 'alice')
     assert.equal(listed.available, undefined)
     assert.equal(listed.maxSec, 28800)
@@ -883,7 +886,7 @@ describe('leases', () => {
     // Far enough ahead that the claim below runs before the start even on a
     // loaded machine (reserve() sends whole seconds).
     const start = new Date(Date.now() + 10_000)
-    const lease = await a.reserve({ device: 'mock-h1', startAt: start, ttlSec: 60 })
+    const lease = await a.reserve({ device: 'mock-h1', startAt: start, ttlSec: 60, description: 'overnight regression' })
     assert.equal(lease.state, 'scheduled')
     assert.match(lease.id, /@jsleases$/)
     await rejects(
@@ -892,6 +895,8 @@ describe('leases', () => {
     )
     const listed = (await a.devices({ platform: 'mock' })).find((x) => x.localId === 'mock-h1')
     assert.equal(listed.reservations.length, 1)
+    assert.equal(lease.description, 'overnight regression')
+    assert.equal(listed.reservations[0].description, lease.description)
     await a.close()
     await new Promise((resolve) => setTimeout(resolve, Date.parse(lease.startsAt) - Date.now() + 1500))
     const b = await connectHub()
