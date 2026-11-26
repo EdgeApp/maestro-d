@@ -96,7 +96,7 @@ func TestEditDeviceKeepsCapabilitiesAndBlocks(t *testing.T) {
 	if _, err := UpsertDevice(path, "three", DeviceFields{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := editDevice(path, "three", nil); err != nil {
+	if err := RemoveDevices(path, "three", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
