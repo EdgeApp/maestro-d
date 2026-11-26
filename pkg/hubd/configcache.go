@@ -44,6 +44,21 @@ func sameFile(a, b os.FileInfo) bool {
 func (c *configCache) snapshot(now time.Time, force bool) (*netshape.Config, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.snapshotLocked(now, force, c.changed)
+}
+
+// edit publishes the file and its snapshot together. A concurrent reader may
+// never reload the file before the mutation publishes its verified identities.
+func (c *configCache) edit(write func() error, changed func(old, current *netshape.Config)) (*netshape.Config, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := write(); err != nil {
+		return nil, err
+	}
+	return c.snapshotLocked(time.Now(), true, changed)
+}
+
+func (c *configCache) snapshotLocked(now time.Time, force bool, changed func(old, current *netshape.Config)) (*netshape.Config, error) {
 	if !force && now.Before(c.nextCheck) {
 		return c.config, c.configError
 	}
@@ -77,7 +92,7 @@ func (c *configCache) snapshot(now time.Time, force bool) (*netshape.Config, err
 	old := c.config
 	c.config, c.configError, c.warned = current, nil, nil
 	if old != nil {
-		c.changed(old, current)
+		changed(old, current)
 	}
 	return current, nil
 }
@@ -88,6 +103,10 @@ func (s *Server) DeviceConfig() *netshape.Config {
 }
 
 func (s *Server) configChanged(old, current *netshape.Config) {
+	s.publishConfigChange(old, current, s.Registry().List(""))
+}
+
+func (s *Server) publishConfigChange(old, current *netshape.Config, devices []daemon.DeviceInfo) {
 	s.shareMu.Lock()
 	s.shareGen++
 	clear(s.sharedIDs)
@@ -96,7 +115,6 @@ func (s *Server) configChanged(old, current *netshape.Config) {
 
 	// A running AVD can be configured by two spellings. Compare the effective
 	// public state once per device and include configured ids absent from discovery.
-	devices := s.Registry().List("")
 	seen := make(map[string]bool)
 	for _, d := range devices {
 		seen[d.ID] = true
