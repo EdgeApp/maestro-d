@@ -116,32 +116,49 @@ func (s *Server) admitConfigDevice(remote bool, d daemon.DeviceInfo) *daemon.Err
 }
 
 type removedLease struct {
-	device string
-	until  time.Time
+	Device string    `json:"device"`
+	Until  time.Time `json:"until"`
 }
+
+type removedWindows map[string]removedLease
 
 // Keep every ended credential through its window. If the bound is reached,
 // refuse another forced release until a window ends.
 const maxRemovedLeases = 4096
 
-func (s *Server) pruneRemovedLeases() {
-	now := s.leases.now()
-	maps.DeleteFunc(s.removedLeases, func(_ string, entry removedLease) bool { return !now.Before(entry.until) })
+func (r removedWindows) prune(now time.Time) bool {
+	before := len(r)
+	maps.DeleteFunc(r, func(id string, entry removedLease) bool {
+		return id == "" || entry.Device == "" || !now.Before(entry.Until)
+	})
+	return len(r) != before
+}
+
+func removedWindowLimit(count int) *daemon.Error {
+	if count > maxRemovedLeases {
+		return daemon.Errorf(daemon.CodeBusy, "too many recently ended lease windows; retry when a window expires")
+	}
+	return nil
 }
 
 func (s *Server) removedLeaseMatches(device, credential string) bool {
-	s.leaseMu.Lock()
-	defer s.leaseMu.Unlock()
-	entry, ok := s.removedLeases[credential]
-	if ok && !s.leases.now().Before(entry.until) {
-		delete(s.removedLeases, credential)
+	t := s.leases
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.removed[credential]
+	if ok && !t.now().Before(entry.Until) {
+		delete(t.removed, credential)
 		return false
 	}
-	return ok && entry.device == device
+	return ok && entry.Device == device
 }
 
 func (s *Server) publishLeaseEnd(e *leaseEntry, reason string) {
-	event := daemon.Event{Type: leaseEndEvent(reason), Device: e.device, Message: daemon.HolderName(e.holder)}
+	device := s.resolvedDevice(e)
+	if device == "" && e.avd != "" {
+		device = daemon.AVDPrefix + strings.TrimPrefix(e.avd, "android:")
+	}
+	event := daemon.Event{Type: leaseEndEvent(reason), Device: device, Message: daemon.HolderName(e.holder)}
 	if reason == endRemoved {
 		event.Reason = reason
 	}
@@ -192,16 +209,18 @@ func (s *Server) prepareRemoval(cfg *netshape.Config, id string, force bool) (*d
 	if !force && len(windows) > 0 {
 		return nil, daemon.Errorf(daemon.CodeDeviceInUse, "device %s is in use by %s", id, strings.Join(windows, ", "))
 	}
-	s.pruneRemovedLeases()
-	if len(entries)+len(s.removedLeases) > maxRemovedLeases {
-		return nil, daemon.Errorf(daemon.CodeBusy, "too many recently ended lease windows; retry when a window expires")
+	s.leases.mu.Lock()
+	s.leases.removed.prune(s.leases.now())
+	limit := removedWindowLimit(len(entries) + len(s.leases.removed))
+	s.leases.mu.Unlock()
+	if limit != nil {
+		return nil, limit
 	}
 	rm := &deviceRemoval{aliases: aliases, devices: devices}
 	for _, key := range aliases {
 		s.removing[key] = true
 	}
 	for _, e := range entries {
-		s.removedLeases[e.id] = removedLease{device: e.device, until: e.expires}
 		rm.teardowns = append(rm.teardowns, s.endLeaseLocked(e, endRemoved))
 	}
 	return rm, nil

@@ -427,6 +427,11 @@ func (r *Registry) Stop(id string, force bool) error {
 	if !ok {
 		return Errorf(CodeDeviceNotFound, "device %s not found", id)
 	}
+	return r.stopDevice(info, force)
+}
+
+func (r *Registry) stopDevice(info DeviceInfo, force bool) error {
+	id := info.ID
 	if strings.HasPrefix(info.ID, AVDPrefix) {
 		return nil // a shut-down AVD: nothing to stop
 	}
@@ -447,6 +452,11 @@ func (r *Registry) Stop(id string, force bool) error {
 	return nil
 }
 
+// StopLeaseBoot discharges a durable boot duty using the identified device.
+func (r *Registry) StopLeaseBoot(d DeviceInfo) error {
+	return r.stopDevice(d, true)
+}
+
 // shutdownDevice shuts a simulator or emulator down regardless of who
 // booted it.
 func shutdownDevice(info DeviceInfo) error {
@@ -465,6 +475,16 @@ func shutdownDevice(info DeviceInfo) error {
 		return Errorf(CodeUsage, "device %s is a physical device and cannot be stopped", info.ID)
 	}
 	return nil
+}
+
+// PreserveBoot transfers shutdown ownership from this process to a durable lease.
+func (r *Registry) PreserveBoot(id, avdName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rec := r.records[id]; rec != nil && rec.BootedBy == BootedByDaemon && (avdName == "" || strings.EqualFold(avdName, rec.Name)) {
+		rec.BootedBy = BootedByExternal
+		r.persistLocked()
+	}
 }
 
 // ShutdownOwned stops every device this daemon booted that is still
