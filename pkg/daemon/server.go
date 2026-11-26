@@ -86,6 +86,16 @@ type Config struct {
 	// Mesh, on a hub, links it with its peers (pkg/hub): its router fronts
 	// both listeners, and READY waits for its start.
 	Mesh Mesh
+	// OpenWeb binds the public dashboard under this home's singleton lock.
+	// It starts serving after the peer mesh is ready.
+	OpenWeb func() (WebListener, error)
+}
+
+// WebListener is a bound hub dashboard, served when the mesh is ready.
+type WebListener interface {
+	Addr() net.Addr
+	Serve() error
+	Close() error
 }
 
 // Server is the daemon: registry + attached devices + HTTP handlers.
@@ -274,6 +284,16 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	var dashboard WebListener
+	var webAddr string
+	if s.cfg.OpenWeb != nil {
+		dashboard, err = s.cfg.OpenWeb()
+		if err != nil {
+			return err
+		}
+		defer dashboard.Close()
+		webAddr = dashboard.Addr().String()
+	}
 	// The housekeeping sweep (old blobs, idle reports, dead daemons' run
 	// dirs, orphaned Chrome profiles) runs now and hourly while this
 	// daemon runs.
@@ -328,6 +348,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Version:     s.deps.Version,
 		SocketPath:  sockPath,
 		HTTPAddr:    httpAddr,
+		WebAddr:     webAddr,
 		StartedAt:   s.startedAt.Format(time.RFC3339),
 		StartArgs:   s.cfg.StartArgs,
 		RunDir:      s.cfg.RunDir(),
@@ -352,7 +373,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.registry.persistLocked()
 	s.registry.mu.Unlock()
 
-	errCh := make(chan error, len(s.servers))
+	errCh := make(chan error, len(s.servers)+1)
 	for i, srv := range s.servers {
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -387,8 +408,17 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	var webNote string
+	if dashboard != nil {
+		webNote = " web=https://" + webAddr
+		go func() {
+			if err := dashboard.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 	if s.cfg.Ready != nil {
-		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
+		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d%s\n", sockPath, httpAddr, os.Getpid(), webNote)
 	}
 	// Cloud sessions an earlier run of this daemon left (a crash, kill -9,
 	// a launchd restart) are released once it serves, so a spawning client
