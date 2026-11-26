@@ -38,10 +38,13 @@ import (
 type leaseRecord struct {
 	// Hub is the hub's address (its base URL, or unix:<daemon> for a hub
 	// reached over its unix socket).
-	Hub    string `json:"hub"`
-	Device string `json:"device"`
-	ID     string `json:"id"`
-	Holder string `json:"holder,omitempty"`
+	Hub             string               `json:"hub"`
+	Device          string               `json:"device"`
+	ID              string               `json:"id"`
+	Holder          string               `json:"holder,omitempty"`
+	RequestedDevice string               `json:"requestedDevice,omitempty"`
+	OriginalDevice  string               `json:"originalDevice,omitempty"`
+	Attach          *daemon.AttachConfig `json:"attach,omitempty"`
 	// StartsAt is the start of the window: later than now for a
 	// reservation (maestro-d reserve). A record without it has started.
 	StartsAt string `json:"startsAt,omitempty"`
@@ -67,14 +70,14 @@ func (r leaseRecord) startedAt(now time.Time) (bool, time.Time) {
 // the reservation that starts first. The recorded expiresAt is not
 // weighed: an ended lease is still sent, the hub answers LEASE_EXPIRED
 // and the record is dropped (wireLeases), and a lease renewed from
-// another home is still sent.
+// another home is still sent. An empty device selects among prefiltered records.
 func currentLease(recs []leaseRecord, device string, now time.Time) *leaseRecord {
 	var best *leaseRecord
 	var bestStart time.Time
 	bestStarted := false
 	for i := range recs {
 		r := recs[i]
-		if r.Device != device {
+		if device != "" && r.Device != device {
 			continue
 		}
 		started, start := r.startedAt(now)
@@ -197,24 +200,46 @@ func findLease(hub, device string) *leaseRecord {
 
 // recordLease records l for one hub, replacing the record of the same
 // lease id; the device's reservations stay (a lease now and a reservation
-// later). A lease that has started also replaces the device's other
-// started records: no two leases on a device overlap, so those have ended.
-func recordLease(hub string, l daemon.Lease) {
+// later). On a stable device, a new started grant supersedes the previous
+// one. Emulator serials can move between AVDs while both grants are live.
+func recordLease(hub string, l daemon.Lease) { recordLeaseTarget(hub, l, "") }
+
+func recordLeaseTarget(hub string, l daemon.Lease, requested string) {
+	writeLeaseRecord(hub, l, requested, true)
+}
+
+// A refresh addresses an existing grant by ID. A stale serial on another
+// record is not evidence that its lease ended.
+func refreshLease(hub string, l daemon.Lease) { writeLeaseRecord(hub, l, "", false) }
+
+func writeLeaseRecord(hub string, l daemon.Lease, requested string, acquired bool) {
 	now := time.Now()
 	started, _ := leaseRecord{StartsAt: l.StartsAt}.startedAt(now)
 	updateLeases(func(recs []leaseRecord) []leaseRecord {
+		rec := leaseRecord{Hub: hub, Device: l.Device, ID: l.ID, Holder: l.Holder, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt, TTLSec: l.TTLSec}
 		out := recs[:0]
+		found := false
 		for _, r := range recs {
 			if r.Hub == hub && r.ID == l.ID {
+				found = true
+				rec.Attach, rec.OriginalDevice, rec.RequestedDevice = r.Attach, r.OriginalDevice, r.RequestedDevice
+				if rec.OriginalDevice == "" && r.Device != l.Device {
+					rec.OriginalDevice = r.Device
+				}
 				continue
 			}
-			if rs, _ := r.startedAt(now); started && rs && r.Hub == hub && r.Device == l.Device {
+			if rs, _ := r.startedAt(now); acquired && started && rs && r.Hub == hub && r.Device == l.Device && !emulatorTarget(l.Device) {
 				continue
 			}
 			out = append(out, r)
 		}
-		return append(out, leaseRecord{Hub: hub, Device: l.Device, ID: l.ID, Holder: l.Holder, StartsAt: l.StartsAt,
-			ExpiresAt: l.ExpiresAt, TTLSec: l.TTLSec})
+		if !acquired && !found {
+			return out
+		}
+		if emulatorTarget(requested) && requested != l.Device && rec.RequestedDevice == "" {
+			rec.RequestedDevice = requested
+		}
+		return append(out, rec)
 	})
 }
 
@@ -262,13 +287,7 @@ func wireLeases(c *daemon.Client, o *daemonOpts) {
 	// and the next one's start, a refused request goes once more with the
 	// other.
 	c.OtherLease = func(device, failed string) string {
-		var rest []leaseRecord
-		for _, r := range leasesFor(key) {
-			if r.ID != failed {
-				rest = append(rest, r)
-			}
-		}
-		if alt := currentLease(rest, device, time.Now()); alt != nil {
+		if alt := otherLeaseRecord(key, device, failed); alt != nil {
 			return alt.ID
 		}
 		return ""
@@ -283,6 +302,20 @@ func wireLeases(c *daemon.Client, o *daemonOpts) {
 			common.Progress("Lease %s on %s has expired; take a new one with `maestro-d lease --device %s`", lease, device, device)
 		}
 	}
+}
+
+// Other windows are safe to try only when the device ID cannot be recycled.
+func otherLeaseRecord(hub, device, failed string) *leaseRecord {
+	if emulatorTarget(device) {
+		return nil
+	}
+	var rest []leaseRecord
+	for _, r := range leasesFor(hub) {
+		if r.ID != failed {
+			rest = append(rest, r)
+		}
+	}
+	return currentLease(rest, device, time.Now())
 }
 
 // isHub reports whether c talks to a hub, asking it (once) when neither
@@ -342,6 +375,20 @@ func lookupDevice(ctx context.Context, c *daemon.Client, id string) (string, *da
 	return id, info, nil
 }
 
+// resolveEmulatorTarget uses the grant taken for an explicit target even if
+// its old serial now belongs to a different AVD.
+func resolveEmulatorTarget(ctx context.Context, c *daemon.Client, o *daemonOpts, target string) (string, error) {
+	if o.Target == "" || !emulatorTarget(target) {
+		return target, nil
+	}
+	rec, err := targetLeaseRecord(leaseKey(c, o), target)
+	if err != nil || rec == nil {
+		return target, err
+	}
+	held, err := resolveGrant(ctx, c, o, *rec)
+	return held.Device, err
+}
+
 // heldLease makes c send the lease on file for device id, if this client
 // holds one; it never takes a lease (with none, the hub answers
 // LEASE_REQUIRED). A lease on file that has ended is still sent, so the
@@ -349,12 +396,18 @@ func lookupDevice(ctx context.Context, c *daemon.Client, id string) (string, *da
 // returns the normalized id and the device's record (nil when the daemon
 // does not list it).
 func heldLease(ctx context.Context, c *daemon.Client, o *daemonOpts, id string) (string, *daemon.DeviceInfo, error) {
+	id, err := resolveEmulatorTarget(ctx, c, o, id)
+	if err != nil {
+		return id, nil, err
+	}
 	id, info, err := lookupDevice(ctx, c, id)
 	if err != nil {
 		return id, nil, err
 	}
-	if rec := findLease(leaseKey(c, o), id); rec != nil {
-		c.SetLease(id, rec.ID)
+	if c.LeaseOf(id) == "" {
+		if rec := findLease(leaseKey(c, o), id); rec != nil {
+			c.SetLease(id, rec.ID)
+		}
 	}
 	return id, info, nil
 }
@@ -441,6 +494,21 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 	key := leaseKey(c, o)
 	req := daemon.LeaseRequest{TTLSec: o.lease.ttl, Holder: o.holder(), Description: o.lease.description}
 	if o.Device != "" {
+		if emulatorTarget(o.Device) {
+			held, err := targetLeaseRecord(key, o.Device)
+			if err != nil {
+				return err
+			}
+			if held != nil && startedRecord(*held) {
+				live, err := resolveGrant(ctx, c, o, *held)
+				if err == nil {
+					return printLease(o, live, nil)
+				}
+				if !isCode(err, daemon.CodeLeaseExpired) {
+					return err
+				}
+			}
+		}
 		id, _, err := lookupDevice(ctx, c, o.Device)
 		if err != nil {
 			return err
@@ -449,7 +517,7 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		// is asked, and refuses a window that reaches it.
 		if rec := findLease(key, id); rec != nil && startedRecord(*rec) {
 			if res, err := c.Lease(ctx, rec.ID); err == nil {
-				recordLease(key, res.Lease)
+				refreshLease(key, res.Lease)
 				return printLease(o, res.Lease, nil)
 			} else if !isCode(err, daemon.CodeLeaseExpired) {
 				return err
@@ -481,7 +549,7 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 		return err
 	}
 	l := res.Lease
-	recordLease(key, l)
+	recordLeaseTarget(key, l, o.Device)
 	c.SetLease(l.Device, l.ID)
 	info := res.Device
 	if !o.lease.noAttach && (info == nil || !info.Attached) {
@@ -491,6 +559,9 @@ func runLease(ctx context.Context, o *daemonOpts, args []string) error {
 			}
 			return err
 		}
+	}
+	if !o.lease.noAttach && req.Attach != nil {
+		rememberAttach(key, l.ID, o.Attach)
 	}
 	return printLease(o, l, info)
 }
@@ -582,14 +653,14 @@ func runRenew(ctx context.Context, o *daemonOpts, args []string) error {
 	key := leaseKey(c, o)
 	var recs []leaseRecord
 	if o.Device != "" {
-		id, _, err := lookupDevice(ctx, c, o.Device)
+		matches, err := leaseRecordsForTarget(ctx, c, key, o.Device)
 		if err != nil {
 			return err
 		}
-		rec := findLease(key, id)
+		rec := currentLease(matches, "", time.Now())
 		if rec == nil {
 			return daemon.Errorf(daemon.CodeLeaseRequired, "no lease on %s on file for %s; take one with `maestro-d lease --device %s`",
-				id, targetLabel(o), o.Device).WithDetails("hint", "maestro-d lease --device "+o.Device)
+				o.Device, targetLabel(o), o.Device).WithDetails("hint", "maestro-d lease --device "+o.Device)
 		}
 		recs = append(recs, *rec)
 	} else {
@@ -626,7 +697,7 @@ func runRenew(ctx context.Context, o *daemonOpts, args []string) error {
 			expired = err
 			continue
 		}
-		recordLease(key, res.Lease)
+		refreshLease(key, res.Lease)
 		renewed = append(renewed, res.Lease)
 		if !o.JSON {
 			l := res.Lease
@@ -739,14 +810,9 @@ func runRelease(ctx context.Context, o *daemonOpts, args []string) error {
 			recs = []leaseRecord{{Hub: key, ID: l.ID, Device: l.Device, StartsAt: l.StartsAt, ExpiresAt: l.ExpiresAt}}
 		}
 	default:
-		id, _, err := lookupDevice(ctx, c, o.Device)
+		recs, err = leaseRecordsForTarget(ctx, c, key, o.Device)
 		if err != nil {
 			return err
-		}
-		for _, r := range leasesFor(key) {
-			if r.Device == id {
-				recs = append(recs, r)
-			}
 		}
 	}
 	if len(recs) == 0 {
