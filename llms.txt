@@ -1,4 +1,12 @@
-# maestro-runner
+# maestro-d
+
+`maestro-d` runs Maestro YAML flows and individual steps on local devices,
+simulators, emulators and browsers. It also leases devices and runs flows on
+a mesh of hubs. Install `maestro-d` from npm or the release tarball for both
+`maestro-d` and `maestro-d-hub`. See [CLI](docs/daemon/cli.md),
+[JavaScript](docs/daemon/js.md) and [4.0 upgrade notes](CHANGELOG.md#breaking-changes).
+
+## Upstream maestro-runner
 
 maestro-runner is a fast, open-source, drop-in replacement for the Maestro CLI.
 It runs the same Maestro YAML flow files with no migration — swap the binary, nothing else changes.
@@ -15,14 +23,18 @@ It runs the same Maestro YAML flow files with no migration — swap the binary, 
 Use `maestro-d` for local automation and as the network client. Use
 `maestro-d-hub` on the device host to manage its pool. The shared devices,
 descriptions and traffic-shaping calls live in `config.json`. The hub
-reloads edits while running.
+reloads edits while running. Run one hub per host. Local daemons accept
+`serve --http` on loopback only. Use the hub for network access.
 
 - List configured devices with `maestro-d-hub devices --json`.
 - Add, describe or remove a device with `maestro-d-hub devices add|set|remove ID`.
 - The JS client offers `hubDevices()`, `setHubDevice()` and `removeHubDevice()` after `MaestroD.connect({hubSocket: true})`.
 - The config API uses the local hub socket. TCP callers receive `FORBIDDEN`. See [Device config](docs/daemon/config.md) and [REST](docs/daemon/rest.md).
+- Lease or reserve a device with `maestro-d lease` or `maestro-d reserve`. Use `maestro-d test flow.yaml --target-hub=HOST --device ID@HUB` to execute the flow on its owner.
+- Active local-device leases retain their IDs and expiry across hub restarts. The one-shot CLI and JS device reattach once automatically. Use `maestro-d-hub stop --end-leases` to end active leases.
+- Open `https://HOST:9400/` to see the mesh's shared devices, holders and upcoming reservations live. It is read-only and requires no login. See [Hubs](docs/daemon/hub.md).
 
-## What problem it solves
+## What problem upstream maestro-runner solves
 
 Maestro CLI runs on the JVM. This causes:
 - Slow CI cold starts (~4-6s JVM warmup vs ~20ms for maestro-runner)
