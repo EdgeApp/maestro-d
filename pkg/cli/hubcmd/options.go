@@ -26,6 +26,7 @@ type dflag = common.Flag[daemonOpts]
 // hubOpts are hub start's switches.
 type hubOpts struct {
 	name      string
+	webPort   *int
 	tokenFile string
 	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
 	leaseMax []string
