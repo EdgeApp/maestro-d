@@ -183,6 +183,9 @@ func runClaim(ctx context.Context, o *daemonOpts, args []string) error {
 		return err
 	}
 	l := res.Lease
+	if l.Device == "" {
+		return daemon.Errorf(daemon.CodeDeviceNotFound, "the emulator for lease %s is unavailable", l.ID)
+	}
 	if l.State == daemon.LeaseScheduled {
 		return daemon.Errorf(daemon.CodeLeaseNotStarted, "lease %s on %s starts at %s (in %s); claim it then", l.ID, l.Device, l.StartsAt,
 			untilExpiry(l.StartsAt)).WithDetails("lease", l.ID, "startsAt", l.StartsAt)
