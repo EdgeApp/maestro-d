@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 4.0.0 (2026-11-27)
+
+### Breaking changes
+
+- Run `maestro-d-hub` on the device host. Each release tarball and npm platform package includes both executables. The `maestro-d hub` alias forwards to the hub until 5.0. Each machine runs one hub, so drop `--daemon` from hub commands.
+- Move device settings from `network.json` to `config.json`. Use a `hubDevices` entry per device ID, with optional `description` and `trafficShaping`. Version 4 removes `--network-config`, `--share-device` and `--share-tv`. On the host, `maestro-d-hub devices add ID` writes the entry and shares the device immediately. See [Device config](docs/daemon/config.md).
+- `maestro-d serve --http` and `maestro-d start --http` accept only loopback addresses. Both commands drop `--tls-cert`, `--tls-key` and `--pass-env`. For network clients, configure these flags on `maestro-d-hub start` and connect with `maestro-d --target-hub=HOST`.
+- `maestro-d-hub stop` preserves active local-device leases. Use `maestro-d-hub stop --end-leases` to end them. Future reservations survive either stop. Stopping the hub releases its Device Farm sessions.
+- On a Mac with an existing hub LaunchAgent, rerun `maestro-d-hub service install` with your hub options so launchd starts the new binary.
+
+### Hub and client
+
+- Edit sharing through the host's Unix socket with `devices add|set|remove` or the REST and JavaScript clients. The hub reloads `config.json` while running. Peers see edits within their two-second listing cache. TCP config requests receive `FORBIDDEN`.
+- After a hub restart, holders keep the lease ID, description and expiry for the rest of the original window. The JavaScript device and one-shot CLI reattach once on the next device command. `maestro-d test flow.yaml --target-hub=HOST --device ID@HUB` runs a whole flow on the leased device's host.
+- Open `https://HOST:9400/` for a live, read-only view of shared devices, holders and upcoming reservations across the mesh. The page requires no login. Use `--web-port` to choose another port.
+
 ## 3.4.0 (2026-11-27)
 
 - added: `assertWithAI` and `assertNoDefectsWithAI` run for every driver (Android, iOS, tvOS, the browser, the computer device, Appium and cloud devices), in the executor on the daemon that owns the device, on a screenshot from the driver's own `Screenshot()`. A waterfall judges it: TypeSafe Jev (`jev-1.14.0`, the screenshot scaled into 280–1568 px, one noul question, passing at 0.7 or more and failing at 0.3 or less), then Claude Haiku, Sonnet and Opus 5.5 (pass or fail with confidence 0.7 or more stops it), else `unsure`. `budgetUsd` and `thresholds` (`jevPass`, `jevFail`, `haiku`, `sonnet`, `opus`) are new options on both. Every verdict is a successful step with `{verdict, confidence, model, escalations, observed, costUsd}` as its data, so the JS client resolves `fail` and `unsure` too; only a missing screenshot fails. `assertNoDefectsWithAI` asks the built-in assertion that the screen shows no visual defect. The cdp driver no longer answers them "not supported". See `docs/daemon/rest.md`.
