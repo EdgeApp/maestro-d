@@ -18,7 +18,7 @@ type Server struct {
 
 	leases         *leaseTable
 	leaseMu        sync.Mutex
-	reservationsMu sync.Mutex
+	writer         leaseWriter
 	teardowns      pending
 	cloudLaunching int
 
@@ -36,6 +36,7 @@ func (s *Server) Bind(host *daemon.Server, cfg daemon.Config, deps daemon.Deps) 
 	s.Server, s.cfg, s.deps = host, cfg, deps
 	s.config = newConfigCache(daemon.DeviceConfigPath(cfg.DeviceConfig), s.configChanged)
 	s.leases = newLeaseTable()
+	s.writer.write = writeLeases
 	s.removing = make(map[string]bool)
 	s.removedLeases = make(map[string]removedLease)
 	s.sharedIDs = make(map[string]bool)
@@ -46,7 +47,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if _, err := s.config.snapshot(time.Now(), true); err != nil {
 		return err
 	}
-	s.loadReservations()
+	if err := s.loadLeases(); err != nil {
+		return err
+	}
 	share := s.shareList()
 	if share == "" {
 		share = "nothing (list devices in config.json's hubDevices)"
@@ -60,8 +63,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/config/devices", s.localConfig(s.getConfigDevices))
 	mux.HandleFunc("PUT /v1/config/devices/{id}", s.localConfig(s.putConfigDevice))
 	mux.HandleFunc("DELETE /v1/config/devices/{id}", s.localConfig(s.deleteConfigDevice))
-	mux.HandleFunc("POST /v1/leases", s.Idempotent(s.handleAcquireLease))
-	mux.HandleFunc("POST /v1/reservations", s.Idempotent(s.handleReserve))
+	mux.HandleFunc("POST /v1/leases", s.acquisition(s.handleAcquireLease))
+	mux.HandleFunc("POST /v1/reservations", s.acquisition(s.handleReserve))
 	mux.HandleFunc("GET /v1/leases", s.handleListLeases)
 	mux.HandleFunc("GET /v1/leases/{lid}", s.handleGetLease)
 	mux.HandleFunc("POST /v1/leases/{lid}/renew", s.handleRenewLease)
@@ -72,10 +75,13 @@ func (s *Server) Shutdown(ctx context.Context, endLeases bool) {
 	s.endAllLeases()
 }
 
-func (s *Server) DeviceStopped(ctx context.Context, deleted bool, ids ...string) {
+func (s *Server) DeviceStopped(ctx context.Context, deleted bool, ids ...string) *daemon.Error {
 	reason := endStopped
 	if deleted {
 		reason = endDeleted
 	}
-	s.endStoppedLease(ctx, reason, ids...)
+	if err := s.endStoppedLease(ctx, reason, ids...); err != nil {
+		return daemon.WrapErr(daemon.CodeInternal, err)
+	}
+	return nil
 }

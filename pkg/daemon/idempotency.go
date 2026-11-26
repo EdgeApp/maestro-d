@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,13 +102,20 @@ func (c *idemCache) begin(device, id string) (*idemEntry, bool) {
 	if e := d.entries[id]; e != nil {
 		return e, false
 	}
+	// A running operation still owns its key, including while its grant
+	// is attaching or waiting for disk. Refuse excess work when every
+	// slot is running so a retry can always join the original operation.
+	if len(d.order) >= idemPerDevice {
+		index := slices.IndexFunc(d.order, func(key string) bool { return d.entries[key].finished() })
+		if index < 0 {
+			return nil, false
+		}
+		delete(d.entries, d.order[index])
+		d.order = slices.Delete(d.order, index, index+1)
+	}
 	e := &idemEntry{done: make(chan struct{})}
 	d.entries[id] = e
 	d.order = append(d.order, id)
-	for len(d.order) > idemPerDevice {
-		delete(d.entries, d.order[0])
-		d.order = d.order[1:]
-	}
 	return e, true
 }
 
@@ -184,6 +192,10 @@ func (s *Server) Idempotent(h http.HandlerFunc) http.HandlerFunc {
 		}
 		device := r.PathValue("id")
 		e, run := s.idem.begin(device, id)
+		if e == nil {
+			WriteError(w, Errorf(CodeBusy, "too many requests are still running"))
+			return
+		}
 		if !run {
 			e.joined.Store(true)
 			if !e.finished() {
