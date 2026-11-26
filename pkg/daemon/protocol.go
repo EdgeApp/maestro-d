@@ -11,6 +11,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -525,6 +526,9 @@ type DeviceInfo struct {
 	// Description is the free text the device's host gives it in its
 	// config.json, if any.
 	Description string `json:"description,omitempty"`
+	// Capabilities is the JSON the device's host gives it in its
+	// config.json (hubDevices[].capabilities), passed on as written.
+	Capabilities json.RawMessage `json:"capabilities,omitempty"`
 }
 
 // AttachConfig is the body of POST /v1/devices/{id}/attach: the subset of
@@ -570,6 +574,17 @@ type AttachConfig struct {
 	// Extra holds driver-specific options the wiring may understand
 	// (e.g. browser, headless, viewport for web).
 	Extra map[string]any `json:"extra,omitempty"`
+	// AI carries the caller's keys for assertWithAI and
+	// assertNoDefectsWithAI. A daemon whose config.json has an ai block
+	// uses its own keys instead. The keys stay in the session: they are
+	// never stored, logged, echoed or forwarded to another hub.
+	AI *AttachAI `json:"ai,omitempty"`
+}
+
+// AttachAI is the attach body's ai field.
+type AttachAI struct {
+	JevKey       string `json:"jevKey,omitempty"`
+	AnthropicKey string `json:"anthropicKey,omitempty"`
 }
 
 // BootRequest is the body of POST /v1/devices.

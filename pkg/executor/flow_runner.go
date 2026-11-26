@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/aicheck"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
@@ -42,8 +43,12 @@ type FlowRunner struct {
 	rec stepRecording
 	// maestro-d: the device's traffic shaper, nil when the host has none (trafficshape.go)
 	shaper TrafficShaper
+	// maestro-d: the AI checks' models and keys, nil for none (aicheck.go)
+	ai *aicheck.Checker
 	// maestro-d: what this runner set that its session's end must undo (cleanup.go)
 	undo sessionUndo
+	// maestro-d: the running startSampler samplers (devicesteps.go)
+	samplers *samplerSet
 }
 
 // Run executes the flow and returns the result.
@@ -554,12 +559,21 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	case *flow.AssertScreenshotStep:
 		result = fr.executeAssertScreenshot(s)
 
+	case *flow.AssertWithAIStep, *flow.AssertNoDefectsWithAIStep: // maestro-d: the waterfall, for every driver (aicheck.go)
+		result = fr.executeAICheck(step)
+
 	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
 		result = fr.executeRecordingStep(step)
 	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep: // maestro-d: refused on iOS (unsupported.go)
 		result = fr.executeAirplaneStep(step)
 	case *flow.SetTrafficShapeStep, *flow.ResetTrafficShapeStep: // maestro-d: the host's shaping call (trafficshape.go)
 		result = fr.executeTrafficShapeStep(step)
+	case *flow.SetStatusBarStep: // maestro-d: refused where nothing can override it (devicesteps.go)
+		result = fr.executeStatusBarStep(s)
+	case *flow.StartSamplerStep, *flow.StopSamplerStep: // maestro-d: the driver's probe on a ticker (devicesteps.go)
+		result = fr.executeSamplerStep(step)
+	case *flow.HoverOnStep, *flow.HoldOnStep, *flow.DragPathStep: // maestro-d: pointer gestures (pointer.go)
+		result = fr.executePointerStep(step)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -1629,6 +1643,9 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.AssertScreenshotStep:
 		fr.script.ExpandStep(step)
 		result = fr.executeAssertScreenshot(s)
+	case *flow.AssertWithAIStep, *flow.AssertNoDefectsWithAIStep: // maestro-d: the waterfall, for every driver (aicheck.go)
+		fr.script.ExpandStep(step)
+		result = fr.executeAICheck(step)
 	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through screen capture when the driver has it
 		fr.script.ExpandStep(step)
 		result = fr.executeRecordingStep(step)
@@ -1637,6 +1654,13 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 		result = fr.executeAirplaneStep(step)
 	case *flow.SetTrafficShapeStep, *flow.ResetTrafficShapeStep: // maestro-d: the host's shaping call (trafficshape.go)
 		result = fr.executeTrafficShapeStep(step)
+	case *flow.SetStatusBarStep: // maestro-d: refused where nothing can override it (devicesteps.go)
+		result = fr.executeStatusBarStep(s)
+	case *flow.StartSamplerStep, *flow.StopSamplerStep: // maestro-d: the driver's probe on a ticker (devicesteps.go)
+		result = fr.executeSamplerStep(step)
+	case *flow.HoverOnStep, *flow.HoldOnStep, *flow.DragPathStep: // maestro-d: pointer gestures (pointer.go)
+		fr.script.ExpandStep(step)
+		result = fr.executePointerStep(step)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)

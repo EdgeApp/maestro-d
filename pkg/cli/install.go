@@ -11,6 +11,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -278,6 +279,88 @@ already has it) and installed on the device's machine.
 			fmt.Printf("Installed %s on %s\n", res.AppID, id)
 		} else {
 			fmt.Printf("Installed %s on %s\n", filepath.Base(args[0]), id)
+		}
+		return nil
+	}),
+}
+
+// installURLOpts are installApp's switches.
+type installURLOpts struct {
+	url, headersFile, appID string
+}
+
+var installAppFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), targetFlags, []dflag{
+	strFlag("url", "The build to install: a URL the device's own daemon downloads (required)", nil, func(o *daemonOpts, v string) { o.installURL.url = v }),
+	strFlag("headers-file", "A JSON object of headers for that request (a bearer key), readable by its owner only; never sent to a redirect target", nil,
+		func(o *daemonOpts, v string) { o.installURL.headersFile = v }),
+	strFlag("app-id", "The app's bundle id or package name (required): it keys the ETag cache", nil, func(o *daemonOpts, v string) { o.installURL.appID = v }),
+	boolFlag("reinstall", "Uninstall the app first and install even when the build's ETag is the one installed", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	strFlag("platform", "Platform of the device, when neither the file nor the device tells", nil, func(o *daemonOpts, v string) { o.Attach.Platform = v }, "p"),
+})
+
+// readHeadersFile reads --headers-file: a JSON object of strings, which
+// must not be readable by others since it carries a key.
+func readHeadersFile(path string) (map[string]string, error) {
+	data, err := readSecretFile("headers-file", path)
+	if err != nil {
+		return nil, err
+	}
+	var h map[string]string
+	if err := json.Unmarshal([]byte(data), &h); err != nil {
+		// The message names the file, never its content.
+		return nil, daemon.Errorf(daemon.CodeUsage, "--headers-file %s is not a JSON object of strings", path)
+	}
+	return h, nil
+}
+
+var installAppCommand = &cli.Command{
+	Name:      "installApp",
+	Usage:     "Install an app build from a URL, downloaded by the device's own daemon",
+	ArgsUsage: " ",
+	Description: flagsDoc(`The daemon that owns the device downloads the build, with --headers-file's
+headers on that request only (a redirect, such as Mason's to its Space,
+is followed without them), and installs it. It remembers the build's
+ETag per device and app id: the same build again answers cached and
+installs nothing.
+
+  maestro-d installApp --url https://mason.example/api/v2/builds/42/download \
+    --headers-file mason-headers.json --app-id com.example.app --device <id>@hub`, installAppFlags),
+	SkipFlagParsing: true,
+	Action: withArgs(installAppFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
+		if len(args) != 0 || o.installURL.url == "" || o.installURL.appID == "" {
+			return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d installApp --url URL --app-id ID [--headers-file FILE] --device ID")
+		}
+		req := daemon.InstallRequest{URL: o.installURL.url, AppID: o.installURL.appID, Reinstall: o.force, Platform: o.Attach.Platform}
+		if o.installURL.headersFile != "" {
+			h, err := readHeadersFile(o.installURL.headersFile)
+			if err != nil {
+				return err
+			}
+			req.Headers = h
+		}
+		client, err := connectDaemon(ctx, o, true)
+		if err != nil {
+			return err
+		}
+		id, err := resolveDevice(ctx, client, o)
+		if err != nil {
+			return err
+		}
+		if id, _, err = heldLease(ctx, client, o, id); err != nil {
+			return err
+		}
+		res, err := client.InstallApp(ctx, id, req)
+		if err != nil {
+			return err
+		}
+		if o.JSON {
+			printJSON(os.Stdout, res)
+			return nil
+		}
+		if res.Cached {
+			fmt.Printf("%s already installed on %s (cached)\n", req.AppID, id)
+		} else {
+			fmt.Printf("Installed %s on %s\n", req.AppID, id)
 		}
 		return nil
 	}),

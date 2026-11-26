@@ -52,6 +52,20 @@ export interface Condition {
 }
 
 /**
+ * The AI checks' stopping points (`assertWithAI`, `assertNoDefectsWithAI`).
+ * Jev passes at a noul of `jevPass` or more (default 0.7) and fails at
+ * `jevFail` or less (default 0.3); each Claude model stops on a pass or fail
+ * with at least its confidence (default 0.7). A value above 1 never stops.
+ */
+export interface AIThresholds {
+  jevPass?: number
+  jevFail?: number
+  haiku?: number
+  sonnet?: number
+  opus?: number
+}
+
+/**
  * One step exactly as a flow file lists it: a bare command name
  * (`'back'`) or a single-key object (`{tapOn: 'Login'}`,
  * `{tapOn: {id: 'x', optional: true}}`).
@@ -269,6 +283,12 @@ export interface DeviceInfo {
   appiumVersion?: string
   /** Free text the device's host gives it in its config.json (`hubDevices[].description`). */
   description?: string
+  /**
+   * Arbitrary JSON the device's host gives it in its config.json
+   * (`hubDevices[].capabilities`), returned exactly as written. maestro-d
+   * gives it no meaning; each installation defines its own convention.
+   */
+  capabilities?: unknown
 }
 
 /** The device time a cloud session used. */
@@ -559,6 +579,92 @@ export interface AttachOptions {
    * A hub refuses capsFile, driver appium and appiumUrl as FORBIDDEN: Appium attaches only over the unix socket.
    */
   extra?: Record<string, unknown>
+  /**
+   * Keys for the AI checks (`assertWithAI`, `assertNoDefectsWithAI`), used
+   * only by a daemon whose own config.json has no `ai` block (a hub uses
+   * its own keys for its own devices). The daemon holds them for the
+   * session's AI steps only, never echoes or forwards them; the client
+   * sends them with the attach and keeps them nowhere.
+   */
+  ai?: AIKeys
+}
+
+/** The AI checks' keys an attach may carry. */
+export interface AIKeys {
+  /** TypeSafe's Jev (System One) API key. */
+  jevKey?: string
+  /** An Anthropic API key, for the Claude Haiku, Sonnet and Opus stages. */
+  anthropicKey?: string
+}
+
+/** One stage an AI check asked, in order. */
+export interface AIEscalation {
+  /** `jev-1.14.0`, `claude-haiku-5-5`, `claude-sonnet-5-5` or `claude-opus-5-5`. */
+  model: string
+  verdict?: 'pass' | 'fail' | 'unsure'
+  /** Jev's noul, or the model's confidence. */
+  confidence?: number
+  costUsd: number
+  /** Why the stage did not answer or did not stop: `no-key`, `budget`, `error`, … */
+  reason?: string
+  /** The stage's error, when it failed (never a key). */
+  error?: string
+}
+
+/**
+ * What `assertWithAI` and `assertNoDefectsWithAI` answer, in the step's
+ * `data`. Every verdict is a successful step: the caller decides what a
+ * `fail` or an `unsure` means.
+ */
+export interface AICheckResult {
+  verdict: 'pass' | 'fail' | 'unsure'
+  confidence: number
+  /** The model that answered (empty when none did). */
+  model: string
+  escalations: AIEscalation[]
+  /** What the answering model saw on the screen. */
+  observed: string
+  costUsd: number
+}
+
+/** What `keyboardVisible` answers, in the step's `data`. */
+export interface KeyboardVisibleResult {
+  visible: boolean
+}
+
+/** What `startSampler` answers, in the step's `data`. */
+export interface SamplerStarted {
+  kind: 'cpu' | 'memory' | 'frames'
+  appId: string
+  intervalMs: number
+}
+
+/** One sample a sampler took: milliseconds since it started, and the value in its unit. */
+export interface Sample {
+  atMs: number
+  value: number
+}
+
+/** What `stopSampler` answers, in the step's `data`: the same fields on every platform. */
+export interface SamplerResult extends SamplerStarted {
+  /** `percent` (cpu), `bytes` (memory) or `fps` (frames). */
+  unit: string
+  durationMs: number
+  count: number
+  min: number
+  max: number
+  mean: number
+  samples: Sample[]
+}
+
+/** What `installApp({ url })` answers. */
+export interface InstallAppResult {
+  /** The installed app's id, when the daemon could read it or the caller named it. */
+  appId?: string
+  /** True when the device's hub already installed the build with this ETag and skipped it. */
+  cached?: boolean
+  /** The download's ETag. */
+  etag?: string
 }
 
 export interface BootOptions {
@@ -571,6 +677,8 @@ export interface BootOptions {
   name: string
   /** Seconds. */
   bootTimeout?: number
+  /** On a hub: the hub whose machine boots it (default: the hub asked, or a qualified name's suffix). */
+  hub?: string
 }
 
 /** Options for `createDevice()`: a simulator (`type`, `runtime`) or an AVD (`image`, `profile`, …). */
@@ -598,6 +706,8 @@ export interface CreateDeviceOptions {
   boot?: boolean
   /** Seconds. */
   bootTimeout?: number
+  /** On a hub: the hub whose machine creates it, iOS or Android (default: the hub asked). */
+  hub?: string
 }
 
 /** One iOS simulator runtime in the catalog. */

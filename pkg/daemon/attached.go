@@ -64,6 +64,10 @@ var unsafePath = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 // attachDevice opens the driver and session for one device.
 func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) (*attached, *Error) {
+	// The caller's AI keys go to the session alone, never into the stored
+	// config, the driver factory or a log (aicheck.go).
+	attachAI := cfg.AI
+	cfg.AI = nil
 	if id == "" {
 		return nil, Errorf(CodeUsage, "attach: device id is required")
 	}
@@ -147,6 +151,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if cleanup == nil {
 		cleanup = func() {}
 	}
+	giveBuildSource(id, driver) // clearState on a physical iPhone reinstalls installApp's build (appbuild.go)
 	if leaseFrom(ctx) != nil && ctx.Err() != nil {
 		// The lease (or its client) ended while a driver start that cannot
 		// be cancelled ran: the driver is discarded, never attached.
@@ -194,6 +199,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		ImportEnv:      s.importsEnv(),
 		PassEnv:        s.cfg.PassEnv,
 		TrafficShaper:  shaper,
+		AI:             s.aiChecker(attachAI),
 	}
 	session, err := executor.NewSession(base, driver, rc, sc)
 	if err != nil {

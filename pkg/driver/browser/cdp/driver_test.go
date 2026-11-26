@@ -921,8 +921,6 @@ func TestUnsupportedCommands(t *testing.T) {
 		{"stopRecording", &flow.StopRecordingStep{}},
 		{"clearKeychain", &flow.ClearKeychainStep{}},
 		{"setPermissions", &flow.SetPermissionsStep{}},
-		{"assertNoDefectsWithAI", &flow.AssertNoDefectsWithAIStep{}},
-		{"assertWithAI", &flow.AssertWithAIStep{}},
 		{"extractTextWithAI", &flow.ExtractTextWithAIStep{}},
 	}
 
@@ -933,6 +931,22 @@ func TestUnsupportedCommands(t *testing.T) {
 				t.Errorf("%s should not succeed on web platform", tt.name)
 			}
 		})
+	}
+}
+
+// The AI checks are the executor's (pkg/executor/aicheck.go): the driver no
+// longer answers them as unsupported on web.
+func TestAIChecksAreNotTheDriversOwn(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+	for _, step := range []flow.Step{&flow.AssertNoDefectsWithAIStep{}, &flow.AssertWithAIStep{}} {
+		res := d.Execute(step)
+		if res.Success || strings.Contains(res.Message, "is not supported on web platform") && !strings.Contains(res.Message, "Step type") {
+			t.Fatalf("%T: %+v", step, res)
+		}
 	}
 }
 

@@ -64,7 +64,8 @@ var valueOptional = map[string]bool{
 	"launchApp": true, "stopApp": true, "killApp": true, "clearState": true,
 	"takeScreenshot": true, "scroll": true, "eraseText": true,
 	"waitForAnimationToEnd": true, "startRecording": true, "stopRecording": true,
-	"setTrafficShape": true, // every field defaults: no flags sends the unshaped shape
+	"setTrafficShape":       true, // every field defaults: no flags sends the unshaped shape
+	"assertNoDefectsWithAI": true, // maestro-d: its assertion is built in, and its options default
 }
 
 func oneShotArgsUsage(spec daemon.CommandSpec) string {

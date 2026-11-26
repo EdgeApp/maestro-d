@@ -87,3 +87,20 @@ func TestRenderFileMarks(t *testing.T) {
 		}
 	}
 }
+
+// maestro-d: the AI checks' docs come from overrides, and their thresholds
+// are a TypeScript type of the client's own.
+func TestAIOverridesAndThresholdsType(t *testing.T) {
+	for _, name := range []string{"assertWithAI", "assertNoDefectsWithAI"} {
+		c := Command{Name: name, Doc: "Uses AI."}
+		commandOverrides[name](&c)
+		if !strings.Contains(c.Doc, "assertWithAI") && !strings.Contains(c.Doc, "Jev") {
+			t.Fatalf("%s doc: %q", name, c.Doc)
+		}
+	}
+	for _, g := range []string{"AIThresholds", "*AIThresholds"} {
+		if got := tsType(g); got != "AIThresholds" {
+			t.Fatalf("tsType(%s) = %s", g, got)
+		}
+	}
+}

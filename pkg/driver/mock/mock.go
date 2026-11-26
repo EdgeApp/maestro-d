@@ -94,6 +94,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	switch step.(type) {
 	case *flow.TakeScreenshotStep, *flow.AssertScreenshotStep:
 		result.Data, _ = d.Screenshot()
+	case *flow.KeyboardVisibleStep: // maestro-d: the mock has no keyboard up
+		result.Data = map[string]any{"visible": false}
 	}
 
 	return result
@@ -218,4 +220,15 @@ func (d *Driver) Close() {
 	if s != nil {
 		s.Close()
 	}
+}
+
+// maestro-d: SampleProbe answers startSampler with fixed readings (cpu
+// 12.5 percent, memory 64 MiB, frames 60 fps), so a session's samplers run
+// without a device.
+func (d *Driver) SampleProbe(kind, appID string) (core.SampleFunc, error) {
+	v, ok := map[string]float64{core.SampleCPU: 12.5, core.SampleMemory: 64 << 20, core.SampleFrames: 60}[kind]
+	if !ok {
+		return nil, fmt.Errorf("unknown sampler kind %q", kind)
+	}
+	return func() (float64, error) { return v, nil }, nil
 }

@@ -355,6 +355,7 @@ listed once, as `avd:<name>`; booting it returns the emulator's serial.
 | `lease` | hub only: `{holder, expiresAt}` while the device is leased |
 | `reservations` | hub only: the device's [reservations](#post-v1reservations) that have not started, by start: `[{holder, startsAt, expiresAt}]`, never their lease ids |
 | `description` | Free text the device's host gives it in its [config.json](config.md); omitted when it has none |
+| `capabilities` | The JSON value the device's host gives it in its [config.json](config.md) (`hubDevices[].capabilities`), byte for byte as written, through every hub of the mesh and in lease answers too; maestro-d gives it no meaning. Omitted when it has none |
 | `trafficShaping` | `true` when the device's host has both traffic-shaping calls configured for it in its [config.json](config.md) (or older `network.json`) ([network](network.md)); omitted otherwise |
 | `available` | hub only: `true` for a ready device that is neither leased nor attached (here or by another daemon), nor still being released after its lease ended |
 | `maxSec` | hub only: the longest lease window the device takes (`--lease-max`; default 28800, 8 hours) |
@@ -609,6 +610,7 @@ curl -s -H "$H" $D/v1/devices/FAKE-IOS-UDID-0001/attach -d '{
 | `discardReports` | `--discard-reports` | delete the daemon-owned report directory at detach; by default it stays and the housekeeping sweep deletes it 3 days after its last write |
 | `flowDir` | | directory relative paths in steps resolve against |
 | `extra` | | any other `test` flag by its long name, e.g. `{"caps": "…", "headed": true}` |
+| `ai` | `--ai-keys-file` | `{"jevKey", "anthropicKey"}`, both optional: the keys the session's [AI checks](config.md#ai) spend when the daemon's own config.json has no `ai` block. Held in the session for those checks only: never in session variables, reports, logs or any answer. A daemon with its own `ai` block ignores them, and a hub never forwards them to the hub that owns the device |
 
 Answers `{"ok": true, "device": {…}}`. Errors: `DEVICE_NOT_FOUND`,
 `DEVICE_IN_USE`, `DEVICE_ERROR` (driver would not start — the message has
@@ -1002,10 +1004,58 @@ The response is a **step result**:
 | `skipped` | the step's `platform` did not match the device |
 | `optional`, `error` | the step failed but was optional: `ok` stays true |
 | `element` | the element a selector resolved to, when there was one |
-| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`) |
+| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`), `{visible}` for `keyboardVisible`, the sampler for `startSampler` and `stopSampler`, and the verdict for the [AI checks](#ai-checks) |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
 | `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |
+
+**Status bar.** `setStatusBar` (`{"mode": "demo"}`, optionally `time`
+`"9:41"` and `battery` `100`, or `{"mode": "live"}`) answers
+`UNSUPPORTED` with the message `UNSUPPORTED: status bar override on a
+physical iOS device` on a physical iPhone, iPad or Apple TV, and changes
+nothing; a browser or the computer device answers `UNSUPPORTED` too.
+
+**Samplers.** `startSampler` (`{"kind": "cpu"|"memory"|"frames", "appId",
+"intervalMs"}`) answers `{kind, appId, intervalMs}` and samples in the
+background; `stopSampler` (`{"kind"}`) stops it and answers the same fields
+on every platform:
+
+```json
+{ "kind": "memory", "unit": "bytes", "appId": "com.example.app", "intervalMs": 1000, "durationMs": 10040,
+  "count": 10, "min": 201326592, "max": 214958080, "mean": 208273817.6,
+  "samples": [ { "atMs": 1003, "value": 201326592 }, … ] }
+```
+
+`unit` is `percent` for cpu (of one core), `bytes` for memory (PSS on
+Android, resident size on an iOS simulator) and `fps` for frames. Android
+samples all three; an iOS simulator samples cpu and memory; frames on iOS
+and any kind on a physical iPhone or iPad answer `UNSUPPORTED`. A second
+`startSampler` of a kind already running is `USAGE`, and `stopSampler` of
+one that is not running fails the step. Detaching stops every sampler.
+
+### AI checks
+
+`assertWithAI` (`{"assertion": "…"}`) and `assertNoDefectsWithAI` (whose
+assertion is built in) judge a screenshot the daemon that owns the device
+takes, with the keys described in [config.md](config.md#ai). Jev answers
+first; Claude Haiku, Sonnet and Opus follow while each answer is unsure or
+below its threshold. Every verdict is a successful step: `pass`, `fail` and
+`unsure` all answer `ok: true` with the verdict in `data`, and only a
+missing screenshot or a bad step fails:
+
+```json
+{ "verdict": "pass", "confidence": 0.91, "model": "claude-haiku-5-5", "observed": "A sign-in form with an email and a password field",
+  "costUsd": 0.0021,
+  "escalations": [ { "model": "jev-1.14.0", "confidence": 0.55, "costUsd": 0.00001, "reason": "below-threshold" },
+                   { "model": "claude-haiku-5-5", "verdict": "pass", "confidence": 0.91, "costUsd": 0.0021 } ] }
+```
+
+`escalations` lists each model asked, with its answer, cost and, when it
+did not stop the waterfall, a `reason`: `below-threshold`, `error` (with the call's `error`),
+`no-key` (the daemon has no key for it) or `budget` (`budgetUsd` would be
+exceeded). `model` is empty when no stage answered. Options:
+`budgetUsd` and `thresholds: {jevPass, jevFail, haiku, sonnet, opus}`
+(defaults 0.7, 0.3, 0.7, 0.7, 0.7).
 
 Unknown `{name}`: `USAGE`. A value the parser rejects (unknown field, wrong
 type): `USAGE` with the parser's message. The step failing: `COMMAND_FAILED`
@@ -1183,6 +1233,51 @@ the device imply. The answer names the app:
 ```json
 { "ok": true, "exitCode": 0, "device": "emulator-5554", "appId": "io.appium.settings" }
 ```
+
+**From a URL.** Instead of `app`, send `url` (http or https), `appId` (the
+bundle id or package the build installs; required) and optionally
+`headers`, an object of request headers such as a bearer key:
+
+```sh
+curl -s -H "$H" $D/v1/devices/R5CT1234567@hub-b/apps -d @install.json
+# install.json: {"url": "https://builds.example/api/v2/builds/42/download",
+#                "headers": {"Authorization": "Bearer …"}, "appId": "com.example.app"}
+```
+
+The daemon that owns the device downloads the build itself: a hub routes
+the request to the device's own hub, which fetches it. Redirects are
+followed, but `headers` (and any `Authorization`) go on the first request
+only, never to a redirect's target, so a build server that redirects to
+signed storage does not leak its key there. The file is named from
+`Content-Disposition`, else the final URL's path, else `app.apk` or
+`app.ipa` by the device's platform. After the install the daemon keeps it
+as that device's build of `appId`, in `<home>/builds/<device>/<appId>/`, in
+place of the one kept before, so `clearState` on a physical iPhone or iPad
+can reinstall it ([`clearState`](commands.md#clearstate)). The daemon also
+remembers, per device and `appId`, the `ETag` it last installed
+(`<home>/installs.json`): while that build is kept it sends the `ETag` as
+`If-None-Match`, and a `304` or the same `ETag` skips the download and the
+install and answers `"cached": true`. An uninstall
+(`DELETE …/apps/{appId}`) forgets both, so the next install runs. `reinstall: true` installs anyway. The answer carries the
+`etag` when the server sent one:
+
+```json
+{ "ok": true, "exitCode": 0, "device": "R5CT1234567", "appId": "com.example.app", "cached": true, "etag": "\"5d8c…\"" }
+```
+
+`app` with `url`, or `url` without `appId`, is `USAGE`; a download that
+answers an error status is `USAGE` with `details.status`, and one that
+fails on the network or ends short is `DEVICE_ERROR`. Neither the headers
+nor the URL's query string (which may sign it) appear in a message or the
+log.
+
+**Allowed hosts.** The daemon fetches only from the hosts its
+`config.json` lists in [`installApp.allowHosts`](config.md#installapp), and
+follows a redirect only to one of them or, over https, to a DigitalOcean
+Space (`*.digitaloceanspaces.com`, Mason's signed download). Any other
+host, or a redirect elsewhere, is `FORBIDDEN`. A daemon without that block
+downloads any URL for a local caller and none for a remote one, so a hub
+that installs builds for its mesh lists their host.
 
 `appId` is the `CFBundleIdentifier` of an `.app` or an `.ipa`'s
 `Payload/*.app`, or an `.apk`'s package name from `aapt2 dump packagename`

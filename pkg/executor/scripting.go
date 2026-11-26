@@ -694,6 +694,16 @@ func (se *ScriptEngine) expandStringMap(m map[string]string) map[string]string {
 
 func (se *ScriptEngine) ExpandStep(step flow.Step) {
 	switch s := step.(type) {
+	case *flow.SetStatusBarStep: // maestro-d
+		s.Mode = se.ExpandVariables(s.Mode)
+		s.Time = se.ExpandVariables(s.Time)
+	case *flow.StartSamplerStep: // maestro-d
+		s.Kind = se.ExpandVariables(s.Kind)
+		s.AppID = se.ExpandVariables(s.AppID)
+	case *flow.StopSamplerStep: // maestro-d
+		s.Kind = se.ExpandVariables(s.Kind)
+	case *flow.AssertWithAIStep: // maestro-d
+		s.Assertion = se.ExpandVariables(s.Assertion)
 	case *flow.InputTextStep:
 		s.Text = se.ExpandVariables(s.Text)
 		s.Selector = *se.expandSelector(&s.Selector)
@@ -831,6 +841,14 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Direction = se.ExpandVariables(s.Direction)
 	case *flow.OpenBrowserStep:
 		s.URL = se.ExpandVariables(s.URL)
+	case *flow.HoverOnStep: // maestro-d: pointer gestures
+		s.Selector = *se.expandSelector(&s.Selector)
+	case *flow.HoldOnStep: // maestro-d
+		s.Selector = *se.expandSelector(&s.Selector)
+	case *flow.DragPathStep: // maestro-d
+		for i, p := range s.Points {
+			s.Points[i] = se.ExpandVariables(p)
+		}
 	case *flow.MoveMouseStep: // maestro-d: the computer device's mouse steps
 		s.Point = se.ExpandVariables(s.Point)
 	case *flow.ClickOnStep: // maestro-d

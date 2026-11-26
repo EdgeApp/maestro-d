@@ -40,45 +40,53 @@ func qualify(id, hub string) string {
 }
 
 // qualifyJSON rewrites the ids in a JSON document; anything that is not
-// JSON comes back unchanged.
+// JSON comes back unchanged. Values are walked as raw JSON, so what the
+// rewrite does not touch keeps its tokens as written: a number's literal,
+// and a device's capabilities, key order included.
 func qualifyJSON(data []byte, hub string, indent bool) []byte {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
+	if !json.Valid(data) {
 		return data
 	}
-	v = qualifyValue(v, hub)
-	var out []byte
-	var err error
-	if indent {
-		out, err = json.MarshalIndent(v, "", "  ")
-		out = append(out, '\n')
-	} else {
-		out, err = json.Marshal(v)
+	raw := qualifyRaw(bytes.TrimSpace(data), hub)
+	if !indent {
+		return raw
 	}
-	if err != nil {
-		return data
-	}
-	return out
+	var out bytes.Buffer
+	_ = json.Indent(&out, raw, "", "  ") // raw is valid JSON
+	out.WriteByte('\n')
+	return out.Bytes()
 }
 
-func qualifyValue(v any, hub string) any {
-	switch t := v.(type) {
-	case []any:
-		for i := range t {
-			t[i] = qualifyValue(t[i], hub)
+// qualifyRaw rewrites the ids in one valid JSON value.
+func qualifyRaw(raw json.RawMessage, hub string) json.RawMessage {
+	switch raw[0] {
+	case '[':
+		var list []json.RawMessage
+		_ = json.Unmarshal(raw, &list)
+		for i := range list {
+			list[i] = qualifyRaw(list[i], hub)
 		}
-	case map[string]any:
-		qualifyObject(t, hub)
-		for k, c := range t {
-			t[k] = qualifyValue(c, hub)
+		out, _ := json.Marshal(list)
+		return out
+	case '{':
+		var m map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &m)
+		device := qualifyObject(m, hub)
+		for k, c := range m {
+			// A device's capabilities are its host's own JSON, passed on
+			// untouched, even where it looks like an id.
+			if device && k == "capabilities" {
+				continue
+			}
+			m[k] = qualifyRaw(c, hub)
 		}
+		out, _ := json.Marshal(m)
+		return out
 	}
-	return v
+	return raw
 }
 
-func has(m map[string]any, keys ...string) bool {
+func has(m map[string]json.RawMessage, keys ...string) bool {
 	for _, k := range keys {
 		if _, ok := m[k]; !ok {
 			return false
@@ -87,32 +95,59 @@ func has(m map[string]any, keys ...string) bool {
 	return true
 }
 
+// str reads m[k] when it is a JSON string.
+func str(m map[string]json.RawMessage, k string) (string, bool) {
+	v, ok := m[k]
+	if !ok || v[0] != '"' {
+		return "", false
+	}
+	var s string
+	_ = json.Unmarshal(v, &s)
+	return s, true
+}
+
+func setStr(m map[string]json.RawMessage, k, s string) {
+	b, _ := json.Marshal(s)
+	m[k] = b
+}
+
 // qualifyObject rewrites one object's ids: a device entry (id, platform,
 // ready), a lease (id, expiresAt, ttlSec), and the device and lease
-// references of results, events and error details.
-func qualifyObject(m map[string]any, hub string) {
-	if id, ok := m["id"].(string); ok && has(m, "platform", "ready") && !strings.Contains(id, "@") {
-		m["localId"] = id
-		m["id"] = qualify(id, hub)
-		m["hub"] = hub
+// references of results, events and error details. It reports whether
+// the object is a device entry (an id and a platform).
+func qualifyObject(m map[string]json.RawMessage, hub string) bool {
+	id, isID := str(m, "id")
+	if isID && has(m, "platform", "ready") && !strings.Contains(id, "@") {
+		setStr(m, "localId", id)
+		setStr(m, "id", qualify(id, hub))
+		setStr(m, "hub", hub)
 	}
-	if id, ok := m["id"].(string); ok && has(m, "expiresAt", "ttlSec") {
-		m["id"] = qualify(id, hub)
+	if id, ok := str(m, "id"); ok && has(m, "expiresAt", "ttlSec") {
+		setStr(m, "id", qualify(id, hub))
 	}
 	for _, k := range []string{"device", "leaseDevice", "lease"} {
-		if s, ok := m[k].(string); ok {
-			m[k] = qualify(s, hub)
+		if s, ok := str(m, k); ok {
+			setStr(m, k, qualify(s, hub))
 		}
 	}
 	for _, k := range []string{"candidates", "attached"} {
-		if list, ok := m[k].([]any); ok {
-			for i, x := range list {
-				if s, ok := x.(string); ok {
-					list[i] = qualify(s, hub)
-				}
+		v, ok := m[k]
+		if !ok || v[0] != '[' {
+			continue
+		}
+		var list []json.RawMessage
+		_ = json.Unmarshal(v, &list)
+		for i, x := range list {
+			var s string
+			if x[0] == '"' && json.Unmarshal(x, &s) == nil {
+				b, _ := json.Marshal(qualify(s, hub))
+				list[i] = b
 			}
 		}
+		b, _ := json.Marshal(list)
+		m[k] = b
 	}
+	return isID && has(m, "platform")
 }
 
 // qualifyWriter qualifies the ids in the hub's own responses: a JSON body

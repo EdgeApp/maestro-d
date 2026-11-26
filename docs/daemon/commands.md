@@ -16,19 +16,19 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`assertCondition`](#assertcondition) | — | Asserts a condition. Uses a custom UnmarshalYAML because both BaseStep and Condition have a "timeout" yaml tag — Condition.Timeout is the semantically correct one here (controls how long to wait for visible/notVisible condition checks). |
 | [`assertDarkMode`](#assertdarkmode) | _none_ | Asserts the system UI is currently in dark appearance. |
 | [`assertLightMode`](#assertlightmode) | _none_ | Asserts the system UI is currently in light appearance. |
-| [`assertNoDefectsWithAI`](#assertnodefectswithai) | — | Uses AI to check for visual defects. |
+| [`assertNoDefectsWithAI`](#assertnodefectswithai) | — | assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result. |
 | [`assertNoJSErrors`](#assertnojserrors) | _none_ | Asserts that no console errors or uncaught exceptions occurred. |
 | [`assertNotVisible`](#assertnotvisible) | `text` | Asserts element is not visible. |
 | [`assertScreenshot`](#assertscreenshot) | `path` | Compares a screenshot with a reference image. |
 | [`assertTrue`](#asserttrue) | `condition` | Asserts a script condition is true (alias for assertCondition). |
 | [`assertVisible`](#assertvisible) | `text` | Asserts element is visible. |
-| [`assertWithAI`](#assertwithai) | `assertion` | Uses AI to verify an assertion. |
+| [`assertWithAI`](#assertwithai) | `assertion` | Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data. |
 | [`back`](#back) | _none_ | Presses back. |
 | [`blockNetwork`](#blocknetwork) | — | Blocks network requests matching URL patterns. |
 | [`clearConsoleLogs`](#clearconsolelogs) | _none_ | Clears captured browser console logs. |
 | [`clearKeychain`](#clearkeychain) | _none_ | Clears keychain. |
 | [`clearNetworkMocks`](#clearnetworkmocks) | _none_ | Clears all network mocks and blocks. |
-| [`clearState`](#clearstate) | `appId` | Clears app state. |
+| [`clearState`](#clearstate) | `appId` | Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp. |
 | [`clickOn`](#clickon) | `point` | Clicks a mouse button on the computer, optionally after moving to a point. |
 | [`closeTab`](#closetab) | _none_ | Closes the current tab and switches to the previous one. |
 | [`copyTextFrom`](#copytextfrom) | `text` | Copies text from element. |
@@ -36,6 +36,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`dismissAlert`](#dismissalert) | _none_ | Dismisses a system alert dialog (taps Don't Allow/Cancel). |
 | [`doubleTapOn`](#doubletapon) | `text` | Double taps on an element (alias for tapOn with repeat=2). |
 | [`dragAndDrop`](#draganddrop) | — | SwipeStep performs a swipe gesture. |
+| [`dragPath`](#dragpath) | — | Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED. |
 | [`eraseText`](#erasetext) | `characters` | Erases text. |
 | [`evalBrowserScript`](#evalbrowserscript) | `script` | Executes JavaScript in the browser page context (web only). Unlike EvalScriptStep which runs in Maestro's internal JS engine, this runs directly in the browser via CDP, with access to window, document, DOM, etc. |
 | [`evalScript`](#evalscript) | `script` | Evaluates JavaScript. |
@@ -46,12 +47,15 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`getCookies`](#getcookies) | `output` | Retrieves browser cookies and stores them as JSON. |
 | [`grantPermissions`](#grantpermissions) | — | Grants browser permissions (notifications, camera, etc). |
 | [`hideKeyboard`](#hidekeyboard) | _none_ | Hides the keyboard. |
+| [`holdOn`](#holdon) | `text` | Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS. |
+| [`hoverOn`](#hoveron) | `text` | Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED. |
 | [`inputRandom`](#inputrandom) | `type` | Generates random input. |
 | [`inputRandomEmail`](#inputrandomemail) | _none_ | Generates random input. |
 | [`inputRandomNumber`](#inputrandomnumber) | _none_ | Generates random input. |
 | [`inputRandomPersonName`](#inputrandompersonname) | _none_ | Generates random input. |
 | [`inputRandomText`](#inputrandomtext) | _none_ | Generates random input. |
 | [`inputText`](#inputtext) | `text` | Inputs text. |
+| [`keyboardVisible`](#keyboardvisible) | _none_ | Reports whether the software keyboard is on screen, as data {visible}, on Android (uiautomator2 and devicelab drivers) and iOS (WebDriverAgent). |
 | [`killApp`](#killapp) | `appId` | Kills an app. |
 | [`launchApp`](#launchapp) | `appId` | Launches an app. |
 | [`loadAuthState`](#loadauthstate) | `path` | Loads cookies + localStorage + sessionStorage from a JSON file. |
@@ -63,7 +67,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`openNotifications`](#opennotifications) | _none_ | Pulls down the Android notification shade. Android-only (no-op on iOS). |
 | [`openTab`](#opentab) | `url` | Opens a new browser tab. |
 | [`pasteText`](#pastetext) | _none_ | Pastes text. |
-| [`pressKey`](#presskey) | `key` | Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. |
+| [`pressKey`](#presskey) | `key` | Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field. |
 | [`removeMedia`](#removemedia) | _none_ | Clears media added by addMedia (Android: MediaStore index). |
 | [`repeat`](#repeat) | — | Repeats steps. |
 | [`resetPermissions`](#resetpermissions) | _none_ | Resets all browser permissions. |
@@ -86,10 +90,13 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`setNetworkConditions`](#setnetworkconditions) | — | Simulates network throttling or offline mode. |
 | [`setOrientation`](#setorientation) | `orientation` | Sets device orientation. |
 | [`setPermissions`](#setpermissions) | — | Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all |
+| [`setStatusBar`](#setstatusbar) | `mode` | Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead. |
 | [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. |
 | [`startRecording`](#startrecording) | `path` | Starts recording. |
+| [`startSampler`](#startsampler) | `kind` | Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED. |
 | [`stopApp`](#stopapp) | `appId` | Stops an app. |
 | [`stopRecording`](#stoprecording) | `path` | Stops recording. |
+| [`stopSampler`](#stopsampler) | `kind` | Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform. |
 | [`swipe`](#swipe) | `direction` |  |
 | [`switchTab`](#switchtab) | `tabLabel` | Switches to another browser tab. |
 | [`takeScreenshot`](#takescreenshot) | `path` | Takes a screenshot. When CropOn is set, the screenshot is cropped to the bounds of the matched element instead of capturing the whole screen. Mirrors Maestro's takeScreenshot.cropOn (see https://docs.maestro.dev/reference/commands-available/takescreenshot). |
@@ -197,7 +204,7 @@ await m.assertLightMode()
 
 ## `assertNoDefectsWithAI`
 
-Uses AI to check for visual defects.
+assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result.
 
 ```sh
 maestro-d assertNoDefectsWithAI --key value […]
@@ -212,6 +219,8 @@ await m.assertNoDefectsWithAI({ … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `budgetUsd` | `number` | The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall). |
+| `thresholds` | `AIThresholds` | Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there. |
 
 ## `assertNoJSErrors`
 
@@ -397,7 +406,7 @@ await m.assertVisible({ text: '<text>', … })
 
 ## `assertWithAI`
 
-Uses AI to verify an assertion.
+Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data.
 
 ```sh
 maestro-d assertWithAI <assertion>
@@ -414,6 +423,8 @@ await m.assertWithAI({ assertion: '<assertion>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `budgetUsd` | `number` | The most the check may spend, in US dollars: the waterfall stops before a call that would pass it and answers unsure (0 = no limit of the caller's own; a daemon spending its own keys caps it at its maxBudgetUsdPerCall). |
+| `thresholds` | `AIThresholds` | Stopping points: jevPass (default 0.7), jevFail (0.3), haiku, sonnet and opus (0.7 each); a value above 1 never stops there. |
 | `assertion` | `string` |  |
 
 ## `back`
@@ -509,7 +520,7 @@ await m.clearNetworkMocks()
 
 ## `clearState`
 
-Clears app state.
+Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp.
 
 ```sh
 maestro-d clearState <appId>
@@ -736,6 +747,27 @@ await m.dragAndDrop({ … })
 | `holdDuration` | `number` | HoldDuration is how long to press before moving (ms). Reorder UIs lift the item only after a long press, so the default is a full second. |
 | `duration` | `number` | Duration is how long the movement itself takes (ms). Drag targets track the finger, so moving too fast skips drop zones; default one second. |
 
+## `dragPath`
+
+Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED.
+
+```sh
+maestro-d dragPath --key value […]
+```
+```js
+await m.dragPath({ … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `points` | `string[]` | The path, at least two points, each "x, y" in screen pixels or "x%, y%" |
+| `duration` | `number` | How long the movement takes, in milliseconds, shared among the legs by length (default 1000) |
+| `holdDuration` | `number` | How long to press at the first point before moving, in milliseconds (default 0) |
+
 ## `eraseText`
 
 Erases text.
@@ -942,6 +974,124 @@ await m.hideKeyboard()
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 
+## `holdOn`
+
+Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS.
+
+```sh
+maestro-d holdOn <text>
+maestro-d holdOn --text <text> [--key value …]
+```
+```js
+await m.holdOn('<text>')
+await m.holdOn({ text: '<text>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `text` | `string` | Primary selectors |
+| `id` | `string` | Resource ID or accessibility ID |
+| `width` | `number` | Size matching |
+| `height` | `number` |  |
+| `tolerance` | `number` |  |
+| `enabled` | `boolean` | State filters |
+| `selected` | `boolean` |  |
+| `checked` | `boolean` |  |
+| `focused` | `boolean` |  |
+| `index` | `string` | Index for multiple matches (string for variable support) |
+| `traits` | `string` | Traits (comma-separated string, e.g., "button,heading") |
+| `css` | `string` | CSS selector for web views |
+| `placeholder` | `string` | Web-specific selectors |
+| `role` | `string` | Match by ARIA role (button, link, tab, etc.) |
+| `textContains` | `string` | Partial text match (contains) |
+| `href` | `string` | Match links by href attribute |
+| `alt` | `string` | Match by alt attribute (images) |
+| `title` | `string` | Match by title attribute (tooltips) |
+| `name` | `string` | Match by form field name attribute |
+| `testId` | `string` | Match by data-testid attribute |
+| `textRegex` | `string` | Match text by regex pattern |
+| `nth` | `number` | Pick Nth match (0-based) when multiple elements match |
+| `childOf` | `Selector` | Relative selectors |
+| `below` | `Selector` |  |
+| `above` | `Selector` |  |
+| `leftOf` | `Selector` |  |
+| `rightOf` | `Selector` |  |
+| `containsChild` | `Selector` |  |
+| `containsDescendants` | `Selector[]` |  |
+| `insideOf` | `Selector` | Visual containment (center point inside anchor bounds) |
+| `retryTapIfNoChange` | `boolean` |  |
+| `waitUntilVisible` | `boolean` |  |
+| `point` | `string` | Tap point "x%, y%" |
+| `start` | `string` | Swipe start "x%, y%" |
+| `end` | `string` | Swipe end "x%, y%" |
+| `repeat` | `number` | Tap repeat count |
+| `delay` | `number` | Delay between repeats (ms) |
+| `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
+| `duration` | `number` | How long to hold, in milliseconds (default 1000) |
+
+## `hoverOn`
+
+Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED.
+
+```sh
+maestro-d hoverOn <text>
+maestro-d hoverOn --text <text> [--key value …]
+```
+```js
+await m.hoverOn('<text>')
+await m.hoverOn({ text: '<text>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `text` | `string` | Primary selectors |
+| `id` | `string` | Resource ID or accessibility ID |
+| `width` | `number` | Size matching |
+| `height` | `number` |  |
+| `tolerance` | `number` |  |
+| `enabled` | `boolean` | State filters |
+| `selected` | `boolean` |  |
+| `checked` | `boolean` |  |
+| `focused` | `boolean` |  |
+| `index` | `string` | Index for multiple matches (string for variable support) |
+| `traits` | `string` | Traits (comma-separated string, e.g., "button,heading") |
+| `css` | `string` | CSS selector for web views |
+| `placeholder` | `string` | Web-specific selectors |
+| `role` | `string` | Match by ARIA role (button, link, tab, etc.) |
+| `textContains` | `string` | Partial text match (contains) |
+| `href` | `string` | Match links by href attribute |
+| `alt` | `string` | Match by alt attribute (images) |
+| `title` | `string` | Match by title attribute (tooltips) |
+| `name` | `string` | Match by form field name attribute |
+| `testId` | `string` | Match by data-testid attribute |
+| `textRegex` | `string` | Match text by regex pattern |
+| `nth` | `number` | Pick Nth match (0-based) when multiple elements match |
+| `childOf` | `Selector` | Relative selectors |
+| `below` | `Selector` |  |
+| `above` | `Selector` |  |
+| `leftOf` | `Selector` |  |
+| `rightOf` | `Selector` |  |
+| `containsChild` | `Selector` |  |
+| `containsDescendants` | `Selector[]` |  |
+| `insideOf` | `Selector` | Visual containment (center point inside anchor bounds) |
+| `retryTapIfNoChange` | `boolean` |  |
+| `waitUntilVisible` | `boolean` |  |
+| `point` | `string` | Tap point "x%, y%" |
+| `start` | `string` | Swipe start "x%, y%" |
+| `end` | `string` | Swipe end "x%, y%" |
+| `repeat` | `number` | Tap repeat count |
+| `delay` | `number` | Delay between repeats (ms) |
+| `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
+| `duration` | `number` | How long to stay before the step ends, in milliseconds (default 0) |
+
 ## `inputRandom`
 
 Generates random input.
@@ -1102,6 +1252,24 @@ await m.inputText({ text: '<text>', … })
 | `repeat` | `number` | Tap repeat count |
 | `delay` | `number` | Delay between repeats (ms) |
 | `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
+
+## `keyboardVisible`
+
+Reports whether the software keyboard is on screen, as data {visible}, on Android (uiautomator2 and devicelab drivers) and iOS (WebDriverAgent).
+
+```sh
+maestro-d keyboardVisible
+```
+```js
+await m.keyboardVisible()
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 
 ## `killApp`
 
@@ -1378,7 +1546,7 @@ await m.pasteText()
 
 ## `pressKey`
 
-Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.
+Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field.
 
 ```sh
 maestro-d pressKey <key>
@@ -1395,7 +1563,7 @@ await m.pressKey({ key: '<key>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `key` | `string` |  |
+| `key` | `string` | The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later) |
 
 ## `removeMedia`
 
@@ -1876,6 +2044,29 @@ await m.setPermissions({ … })
 | `appId` | `string` |  |
 | `permissions` | `Record<string, string>` |  |
 
+## `setStatusBar`
+
+Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead.
+
+```sh
+maestro-d setStatusBar <mode>
+maestro-d setStatusBar --mode <mode> [--key value …]
+```
+```js
+await m.setStatusBar('<mode>')
+await m.setStatusBar({ mode: '<mode>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `mode` | `string` | demo or live |
+| `time` | `string` | The clock demo mode shows, H:MM (default 9:41) |
+| `battery` | `number` | The battery level demo mode shows, 0–100 (default 100) |
+
 ## `setTrafficShape`
 
 Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it.
@@ -1920,6 +2111,29 @@ await m.startRecording({ path: '<path>', … })
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `path` | `string` |  |
 
+## `startSampler`
+
+Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED.
+
+```sh
+maestro-d startSampler <kind>
+maestro-d startSampler --kind <kind> [--key value …]
+```
+```js
+await m.startSampler('<kind>')
+await m.startSampler({ kind: '<kind>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `kind` | `string` | cpu, memory or frames |
+| `appId` | `string` | The app to sample (default: the session's app) |
+| `intervalMs` | `number` | Time between samples in milliseconds (default 1000, at least 100) |
+
 ## `stopApp`
 
 Stops an app.
@@ -1961,6 +2175,27 @@ await m.stopRecording({ path: '<path>', … })
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
 | `path` | `string` |  |
+
+## `stopSampler`
+
+Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform.
+
+```sh
+maestro-d stopSampler <kind>
+maestro-d stopSampler --kind <kind> [--key value …]
+```
+```js
+await m.stopSampler('<kind>')
+await m.stopSampler({ kind: '<kind>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `kind` | `string` | cpu, memory or frames |
 
 ## `swipe`
 

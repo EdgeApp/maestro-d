@@ -114,7 +114,7 @@ func TestModulePath(t *testing.T) {
 func TestCounted(t *testing.T) {
 	for path, want := range map[string]bool{
 		"pkg/a/a.go": true, "pkg/a/a_test.go": false, "pkg/daemon/commands_gen.go": false,
-		"pkg/hub/hubtest/proxy.go": false, "pkg/hub/link.go": true, "README.md": false,
+		"pkg/hub/hubtest/proxy.go": false, "pkg/aicheck/aichecktest/aichecktest.go": false, "pkg/hub/link.go": true, "README.md": false,
 	} {
 		if counted(path) != want {
 			t.Errorf("counted(%s) = %v", path, !want)
