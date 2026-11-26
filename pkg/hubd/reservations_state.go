@@ -81,11 +81,15 @@ func (t *leaseTable) snapshot() []reservationRecord {
 // saveReservations writes the hub's reservations. A failure is logged:
 // the reservations still hold in this process.
 func (s *Server) saveReservations() {
-	s.reservationsMu.Lock()
-	defer s.reservationsMu.Unlock()
-	if err := writeReservations(ReservationsPath(s.cfg.Name), s.leases.snapshot()); err != nil {
+	if err := s.flushReservations(); err != nil {
 		logger.Warn("reservations: %v", err)
 	}
+}
+
+func (s *Server) flushReservations() error {
+	s.reservationsMu.Lock()
+	defer s.reservationsMu.Unlock()
+	return writeReservations(ReservationsPath(s.cfg.Name), s.leases.snapshot())
 }
 
 func writeReservations(path string, recs []reservationRecord) error {
