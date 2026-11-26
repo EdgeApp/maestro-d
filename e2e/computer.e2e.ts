@@ -597,7 +597,7 @@ scenario('C14', async () => {
   const localHub = (hubHome: string, args: string[]) => cli(args, {
     MAESTRO_D_HOME: hubHome, MAESTRO_D_MOCK_DEVICES: hubHome === homeA ? mock : ''
   }, undefined, hubBin)
-  const hub = (name: string, port: number) => ['start', '--name', name, '--listen', `127.0.0.1:${port}`, '--no-mdns',
+  const hub = (name: string, port: number) => ['start', '--web-port', '0', '--name', name, '--listen', `127.0.0.1:${port}`, '--no-mdns',
     '--token-file', path.join(tokens, 'token'), '--peer-token-file', path.join(tokens, 'peer')]
   const a = await localHub(homeA, [...hub('computerdevice-a', hubPortA), '--config', configA])
   assert.equal(a.code, 0, a.stdout)

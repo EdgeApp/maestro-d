@@ -63,6 +63,7 @@ type Frame struct {
 
 	// hello
 	Name       string `json:"name,omitempty"`
+	Machine    string `json:"machine,omitempty"` // hello: the host of an empty or offline pool
 	Version    string `json:"version,omitempty"`
 	APIVersion string `json:"apiVersion,omitempty"`
 	// Instance is a random id per hub process: a hello from a known name
