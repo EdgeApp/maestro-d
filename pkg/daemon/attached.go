@@ -122,6 +122,9 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	} else if strings.HasPrefix(id, "df:") {
 		return nil, Errorf(CodeUsage, "%s is a cloud model, not a device: launch it first (device create --provider devicefarm, or lease --location cloud)", id)
 	}
+	if e := s.verifyBinding(ctx, id); e != nil {
+		return nil, e
+	}
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
 	var (

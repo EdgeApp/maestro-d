@@ -138,9 +138,17 @@ func runHubTest(ctx context.Context, cfg *RunConfig, opts daemonOpts) error {
 		if err != nil {
 			return err
 		}
-		id, info, err := leaseAndAttach(ctx, client, &workerOpts, device)
+		id, info, err := leaseAndAttach(ctx, client, &workerOpts, device, false)
 		if err != nil {
 			return err
+		}
+		// A restored grant can defer attachment until its first flow. Resolve the
+		// inventory row for that grant before recording the target in the report.
+		if !info.Attached {
+			info, err = client.Device(ctx, id)
+			if err != nil {
+				return err
+			}
 		}
 		if seen[id] {
 			return daemon.Errorf(daemon.CodeUsage, "parallel workers require distinct leased devices: %s", id)
@@ -148,7 +156,7 @@ func runHubTest(ctx context.Context, cfg *RunConfig, opts daemonOpts) error {
 		seen[id] = true
 		deviceInfo := report.Device{
 			ID: id, Name: info.Name, Platform: info.Platform, OSVersion: info.OSVersion,
-			Model: info.Model, IsSimulator: info.Kind == "simulator",
+			Model: info.Model, IsSimulator: info.Kind == "simulator" || info.Kind == "emulator",
 		}
 		if worker == 0 {
 			index.Device = deviceInfo
