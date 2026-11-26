@@ -1,6 +1,7 @@
 package hubd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,12 +9,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -108,7 +111,9 @@ func TestLeaseStateCoalescesConcurrentRenewals(t *testing.T) {
 	if stateOnDisk(t, s).Leases[0].ExpiresAt != env.at(90*time.Second) {
 		t.Fatal("renew returned before persistence")
 	}
-	s.endAllLeases()
+	if err := s.stopLeases(true); err != nil {
+		t.Fatal(err)
+	}
 	if len(stateOnDisk(t, s).Leases) != 0 {
 		t.Fatal("shutdown returned before persistence")
 	}
@@ -328,5 +333,599 @@ func TestLeaseWriterWaitsForEachRevision(t *testing.T) {
 	}
 	if writes.Load() != 2 || s.writer.committed != second.revision {
 		t.Fatal("revision left unwritten")
+	}
+}
+
+func loadRestartState(t *testing.T, env *hubEnv, state leaseFile) {
+	t.Helper()
+	if err := writeLeases(LeasesPath(env.s.cfg.Name), state); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.s.loadLeases(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLeases_RestartTransfersBootAcrossWindows(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	a := env.lease(env.local, daemon.LeaseRequest{Select: &daemon.LeaseSelector{Name: "Spare Phone", Boot: true}, TTLSec: 60}).Lease
+	successor := env.mustReserve(env.remote, daemon.ReservationRequest{Device: a.Device, StartAt: env.at(65 * time.Second), TTLSec: 180, Holder: "next"})
+	env.s.Server.Server.Shutdown("stop")
+	<-env.s.Done()
+	if len(env.stopped) != 0 {
+		t.Fatal(env.stopped)
+	}
+	saved := stateOnDisk(t, env.s.Server)
+	env = newHubEnv(t, daemon.Config{})
+	env.clock.advance(70 * time.Second)
+	env.booted[a.Device] = true
+	loadRestartState(t, env, saved)
+	disk := stateOnDisk(t, env.s.Server)
+	if len(disk.Leases) != 1 || disk.Leases[0].ID != successor.ID || !disk.Leases[0].Booted || len(disk.BootDuties) != 0 || len(env.stopped) != 0 {
+		t.Fatal(disk, env.stopped)
+	}
+	env.remote.SetLease(a.Device, successor.ID)
+	if _, err := env.remote.Attach(t.Context(), a.Device, daemon.AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.remote.Command(t.Context(), a.Device, "tapOn", "x", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.remote.ReleaseLease(t.Context(), successor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(env.stopped, []string{a.Device}) {
+		t.Fatal(env.stopped)
+	}
+}
+
+func TestLeases_RestartVerifiesEmulatorAtUseAndCleanup(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		env := newHubEnv(t, daemon.Config{})
+		env.emuAVD = "Replacement"
+		configRequest(t, env.local, "PUT", "/avd:Original", "{}", 201)
+		l := daemon.Lease{ID: "saved", Device: "emulator-5554", Holder: "Ada", Description: "original", Booted: true, State: daemon.LeaseActive, StartsAt: env.at(-time.Hour), ExpiresAt: env.at(time.Hour), TTLSec: 3600, MaxSec: 28800}
+		if expired {
+			l.ExpiresAt = env.at(-time.Minute)
+		}
+		record := leaseRecord{Lease: l, AVD: "android:original", Shared: true}
+		clash := record
+		clash.ID = "overlapping"
+		loadRestartState(t, env, leaseFile{Version: 2, Leases: []leaseRecord{record, clash}})
+		if env.s.leases.lookup(clash.ID) != nil {
+			t.Fatal("overlapping entry restored")
+		}
+		if len(env.stopped) != 0 {
+			t.Fatal("stopped replacement", env.stopped)
+		}
+		ctx := t.Context()
+		if expired {
+			if got := stateOnDisk(t, env.s.Server); len(got.BootDuties) != 1 || len(got.Leases) != 0 {
+				t.Fatal(got)
+			}
+		} else {
+			rows, err := env.local.HubDevices(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			i := slices.IndexFunc(rows.Devices, func(row daemon.HubConfigDevice) bool { return row.ID == "avd:Original" })
+			if i < 0 || rows.Devices[i].Listed || rows.Devices[i].Lease == nil || rows.Devices[i].Lease.Holder != l.Holder {
+				t.Fatalf("absent AVD config row: %+v", rows.Devices)
+			}
+			found, err := env.remote.Lease(ctx, l.ID)
+			if err != nil || found.Lease.Device != "" || found.Lease.ID != l.ID || found.Lease.ExpiresAt != l.ExpiresAt {
+				t.Fatal(found, err)
+			}
+			env.remote.SetLease(l.Device, l.ID)
+			_, err = env.remote.Attach(ctx, l.Device, daemon.AttachConfig{Platform: "mock"})
+			wantErrCode(t, err, daemon.CodeDeviceNotFound)
+			_, err = env.remote.Command(ctx, l.Device, "tapOn", "x", true)
+			wantErrCode(t, err, daemon.CodeDeviceNotFound)
+			if _, attached := env.s.Registry().Record(l.Device); attached {
+				t.Fatal("driver opened on replacement")
+			}
+		}
+		const current = "emulator-5556"
+		env.mu.Lock()
+		env.phones = append(env.phones, daemon.DeviceInfo{ID: current, Platform: "android", Kind: "emulator", Ready: true, Name: "Original"})
+		env.mu.Unlock()
+		if expired {
+			env.s.retryBootDuties()
+			if err := env.s.queueLeases(false).wait(); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			found, err := env.remote.Lease(ctx, l.ID)
+			if err != nil || found.Lease.Device != current || found.Lease.ID != l.ID || found.Lease.ExpiresAt != l.ExpiresAt {
+				t.Fatal(found, err)
+			}
+			list, err := env.local.HubDevices(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range list.Devices {
+				if d.ID == "avd:Original" && (!d.Listed || d.Lease == nil || d.Lease.Holder != l.Holder) {
+					t.Fatalf("restored AVD config row: %+v", d)
+				}
+				if d.ID == l.Device && d.Lease != nil {
+					t.Fatalf("replacement shows previous AVD's grant: %+v", d)
+				}
+			}
+			_, err = env.local.AcquireLease(ctx, daemon.LeaseRequest{Device: current})
+			wantErrCode(t, err, daemon.CodeDeviceInUse)
+			env.remote.SetLease(current, l.ID)
+			if _, err = env.remote.Attach(ctx, current, daemon.AttachConfig{Platform: "mock"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = env.remote.Command(ctx, current, "tapOn", "x", true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = env.remote.ReleaseLease(ctx, l.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !slices.Equal(env.stopped, []string{current}) {
+			t.Fatal(env.stopped)
+		}
+		if got := stateOnDisk(t, env.s.Server); len(got.BootDuties) != 0 || len(got.Leases) != 0 {
+			t.Fatal(got)
+		}
+	}
+}
+
+func TestRestoredAVDExpiresBeforeNextGrant(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	env.emuAVD = "Pixel"
+	device := daemon.DeviceInfo{ID: "emulator-5554", Name: "Pixel", Platform: "android", Kind: "emulator"}
+	l := daemon.Lease{ID: "previous", Device: "emulator-5560", State: daemon.LeaseActive, StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Minute)}
+	loadRestartState(t, env, leaseFile{Version: 2, Leases: []leaseRecord{{Lease: l, AVD: avdKey(device)}}})
+	env.clock.advance(2 * time.Minute)
+	if !env.s.leases.releasing(device) || !env.s.leases.reserved(device) {
+		t.Fatal("expired grant must reserve its discovered device until teardown")
+	}
+	if _, err := env.s.leases.grant(device.ID, avdKey(device), "next", time.Time{}, time.Minute, time.Hour, false); err == nil || err.Code != daemon.CodeDeviceInUse {
+		t.Fatalf("unsettled grant admitted a successor: %v", err)
+	}
+	res, err := env.local.AcquireLease(t.Context(), daemon.LeaseRequest{Device: device.ID})
+	if err != nil || env.s.leases.lookup(l.ID) != nil || env.s.leases.releasing(device) {
+		t.Fatalf("successor %+v, previous grant or teardown still present: %v", res, err)
+	}
+}
+
+func TestRestoreRemovedLeaseExpiry(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	now := env.clock.now()
+	loadRestartState(t, env, leaseFile{Version: 2, Removed: removedWindows{
+		"ended":  {Device: "mock-1", Until: now},
+		"future": {Device: "mock-1", Until: now.Add(time.Minute)},
+	}})
+	if disk := stateOnDisk(t, env.s.Server); len(disk.Removed) != 1 || !env.s.removedLeaseMatches("mock-1", "future") {
+		t.Fatalf("unexpected restored windows: %v", disk.Removed)
+	}
+	env.clock.advance(time.Minute)
+	env.s.sweepLeases()
+	if err := env.s.saveLeases(); err != nil {
+		t.Fatal(err)
+	}
+	if disk := stateOnDisk(t, env.s.Server); len(disk.Removed) != 0 || env.s.removedLeaseMatches("mock-1", "future") {
+		t.Fatalf("retained expired credential: %v", disk.Removed)
+	}
+}
+
+func TestOfflineRemovalRemembersCurrentEmulator(t *testing.T) {
+	t.Setenv(daemon.EnvHome, t.TempDir())
+	path := daemontest.DeviceConfig(t, "avd:Original")
+	grant := leaseRecord{Lease: daemon.Lease{ID: "former", Device: "emulator-5554", Holder: "Ada", State: daemon.LeaseActive, ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)}, AVD: "android:original"}
+	if err := writeLeases(LeasesPath("hub"), leaseFile{Version: 2, Leases: []leaseRecord{grant}}); err != nil {
+		t.Fatal(err)
+	}
+	absent, err := OpenOfflineConfig(path, daemon.Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := absent.Listing().Devices[0]
+	if row.Listed || row.Lease == nil || row.Lease.Holder != grant.Holder {
+		t.Fatal(row)
+	}
+	f, err := OpenOfflineConfig(path, daemon.Deps{ListDevices: func(string) []daemon.DeviceInfo {
+		return []daemon.DeviceInfo{
+			{ID: "emulator-5554", Name: "Replacement", Platform: "android", Kind: "emulator", Ready: true},
+			{ID: "emulator-5556", Name: "Original", Platform: "android", Kind: "emulator", Ready: true},
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Remove("avd:Original", true); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := readLeases(LeasesPath("hub"))
+	if err != nil || len(disk.Leases) != 0 || disk.Removed[grant.ID].Device != "emulator-5556" {
+		t.Fatal(disk, err)
+	}
+}
+
+func TestOfflineBootDutyRetriedBeforeConfigRemoval(t *testing.T) {
+	t.Setenv(daemon.EnvHome, t.TempDir())
+	const id = "sim"
+	path := daemontest.DeviceConfig(t, id)
+	now := time.Now()
+	grant := leaseRecord{Lease: daemon.Lease{ID: "l", Device: id, State: daemon.LeaseActive, Booted: true, StartsAt: now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: now.Add(time.Minute).Format(time.RFC3339)}}
+	if err := writeLeases(LeasesPath("hub"), leaseFile{Version: 2, Leases: []leaseRecord{grant}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	deps := daemon.Deps{ListDevices: func(string) []daemon.DeviceInfo { return []daemon.DeviceInfo{{ID: id, State: "Booted"}} }, ShutdownDevice: func(info daemon.DeviceInfo) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("simulator temporarily unavailable")
+		}
+		return nil
+	}}
+	for attempt := 1; attempt <= 2; attempt++ {
+		f, err := OpenOfflineConfig(path, deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := f.config.Lookup(id); !ok {
+			t.Fatal("config changed before cleanup succeeded")
+		}
+		err = f.Remove(id, true)
+		state, readErr := readLeases(LeasesPath("hub"))
+		if readErr != nil || len(state.Leases) != 0 || state.Removed[grant.ID].Device != id || calls != attempt {
+			t.Fatal(state, readErr, calls)
+		}
+		if attempt == 1 {
+			if err == nil || len(state.BootDuties) != 1 {
+				t.Fatal(err, state)
+			}
+		} else if err != nil || len(state.BootDuties) != 0 {
+			t.Fatal(err, state)
+		}
+	}
+}
+
+func TestRestoreWithoutVerifiedAVDIdentity(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	env.emuAVD = "Elsewhere"
+	lease := daemon.Lease{ID: "legacy", Device: "emulator-5554", State: daemon.LeaseActive, Booted: true, StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Hour)}
+	loadRestartState(t, env, leaseFile{Version: 2, Leases: []leaseRecord{{Lease: lease, Shared: true}}})
+	got, err := env.remote.Lease(t.Context(), lease.ID)
+	if err != nil || got.Lease.Device != "" || got.Lease.ID != lease.ID {
+		t.Fatal(got, err)
+	}
+	replacement := env.lease(env.local, daemon.LeaseRequest{Device: lease.Device})
+	if replacement.Lease.ID == lease.ID {
+		t.Fatal(replacement)
+	}
+	if _, err := env.remote.ReleaseLease(t.Context(), lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.stopped) != 0 || env.s.leases.lookup(replacement.Lease.ID).booted {
+		t.Fatal("used recycled serial to discharge an unknown duty")
+	}
+}
+
+func TestBootCleanupWaitsForNamedDaemon(t *testing.T) {
+	for _, mode := range []string{"restart", "offline removal"} {
+		t.Run(mode, func(t *testing.T) {
+			env := newHubEnv(t, daemon.Config{Name: "hub", HubProcess: true})
+			const id = "SIM-UP"
+			owner := &daemon.Info{Name: "other", PID: os.Getpid(), APIVersion: daemon.APIVersion}
+			if err := daemon.WriteInfo(owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicWriteJSON(daemon.DevicesPath(owner.Name), []daemon.DeviceInfo{{ID: id, Attached: true}}); err != nil {
+				t.Fatal(err)
+			}
+			grant := leaseRecord{Lease: daemon.Lease{ID: "boot", Device: id, State: daemon.LeaseActive, Booted: true, StartsAt: env.at(-time.Hour), ExpiresAt: env.at(-time.Minute)}}
+			state := leaseFile{Version: 2, Leases: []leaseRecord{grant}}
+			if mode == "offline removal" {
+				if err := writeLeases(LeasesPath("hub"), state); err != nil {
+					t.Fatal(err)
+				}
+				deps := daemon.Deps{ListDevices: env.s.Registry().Live, ShutdownDevice: env.s.stop}
+				offline, err := OpenOfflineConfig(daemontest.DeviceConfig(t, id), deps)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := offline.Remove(id, true); err != nil {
+					t.Fatal(err)
+				}
+				state = stateOnDisk(t, env.s.Server)
+				if len(state.BootDuties) != 1 || len(state.Leases) != 0 || len(env.stopped) != 0 {
+					t.Fatal(state, env.stopped)
+				}
+			}
+			loadRestartState(t, env, state)
+			env.s.retryBootDuties()
+			if got := stateOnDisk(t, env.s.Server); len(got.BootDuties) != 1 || len(env.stopped) != 0 {
+				t.Fatal(got, env.stopped)
+			}
+			if err := os.Remove(daemon.DevicesPath(owner.Name)); err != nil {
+				t.Fatal(err)
+			}
+			env.s.retryBootDuties()
+			if err := env.s.queueLeases(false).wait(); err != nil {
+				t.Fatal(err)
+			}
+			if got := stateOnDisk(t, env.s.Server); len(got.BootDuties) != 0 || !slices.Equal(env.stopped, []string{id}) {
+				t.Fatal(got, env.stopped)
+			}
+		})
+	}
+}
+
+func TestEndLeasesStopWaitsForJournal(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	s := env.s.Server
+	lease := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1"}).Lease
+	fail := failLeaseWrites(s)
+	for range 2 {
+		if err := env.local.ShutdownHub(t.Context(), true); err == nil || !strings.Contains(err.Error(), "journal unwritable") {
+			t.Fatalf("stop with failed write: %v", err)
+		}
+		if s.ShuttingDown() || stateOnDisk(t, s).Leases[0].ID != lease.ID {
+			t.Fatal("failed stop must allow another attempt")
+		}
+	}
+	fail.Store(false)
+	if err := env.local.ShutdownHub(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	<-s.Done()
+	if len(stateOnDisk(t, s).Leases) != 0 {
+		t.Fatal("acknowledged stop left an active lease on disk")
+	}
+}
+
+func TestOrdinaryStopWaitsForJournal(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	s := env.s.Server
+	ctx := t.Context()
+	released := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1"}).Lease
+	kept := env.lease(env.remote, daemon.LeaseRequest{Device: "mock-2", Attach: &daemon.AttachConfig{Platform: "mock"}}).Lease
+
+	fail := failLeaseWrites(s)
+	_, err := env.local.ReleaseLease(ctx, released.ID)
+	_ = wantErrCode(t, err, daemon.CodeInternal)
+	for range 2 {
+		_ = wantErrCode(t, env.local.Shutdown(ctx), daemon.CodeInternal)
+		if got := stateOnDisk(t, s).Leases; len(got) != 2 {
+			t.Fatalf("expected the uncommitted release on disk, got %+v", got)
+		}
+		if _, err := env.remote.Command(ctx, kept.Device, "back", nil, true); err != nil {
+			t.Fatalf("surviving attachment after failed stop: %v", err)
+		}
+	}
+	fail.Store(false)
+	if err := env.local.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOnDisk(t, s).Leases; len(got) != 1 || got[0].ID != kept.ID {
+		t.Fatalf("leases on disk when stop acknowledged: %+v", got)
+	}
+	<-s.Done()
+}
+
+func failLeaseWrites(s *Server) *atomic.Bool {
+	var fail atomic.Bool
+	fail.Store(true)
+	s.writer.write = func(path string, f leaseFile) error {
+		if fail.Load() {
+			return errors.New("journal unwritable")
+		}
+		return writeLeases(path, f)
+	}
+	return &fail
+}
+
+func TestReleaseRetryWaitsForJournal(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	s := env.s.Server
+	lease := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1"}).Lease
+	fail := failLeaseWrites(s)
+	for range 2 {
+		if _, err := env.local.ReleaseLease(t.Context(), lease.ID); err == nil || !strings.Contains(err.Error(), "journal unwritable") {
+			t.Fatalf("release with failed write: %v", err)
+		}
+		if stateOnDisk(t, s).Leases[0].ID != lease.ID {
+			t.Fatal("expected uncommitted removal")
+		}
+	}
+	fail.Store(false)
+	_, err := env.local.ReleaseLease(t.Context(), lease.ID)
+	_ = wantErrCode(t, err, daemon.CodeLeaseExpired)
+	if len(stateOnDisk(t, s).Leases) != 0 {
+		t.Fatal("acknowledged release left an active lease on disk")
+	}
+}
+
+func TestIncompleteAVDDiscoveryRetainsBootDuty(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{Name: "hub", HubProcess: true})
+	const serial, stable = "emulator-5556", "avd:Lab"
+	duty := bootDuty{Device: "emulator-5554", AVD: "android:lab"}
+	env.phones = []daemon.DeviceInfo{{ID: stable, Platform: "android", Kind: "emulator", Name: "Lab", State: "Unknown"}}
+	state := leaseFile{Version: 2, BootDuties: []bootDuty{duty}}
+	if err := writeLeases(LeasesPath("hub"), state); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := OpenOfflineConfig(daemontest.DeviceConfig(t, stable), daemon.Deps{ListDevices: env.s.Registry().Live, ShutdownDevice: env.s.stop})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := offline.Remove(stable, true); err != nil {
+		t.Fatal(err)
+	}
+	state = stateOnDisk(t, env.s.Server)
+	if !slices.Equal(state.BootDuties, []bootDuty{duty}) {
+		t.Fatal("offline cleanup lost duty", state)
+	}
+	loadRestartState(t, env, state)
+	if state = stateOnDisk(t, env.s.Server); !slices.Equal(state.BootDuties, []bootDuty{duty}) {
+		t.Fatal("startup cleanup lost duty", state)
+	}
+	env.phones = []daemon.DeviceInfo{{ID: serial, Platform: "android", Kind: "emulator", Name: "Lab", State: "device", Ready: true}}
+	env.s.retryBootDuties()
+	if err := env.s.queueLeases(false).wait(); err != nil {
+		t.Fatal(err)
+	}
+	if state = stateOnDisk(t, env.s.Server); len(state.BootDuties) != 0 || !slices.Equal(env.stopped, []string{serial}) {
+		t.Fatal(state, env.stopped)
+	}
+}
+
+func TestBootDiscoveryAllowsRenewalAndRechecksSuccessor(t *testing.T) {
+	env := newHubEnv(t, daemon.Config{})
+	booted := env.lease(env.local, daemon.LeaseRequest{Select: &daemon.LeaseSelector{Name: "Spare Phone", Boot: true}, TTLSec: 60}).Lease
+	other := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1", TTLSec: 600}).Lease
+	successor := env.mustReserve(env.local, daemon.ReservationRequest{Device: booted.Device, StartAt: env.at(2 * time.Minute), TTLSec: 60})
+	scanning, resume := make(chan struct{}), make(chan struct{})
+	var started atomic.Bool
+	env.mu.Lock()
+	env.onList = func() {
+		if started.CompareAndSwap(false, true) {
+			close(scanning)
+			<-resume
+		}
+	}
+	env.mu.Unlock()
+	released := make(chan error, 1)
+	go func() {
+		_, err := env.local.ReleaseLease(t.Context(), booted.ID)
+		released <- err
+	}()
+	select {
+	case <-scanning:
+		env.clock.advance(65 * time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		_, err := env.local.RenewLease(ctx, other.ID, 600)
+		cancel()
+		if err != nil {
+			t.Errorf("unrelated lease renewal during discovery: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("release did not reach boot discovery")
+	}
+	close(resume)
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	state := stateOnDisk(t, env.s.Server)
+	idx := slices.IndexFunc(state.Leases, func(r leaseRecord) bool { return r.ID == successor.ID })
+	if idx < 0 || !state.Leases[idx].Booted || len(state.BootDuties) != 0 || len(env.stopped) != 0 {
+		t.Fatalf("missing handoff after discovery: successor index %d, duties %v, stopped %v", idx, state.BootDuties, env.stopped)
+	}
+}
+
+func TestRestoredGrantConfigRemovalUsesLiveIdentity(t *testing.T) {
+	const former, current = "emulator-5554", "emulator-5556"
+	for _, offline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("offline-%t", offline), func(t *testing.T) {
+			path := daemontest.DeviceConfig(t, former, current, "avd:Original")
+			env := newHubEnv(t, daemon.Config{Name: "hub", DeviceConfig: path})
+			grant := daemon.Lease{ID: "original", Device: former, State: daemon.LeaseActive, StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Hour)}
+			saved := leaseFile{Version: 2, Leases: []leaseRecord{{Lease: grant, AVD: "android:original"}}}
+			env.phones = []daemon.DeviceInfo{{ID: former, Platform: "android", State: "offline"}}
+			loadRestartState(t, env, saved)
+			remove := func(target string, status int) {
+				t.Helper()
+				if !offline {
+					configRequest(t, env.local, "DELETE", "/"+target+"?endLeases=true", "", status)
+					return
+				}
+				f, err := OpenOfflineConfig(path, daemon.Deps{ListDevices: env.s.Registry().Live})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.now = env.clock.now()
+				err = f.Remove(target, true)
+				if status == 200 && err != nil || status == 400 && err == nil {
+					t.Fatalf("remove %s: %v", target, err)
+				}
+			}
+			remove(former, 400)
+			if len(stateOnDisk(t, env.s.Server).Leases) != 1 {
+				t.Fatal("unresolved removal ended grant")
+			}
+			env.mu.Lock()
+			env.phones = append(env.phones, daemon.DeviceInfo{ID: current, Platform: "android", Kind: "emulator", Name: "Original", Ready: true})
+			env.mu.Unlock()
+			remove(former, 200)
+			if len(stateOnDisk(t, env.s.Server).Leases) != 1 {
+				t.Fatal("removing former serial ended grant")
+			}
+			remove(current, 200)
+			if len(stateOnDisk(t, env.s.Server).Leases) != 0 {
+				t.Fatal("removing current serial kept grant")
+			}
+		})
+	}
+}
+
+func TestRestoredGrantClosesItsAttachmentsWhileOffline(t *testing.T) {
+	for _, expire := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expire-%t", expire), func(t *testing.T) {
+			env := newHubEnv(t, daemon.Config{})
+			const serial = "emulator-5556"
+			device := daemon.DeviceInfo{ID: serial, Platform: "android", Kind: "emulator", Name: "Pixel", Ready: true}
+			env.phones = []daemon.DeviceInfo{device}
+			grant := daemon.Lease{ID: "restored", Device: "emulator-5554", State: daemon.LeaseActive, StartsAt: env.at(-time.Minute), ExpiresAt: env.at(time.Minute)}
+			loadRestartState(t, env, leaseFile{Version: 2, Leases: []leaseRecord{{Lease: grant, AVD: avdKey(device), Shared: true}}})
+			ctx := t.Context()
+			env.local.SetLease(serial, grant.ID)
+			first, err := env.local.Attach(ctx, serial, daemon.AttachConfig{Platform: "mock"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := env.lease(env.local, daemon.LeaseRequest{Device: "mock-1", TTLSec: 300, Attach: &daemon.AttachConfig{Platform: "mock"}})
+			env.mu.Lock()
+			env.phones = []daemon.DeviceInfo{{ID: serial, Platform: "android", State: "offline"}}
+			env.mu.Unlock()
+			if expire {
+				env.clock.advance(2 * time.Minute)
+				env.sweep()
+			} else if _, err = env.local.ReleaseLease(ctx, grant.ID); err != nil {
+				t.Fatal(err)
+			}
+			if atomic.LoadInt32(&env.cleanups) != 1 || len(env.stopped) != 0 {
+				t.Fatalf("driver cleanups %d, platform stops %v", env.cleanups, env.stopped)
+			}
+			if rec, ok := env.s.Registry().Record("mock-1"); !ok || !rec.Attached || !env.s.leases.isLive(other.Lease.ID) {
+				t.Fatal("unrelated grant lost its attachment")
+			}
+			env.mu.Lock()
+			env.phones = []daemon.DeviceInfo{device}
+			env.mu.Unlock()
+			next := env.lease(env.local, daemon.LeaseRequest{Device: serial, Attach: &daemon.AttachConfig{Platform: "mock"}})
+			if next.Device.AttachReused == nil || *next.Device.AttachReused || next.Device.ReportDir == first.ReportDir {
+				t.Fatalf("successor attachment reused a driver or report: %+v", next.Device)
+			}
+		})
+	}
+}
+
+func TestOfflineRemovalLeavesOtherAVDBootDuty(t *testing.T) {
+	t.Setenv(daemon.EnvHome, t.TempDir())
+	const old, current = "emulator-5554", "emulator-5556"
+	duty := bootDuty{Device: old, AVD: "android:original"}
+	if err := writeLeases(LeasesPath("hub"), leaseFile{Version: 2, BootDuties: []bootDuty{duty}}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := OpenOfflineConfig(daemontest.DeviceConfig(t, old, "avd:Original"), daemon.Deps{
+		ListDevices: func(string) []daemon.DeviceInfo {
+			return []daemon.DeviceInfo{{ID: old, Platform: "android", State: "offline"}, {ID: current, Name: "Original", Platform: "android", Kind: "emulator", Ready: true}}
+		},
+		ShutdownDevice: func(d daemon.DeviceInfo) error { return fmt.Errorf("unexpected platform stop of %s", d.ID) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Remove(old, true); err != nil {
+		t.Fatal(err)
+	}
+	state, err := readLeases(LeasesPath("hub"))
+	if err != nil || !slices.Equal(state.BootDuties, []bootDuty{duty}) {
+		t.Fatal(state, err)
 	}
 }

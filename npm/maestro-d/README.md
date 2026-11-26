@@ -108,15 +108,19 @@ Instance:
 | `catalog({platform?, available?})` | what `createDevice()` can use: `{ios: {runtimes, deviceTypes}, android: {images, profiles}}` |
 | `createDevice({platform, name, type?, runtime?, image?, profile?, dataSize?, installImage?, acceptLicenses?, boot?, bootTimeout?})` | create a simulator or AVD and boot it (unless `boot: false`); recorded as created by maestro-d |
 | `startDevice({platform?, name, bootTimeout?})` | boot a simulator/AVD by name, UDID or `avd:<name>`; `platform` may be left out for a listed device; the daemon shuts it down on exit |
-| `stopDevice(id, {force?})` | shut a device down; devices the daemon did not boot need `force` (`DEVICE_EXTERNAL`) |
-| `deleteDevice(id, {force?})` | delete a simulator or AVD (stopping it first); ones maestro-d did not create need `force` (`DEVICE_EXTERNAL`) |
+| `stopDevice(idOrHandle, {force?})` | shut a device down; devices the daemon did not boot need `force` (`DEVICE_EXTERNAL`) |
+| `deleteDevice(idOrHandle, {force?})` | delete a simulator or AVD (stopping it first); ones maestro-d did not create need `force` (`DEVICE_EXTERNAL`) |
 | `attach(opts)` | open a driver and return a `MaestroDevice` (below); on a hub it needs a lease the client holds — from `lease()` or `maestro-d lease` (see [Leases](#leases-on-a-hub)) |
 | `lease({device \| select, ttlSec?, holder?, attach?})` | on a hub: lease a device and return its handle, attached unless `attach: false` (see [Leases](#leases-on-a-hub)) |
 | `leasing` | true when the daemon is a hub (`info.hub`) and leases its devices |
-| `detach(id)` | close the driver on a device |
+| `detach(idOrHandle)` | close the driver on a device |
 | `events({device?, after?, signal})` | `AsyncIterable<DaemonEvent>` of step/device events (Server-Sent Events) |
-| `shutdown({wait?})` | detach everything, stop what the daemon booted, exit |
+| `shutdown({wait?})` | detach everything, stop what the daemon booted, exit; a hub keeps active leases and the devices they booted |
 | `close()` | release the leases this process took with `lease()`, then drop idle connections; the daemon keeps running. Returns a promise |
+
+For a leased Android emulator, pass the handle to `md.stopDevice(device)`,
+`md.deleteDevice(device)` or `md.detach(device)` so the operation follows its
+grant if its serial changes. A serial matching multiple grants returns `USAGE`.
 
 ### `daemon.attach(opts)` → `MaestroDevice`
 
@@ -413,10 +417,9 @@ await md.close()                               // releases it
   `LEASE_REQUIRED`, naming `md.lease()` and `maestro-d lease --device <id>`.
   So a script written for a local daemon — `e2e/iosLandscape.e2e.ts` — runs
   on a hub after `maestro-d lease --device <id>` in the shell.
-- `leases.json` is written through a temporary file and a rename (Node
-  cannot take the CLI's `flock`), so a script and a CLI updating it at the
-  same instant can lose one update; when several processes share a home and
-  lease at once, lease from the shell.
+- The bundled client locks `leases.json.lock` while updating the shared lease
+  file. Scripts and CLI processes can acquire, attach and rebind devices in
+  the same home concurrently.
 - Device entries on a hub carry `maxSec`, `machine` and `addresses` (the
   owning machine's host name, and its hub's advertised address plus its
   non-loopback IPs).

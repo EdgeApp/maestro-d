@@ -64,7 +64,9 @@ const video = await device.stream({ fps: 30, audio: true, signal })
   capture fails. The daemon log names the reason. `maestro-d stream` exits 0 on Ctrl-C,
   `--duration` or a daemon-ended stream, and its file always ends on a
   whole fragment, so it plays. The Go client (`Client.Stream`) does the
-  same; neither retries a stream.
+  same. After a hub restart, the CLI can reattach the held lease with its saved
+  settings and retry the initial handshake once. A running stream ends on
+  disconnect.
 - **Hubs.** A stream passes through the hub mesh like any device route,
   with the device's lease, on a bulk link of its own that does not count
   against the four transfers per peer ([hub.md](hub.md#routing)). It

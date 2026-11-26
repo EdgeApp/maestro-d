@@ -2,6 +2,9 @@
 // an HTTP server that records each request and answers as a hub would.
 
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { testClientBin } from './clientBin.mjs'
 import * as fs from 'node:fs'
 import * as http from 'node:http'
 import * as os from 'node:os'
@@ -23,6 +26,8 @@ let leaseState = 'scheduled'
 let noRoute = false
 /** True to fail the next attaches. */
 let failAttach = false
+let detachedCommand = false
+let attachReused
 
 const ok = (extra) => ({ ok: true, exitCode: 0, ...extra })
 const LEASE = {
@@ -58,11 +63,18 @@ function handler(req, res) {
     }
     if (url.pathname.startsWith('/v1/leases/') && req.method === 'DELETE') return send(200, ok({ lease: LEASE }))
     if (url.pathname === '/v1/devices/mock-1') return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: false } }))
+    if (decodeURIComponent(url.pathname) === '/v1/devices/phone@hub/attach' && req.headers['x-maestro-lease'] === LEASE.id) {
+      return send(200, ok({ device: { id: 'phone@hub', platform: 'android', ready: true, attached: true } }))
+    }
     if (url.pathname.endsWith('/attach')) {
       if (failAttach) return send(502, { ok: false, exitCode: 4, error: { code: 'DEVICE_ERROR', message: 'driver died' } })
-      return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: true } }))
+      return send(200, ok({ device: { id: 'mock-1', platform: 'mock', ready: true, attached: true, attachReused } }))
     }
     if (url.pathname.includes('/commands/')) {
+      if (detachedCommand) {
+        detachedCommand = false
+        return send(404, { ok: false, error: { code: 'DEVICE_NOT_ATTACHED', message: 'closed' } })
+      }
       const lease = req.headers['x-maestro-lease']
       if (lease === 'later') {
         return send(409, { ok: false, exitCode: 5, error: { code: 'LEASE_NOT_STARTED', message: 'starts later', details: { startsAt: '2099-01-01T00:00:00Z' } } })
@@ -76,6 +88,7 @@ function handler(req, res) {
 let server
 let addr = ''
 before(async () => {
+  process.env.MAESTRO_D_BIN = testClientBin(tmp)
   server = http.createServer(handler)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   addr = `127.0.0.1:${server.address().port}`
@@ -88,6 +101,7 @@ beforeEach(() => {
   requests = []
   leaseState = 'scheduled'
   noRoute = false
+  attachReused = undefined
   fs.rmSync(leasesPath(), { force: true })
 })
 
@@ -260,6 +274,62 @@ describe('leases.json with several leases per device', () => {
     assert.deepEqual(ids, ['go-1', 'new'])
   })
 
+  test('two handles borrow the same shell lease and the second recovers independently', async () => {
+    leaseState = 'active'
+    const md = await MaestroD.connect({ hub: addr })
+    recordLease(md.leaseKey, LEASE)
+    const first = await md.attach({ device: LEASE.device })
+    const second = await md.attach({ device: LEASE.device })
+    assert.equal(first.lease.id, LEASE.id)
+    assert.equal(second.lease.id, LEASE.id)
+    detachedCommand = true
+    await second.tapOn('x')
+    assert.equal(requests.filter(r => r.url.endsWith('/attach')).length, 3)
+    await md.close()
+    assert.equal(leaseRequests('DELETE').length, 0)
+    assert.equal(findLease(md.leaseKey, LEASE.device)?.id, LEASE.id)
+  })
+
+  test('bare device ID attaches to an unshared phone with its saved qualified credential', async () => {
+    const md = await MaestroD.connect({ hub: addr })
+    recordLease(md.leaseKey, { ...LEASE, device: 'phone@hub' })
+    recordLease('http://another-hub', { ...LEASE, device: 'phone@elsewhere' })
+    const dev = await md.attach({ device: 'phone' })
+    assert.equal(dev.id, 'phone@hub')
+    assert.equal(dev.lease.id, LEASE.id)
+    assert.deepEqual(requests.map(r => decodeURIComponent(r.url)), ['/v1/status', '/v1/devices/phone@hub/attach'])
+    await md.close()
+  })
+
+  test('reused shell attachment keeps the effective options on disk and for JS recovery', async () => {
+    leaseState = 'active'
+    const md = await MaestroD.connect({ hub: addr })
+    const saved = { appId: 'shell.app', env: { COLOR: 'green' } }
+    recordLease(md.leaseKey, LEASE, saved)
+    attachReused = true
+    await md.attach({ device: LEASE.device })
+    const dev = await md.attach({ device: LEASE.device, appId: 'ignored' })
+    assert.deepEqual(findLease(md.leaseKey, LEASE.device).attach, saved)
+    detachedCommand = true
+    attachReused = false
+    await dev.tapOn('x')
+    assert.deepEqual(requests.filter(r => r.url.endsWith('/attach')).at(-1).body, saved)
+    await md.attach({ device: LEASE.device, appId: 'new.app' })
+    assert.deepEqual(findLease(md.leaseKey, LEASE.device).attach, { appId: 'new.app' })
+    await md.close()
+  })
+
+  test('static attach keeps connection options out of the driver request and the saved grant', async () => {
+    const hub = `http://${addr}`
+    recordLease(hub, { ...LEASE, startsAt: '2020-01-01T00:00:00Z' })
+    const driver = { platform: 'mock', appId: 'example.app', noAppInstall: true }
+    await MaestroD.attach({ url: hub, token: 'secret', log() {}, device: 'mock-1', ...driver })
+    const req = requests.find(r => r.url.endsWith('/attach'))
+    assert.equal(req.headers.authorization, 'Bearer secret')
+    assert.deepEqual(req.body, driver)
+    assert.deepEqual(findLease(hub, 'mock-1').attach, driver)
+  })
+
   test('attach() sends the started lease on file, not a reservation; LEASE_NOT_STARTED keeps the record', async () => {
     const md = await MaestroD.connect({ hub: addr, token: 't' })
     recordLease(md.leaseKey, { id: 'now', device: 'mock-1', startsAt: '2020-01-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z', ttlSec: 60 })
@@ -281,4 +351,31 @@ describe('leases.json with several leases per device', () => {
     await md2.close()
     void dev
   })
+})
+
+test('concurrent scripts and a CLI reservation retain every grant and its attach options', async () => {
+  const hub = 'http://lab'
+  const workers = Array.from({ length: 8 }, (_, i) => String(i))
+  for (const id of workers) recordLease(hub, { id, device: `old-${id}` })
+  const run = promisify(execFile)
+  const module = new URL('../dist/esm/leasefile.js', import.meta.url).href
+  const scripts = workers.map((id) => {
+    const script = `
+      import { recordLease } from ${JSON.stringify(module)}
+      const [hub, id] = process.argv.slice(1)
+      recordLease(hub, { id, device: 'current-' + id }, { appId: 'app-' + id }, false)
+    `
+    return run(process.execPath, ['--input-type=module', '-e', script, hub, id])
+  })
+  await Promise.all([...scripts, run(process.env.MAESTRO_D_BIN, [
+    'reserve', '--device', 'mock-1', '--start-at', '2h', '--ttl', '1h', '--target-hub=' + addr, '--json',
+  ])])
+  assert.equal(findLease('http://' + addr, 'mock-1')?.id, LEASE.id)
+  const records = loadLeases().filter(r => r.hub === hub)
+  assert.equal(records.length, workers.length)
+  for (const { id, device, attach, originalDevice } of records) {
+    assert.equal(device, `current-${id}`)
+    assert.equal(originalDevice, `old-${id}`)
+    assert.equal(attach.appId, `app-${id}`)
+  }
 })

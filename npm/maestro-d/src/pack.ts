@@ -21,7 +21,7 @@ import * as path from 'node:path'
 import { binaryPath } from './binary.js'
 import { codeFromHeaders, MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandSpec, type FileMark } from './generated/commands.js'
-import { isRetryableResponse, type RawResponse, type Transport } from './transport.js'
+import { devicePath, type DeviceBase, isRetryableResponse, type RawResponse, type Transport } from './transport.js'
 
 /** One upload unit, as `maestro-d pack --json` prints it. */
 export interface PackUnit {
@@ -114,7 +114,7 @@ export async function packFlow(roots: string[], opts: PackFlowOptions = {}): Pro
  */
 export async function uploadBundle(
   transport: Transport,
-  deviceBase: string,
+  deviceBase: DeviceBase,
   bundle: FlowBundle,
   opts: { manifest?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
@@ -129,8 +129,8 @@ function isBundlePath(rel: string): boolean {
 }
 
 /** Download one artifact to `target`, through a temporary file beside it. */
-async function fetchTo(transport: Transport, deviceBase: string, entry: string, target: string, signal?: AbortSignal): Promise<void> {
-  const data = await transport.bytes(`${deviceBase}/artifacts/${entry.split('/').map(encodeURIComponent).join('/')}`, { signal })
+async function fetchTo(transport: Transport, deviceBase: DeviceBase, entry: string, target: string, signal?: AbortSignal): Promise<void> {
+  const data = await transport.bytes(devicePath(deviceBase, `/artifacts/${entry.split('/').map(encodeURIComponent).join('/')}`), { signal })
   fs.mkdirSync(path.dirname(target), { recursive: true })
   const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.tmp`)
   fs.writeFileSync(tmp, data)
@@ -144,7 +144,7 @@ async function fetchTo(transport: Transport, deviceBase: string, entry: string, 
  */
 export async function fetchBundleOutputs(
   transport: Transport,
-  deviceBase: string,
+  deviceBase: DeviceBase,
   dir: string,
   outputs: string[] | undefined,
   signal?: AbortSignal,
@@ -190,8 +190,8 @@ function uploadRetryable(err: unknown): boolean {
  * resumes from the new offset.
  * Returns true when bytes were sent.
  */
-export async function upload(transport: Transport, deviceBase: string, unit: PackUnit, signal?: AbortSignal): Promise<boolean> {
-  const url = `${deviceBase}/blobs/${unit.sha256}`
+export async function upload(transport: Transport, deviceBase: DeviceBase, unit: PackUnit, signal?: AbortSignal): Promise<boolean> {
+  const url = devicePath(deviceBase, `/blobs/${unit.sha256}`)
   const delays = transport.retryDelays.slice(0, UPLOAD_RETRIES)
   let sent = false
   for (let attempt = 0; ; attempt++) {
@@ -217,7 +217,7 @@ export async function upload(transport: Transport, deviceBase: string, unit: Pac
 }
 
 /** Pack one path and upload it; returns its unit. */
-export async function uploadPath(transport: Transport, deviceBase: string, file: string, signal?: AbortSignal): Promise<PackUnit> {
+export async function uploadPath(transport: Transport, deviceBase: DeviceBase, file: string, signal?: AbortSignal): Promise<PackUnit> {
   const [unit] = await pack([file], { signal })
   if (!unit) throw MaestroError.of('INTERNAL', `maestro-d pack printed no unit for ${file}`)
   await upload(transport, deviceBase, unit, signal)
@@ -257,7 +257,7 @@ export class HubFiles {
 
   constructor(
     private readonly transport: Transport,
-    private readonly deviceBase: string,
+    private readonly deviceBase: DeviceBase,
     private readonly cwd: string,
     private readonly signal?: AbortSignal,
     private readonly env?: Record<string, string>,
