@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 
 import { MaestroError } from './errors.js'
 import { MaestroDevice, anySignal } from './device.js'
-import { currentLease, dropLease, findLease, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
+import { currentLease, dropLease, findLease, isEmulatorTarget, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
 import { uploadPath } from './pack.js'
 import { ENV_DEVICE, readHubInfo, pidAlive, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
@@ -192,6 +192,7 @@ export class MaestroD {
     // and the next one's start, a refused request goes once more with the
     // other one on file.
     transport.otherLease = (device, failed) => {
+      if (isEmulatorTarget(device)) return undefined
       try {
         return currentLease(
           loadLeases().filter((r) => r.hub === leaseKey && r.id !== failed),
@@ -269,7 +270,6 @@ export class MaestroD {
    * machine: over TCP this rejects with FORBIDDEN.
    */
   async shutdown(opts: ShutdownOptions = {}): Promise<void> {
-    await Promise.allSettled([...this.leased.values()].map((dev) => dev.release()))
     await this.transport.json<Envelope>('/v1/shutdown', { method: 'POST', signal: this.sig(opts.signal) })
     this.transport.close()
     const wait = opts.wait ?? 15_000
@@ -319,7 +319,7 @@ export class MaestroD {
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
     if (opts.cloud) body.cloud = opts.cloud
-    const cfg = opts.attach === false ? undefined : { ...(opts.attach ?? {}) }
+    const cfg = opts.attach === false ? undefined : savedAttach(opts.attach ?? {})
     // Files to upload need the lease first (a hub's blob routes do), so
     // such an attach follows the lease; any other goes in the same call.
     const later = cfg !== undefined && this.transport.hub && hasLocalFiles(cfg)
@@ -340,17 +340,7 @@ export class MaestroD {
       this.transport.leases.delete(lease.device)
       throw err
     }
-    this.recordLease(lease)
-    const dev = new MaestroDevice(this.transport, this, info, signal)
-    dev.holdLease(lease, {
-      onRenew: (l) => this.recordLease(l),
-      onRelease: (d, l) => {
-        if (this.leased.get(d.id) === d) this.leased.delete(d.id)
-        this.forgetLease(l)
-      },
-    })
-    this.leased.set(lease.device, dev)
-    return dev
+    return this.bindDevice(info, lease, cfg, signal, true, opts.device)
   }
 
   /**
@@ -416,6 +406,7 @@ export class MaestroD {
         details: { lease: lease.id, startsAt: lease.startsAt },
       })
     }
+    if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
     // A failed attach puts back the lease the device had in this process
     // (an earlier lease() or claim() handle keeps sending it).
     const previous = this.transport.leases.get(lease.device)
@@ -431,23 +422,29 @@ export class MaestroD {
       else this.transport.leases.set(lease.device, previous)
       throw err
     }
-    this.recordLease(lease)
+    return this.bindDevice(info, lease, opts.attach === false ? undefined : savedAttach(opts.attach ?? {}), signal, true)
+  }
+
+  private bindDevice(info: DeviceInfo, lease: Lease, cfg: AttachOptions | undefined, signal: AbortSignal | undefined, owned: boolean, requestedDevice?: string): MaestroDevice {
+    this.recordLease(lease, cfg, owned, requestedDevice)
     const dev = new MaestroDevice(this.transport, this, info, signal)
     dev.holdLease(lease, {
       onRenew: (l) => this.recordLease(l),
-      onRelease: (d, l) => {
-        if (this.leased.get(d.id) === d) this.leased.delete(d.id)
+      onRebind: (l) => this.recordLease(l, undefined, false),
+      reattach: cfg && ((id, sig) => this.openAttach(id, cfg, sig)),
+      onRelease: (_d, l) => {
+        this.leased.delete(l.id)
         this.forgetLease(l)
       },
     })
-    this.leased.set(lease.device, dev)
+    if (owned) this.leased.set(lease.id, dev)
     return dev
   }
 
   /** Record a lease in leases.json (best effort: the hub is the authority). */
-  private recordLease(lease: Lease): void {
+  private recordLease(lease: Lease, attach?: AttachOptions, replaceStarted = true, requestedDevice?: string): void {
     try {
-      recordLease(this.leaseKey, lease)
+      recordLease(this.leaseKey, lease, attach, replaceStarted, requestedDevice)
     } catch {
       // an unwritable home only loses the shell's view of the lease
     }
@@ -675,32 +672,41 @@ export class MaestroD {
   async attach(opts: DeviceAttachOptions = {}): Promise<MaestroDevice> {
     const { device, signal, ...cfg } = opts
     let id = await this.resolveDevice(device, signal)
+    const sig = this.sig(signal)
+    let lease: Lease | undefined
     if (this.info?.hub) {
-      // A hub lends each device to one client, under a lease the client
-      // took explicitly: md.lease() in this process, or `maestro-d lease`
-      // in the same home (leases.json). This never takes one: without it
-      // the attach goes without a lease, and the hub answers
-      // LEASE_REQUIRED, naming md.lease() and `maestro-d lease`.
-      id = await this.normalize(id, this.sig(signal))
+      if (isEmulatorTarget(id)) {
+        // Match the saved target before discovery: the serial may now belong to another AVD.
+        const candidates = loadLeases().filter(r => r.hub === this.leaseKey && [r.device, r.originalDevice, r.requestedDevice].some(
+          v => v === id || (v && !id.includes('@') && v.split('@')[0] === id)))
+        if (new Set(candidates.map(r => r.device)).size > 1) throw MaestroError.of('USAGE', 'qualify the emulator target with its hub name')
+        const rec = candidates[0] && currentLease(candidates, candidates[0].device)
+        if (rec) {
+          const fetched = await this.transport.json<Envelope & { lease: Lease }>(`/v1/leases/${encodeURIComponent(rec.id)}`, { signal: sig })
+          lease = fetched.lease
+          if (lease.id !== rec.id) throw MaestroError.of('LEASE_EXPIRED', 'the hub returned a different grant')
+          if (this.transport.leases.get(rec.device) === rec.id) this.transport.leases.delete(rec.device)
+          if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
+          id = lease.device
+          this.transport.leases.set(id, lease.id)
+        }
+      }
+      if (!lease) {
+        id = await this.normalize(id, sig)
+        const held = this.heldLease(id)
+        const key = this.transport.leases.get(id)
+        lease = key ? this.leased.get(key)?.lease : undefined
+        if (!lease && held) lease = { ...held, expiresAt: held.expiresAt ?? '', ttlSec: held.ttlSec ?? 0 }
+      }
     }
-    const held = this.info?.hub ? this.heldLease(id) : undefined
-    const info = await this.openAttach(id, cfg, this.sig(signal))
-    const dev = new MaestroDevice(this.transport, this, info, anySignal(signal, this.signal))
-    const own = this.leased.get(id)
-    if (own?.lease) {
-      dev.holdLease(own.lease, { onRenew: (l) => this.recordLease(l), onRelease: (_d, l) => this.forgetLease(l) })
-    } else if (held) {
-      // A lease from leases.json: this handle may renew or release it, but
-      // close() leaves it to the shell that took it.
-      const lease: Lease = { id: held.id, device: id, expiresAt: held.expiresAt ?? '', ttlSec: held.ttlSec ?? 0 }
-      if (held.holder) lease.holder = held.holder
-      dev.holdLease(lease, { onRenew: (l) => this.recordLease(l), onRelease: (_d, l) => this.forgetLease(l) })
-    }
-    return dev
+    const attach = savedAttach(cfg)
+    const info = await this.openAttach(id, attach, sig)
+    return lease ? this.bindDevice(info, lease, attach, sig, false) : new MaestroDevice(this.transport, this, info, sig)
   }
 
   /** POST …/attach, uploading the app file first on a hub. */
   private async openAttach(id: string, cfg: AttachOptions, signal?: AbortSignal): Promise<DeviceInfo> {
+    cfg = { ...cfg }
     const base = `/v1/devices/${encodeURIComponent(id)}`
     if (this.transport.hub && cfg.appFile && !cfg.appFile.startsWith('blob:')) {
       // The app file is on this machine: upload it and send a blob ref (a
@@ -852,6 +858,12 @@ function baseURL(url: string): string {
 }
 
 /** True when an attach would upload a file of this machine (a hub refuses host paths). */
+function savedAttach(config: AttachOptions): AttachOptions {
+  const copy = structuredClone(config)
+  if (copy.appFile && !copy.appFile.startsWith('blob:')) copy.appFile = path.resolve(copy.appFile)
+  return copy
+}
+
 function hasLocalFiles(cfg: AttachOptions): boolean {
   return typeof cfg.appFile === 'string' && cfg.appFile !== '' && !cfg.appFile.startsWith('blob:')
 }

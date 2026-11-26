@@ -354,9 +354,11 @@ func TestConfigRemoveHoldsAdmissionDuringTeardown(t *testing.T) {
 func TestConfigRemovedWindowBound(t *testing.T) {
 	env := newHubEnv(t, daemon.Config{})
 	until := env.clock.now().Add(time.Minute)
+	env.s.leases.mu.Lock()
 	for i := 0; i < maxRemovedLeases; i++ {
-		env.s.removedLeases[fmt.Sprint(i)] = removedLease{device: "mock-1", until: until}
+		env.s.leases.removed[fmt.Sprint(i)] = removedLease{Device: "mock-1", Until: until}
 	}
+	env.s.leases.mu.Unlock()
 	lease := env.lease(env.remote, daemon.LeaseRequest{Device: "mock-2", Holder: "Ada", TTLSec: 300})
 	configRequest(t, env.local, "DELETE", "/mock-2?endLeases=true", "", 409)
 	if !env.s.leases.isLive(lease.Lease.ID) || !env.s.removedLeaseMatches("mock-1", "0") {
@@ -365,7 +367,9 @@ func TestConfigRemovedWindowBound(t *testing.T) {
 	env.clock.advance(time.Minute)
 	env.s.sweepLeases()
 	configRequest(t, env.local, "DELETE", "/mock-2?endLeases=true", "", 200)
-	if len(env.s.removedLeases) != 1 {
-		t.Fatalf("%d expired entries retained", len(env.s.removedLeases))
+	env.s.leases.mu.Lock()
+	defer env.s.leases.mu.Unlock()
+	if len(env.s.leases.removed) != 1 {
+		t.Fatalf("%d expired entries retained", len(env.s.leases.removed))
 	}
 }

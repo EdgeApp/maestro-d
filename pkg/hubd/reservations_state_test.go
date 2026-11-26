@@ -77,7 +77,7 @@ func TestReservationsState_Written(t *testing.T) {
 	}
 	// A hub that stops ends its started leases and keeps reservations.
 	d := env.mustReserve(env.remote, daemon.ReservationRequest{Device: "mock-1", StartAt: env.at(2 * time.Hour), TTLSec: 60})
-	env.s.endAllLeases()
+	env.s.stopLeases(true)
 	if _, err := env.remote.Lease(ctx, d.ID); err != nil {
 		t.Fatalf("hub stop ended a reservation: %v", err)
 	}
