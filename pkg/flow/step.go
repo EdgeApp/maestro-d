@@ -193,6 +193,7 @@ type TapOnStep struct {
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	AllowCovered          bool     `yaml:"allowCovered"` // Tap the element's centre even when something lies over it (a video under its player's controls), skipping the hit-target check; the tap reaches whatever is on top there, as a finger's would. The browser and the devicelab Android driver check; WebDriverAgent and uiautomator2 never refuse a covered element, so there it changes nothing
 }
 
 // DoubleTapOnStep double taps on an element (alias for tapOn with repeat=2).

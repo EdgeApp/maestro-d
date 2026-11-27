@@ -33,6 +33,11 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	// check; this catches the additional "disabled / aria-disabled /
 	// pointer-events:none" cases that visibility doesn't cover, and gives a
 	// short window for state to settle if the page just enabled the control.
+	// maestro-d: allowCovered taps the centre whatever lies over it.
+	if step.AllowCovered {
+		return d.tapCovered(elem, info, step.Selector.DescribeQuoted())
+	}
+
 	if err := d.waitForActionable(elem, defaultActionableTimeoutMs); err != nil {
 		return errorResult(err, fmt.Sprintf("Element not actionable: %s — %v", step.Selector.DescribeQuoted(), err))
 	}
@@ -99,6 +104,29 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Tapped on %s", desc), info)
+}
+
+// tapCovered is tapOn's allowCovered: it scrolls elem into view and clicks
+// its centre in top-frame coordinates, with no wait for the element to be
+// interactable and no hit-target check, so the click reaches whatever is
+// on top there (a player's controls over its video), as a user's would.
+// (maestro-d)
+func (d *Driver) tapCovered(elem *rod.Element, info *core.ElementInfo, desc string) *core.CommandResult {
+	_ = elem.ScrollIntoView()
+	res, err := elem.Eval(`() => { var p = window.__maestro.topFrameClickPoint(this); return [p.x, p.y]; }`)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to find the centre of %s: %v", desc, err))
+	}
+	pt := res.Value.Arr()
+	x, y := pt[0].Num(), pt[1].Num()
+	mouse := d.page.Mouse
+	if err := mouse.MoveTo(proto.NewPoint(x, y)); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to tap on %s: %v", desc, err))
+	}
+	if err := pressAndRelease(mouse); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to tap on %s: %v", desc, err))
+	}
+	return successResult(fmt.Sprintf("Tapped the centre of %s (%.0f, %.0f), covered or not", desc, x, y), info)
 }
 
 // clickWaitGaveUp reports whether a native click's error is its wait giving

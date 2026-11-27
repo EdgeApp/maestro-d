@@ -3331,3 +3331,20 @@ func TestDriver_GetStateForegroundShellGetsTheLimit(t *testing.T) {
 		t.Error("the shell should run under the lookup's limit")
 	}
 }
+
+// allowCovered asks the agent to tap without its hit test. (maestro-d)
+func TestTapOn_AllowCoveredSkipsHitTest(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Video", uiautomator2.ElementRect{X: 0, Y: 400, Width: 1080, Height: 600},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+	res := driver.tapOn(&flow.TapOnStep{
+		BaseStep:     flow.BaseStep{TimeoutMs: 300},
+		Selector:     flow.Selector{Text: "Video"},
+		AllowCovered: true,
+	})
+	if !res.Success || client.findAndClickHitTest {
+		t.Fatalf("allowCovered: %+v hitTest %v", res, client.findAndClickHitTest)
+	}
+}

@@ -1467,6 +1467,8 @@ export interface TapOnParams {
   waitToSettleTimeoutMs?: number
   longPress?: boolean
   duration?: number
+  /** Tap the element's centre even when something lies over it (a video under its player's controls), skipping the hit-target check; the tap reaches whatever is on top there, as a finger's would. The browser and the devicelab Android driver check; WebDriverAgent and uiautomator2 never refuse a covered element, so there it changes nothing */
+  allowCovered?: boolean
 }
 
 /** Taps on specific coordinates. */

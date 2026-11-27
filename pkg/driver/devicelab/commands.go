@@ -72,7 +72,7 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		// Hit-testing costs one tree walk per attempt and only ever turns a
 		// tap that would have been swallowed into a re-poll. Off switch for a
 		// tree pathological enough that the walk is not worth it.
-		hitTest := os.Getenv("MAESTRO_DISABLE_HIT_TEST") == ""
+		hitTest := os.Getenv("MAESTRO_DISABLE_HIT_TEST") == "" && !step.AllowCovered // maestro-d: allowCovered taps a covered element anyway
 
 		var lastErr error
 		for {

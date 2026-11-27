@@ -985,6 +985,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "waitToSettleTimeoutMs", Type: "int", Doc: "Wait for UI settle (ms)"},
 		{Key: "longPress", Type: "bool", Doc: ""},
 		{Key: "duration", Type: "int", Doc: ""},
+		{Key: "allowCovered", Type: "bool", Doc: "Tap the element's centre even when something lies over it (a video under its player's controls), skipping the hit-target check; the tap reaches whatever is on top there, as a finger's would. The browser and the devicelab Android driver check; WebDriverAgent and uiautomator2 never refuse a covered element, so there it changes nothing"},
 	}},
 	"tapOnPoint": {Name: "tapOnPoint", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Taps on specific coordinates.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
