@@ -841,6 +841,14 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Direction = se.ExpandVariables(s.Direction)
 	case *flow.OpenBrowserStep:
 		s.URL = se.ExpandVariables(s.URL)
+	case *flow.HoverOnStep: // maestro-d: pointer gestures
+		s.Selector = *se.expandSelector(&s.Selector)
+	case *flow.HoldOnStep: // maestro-d
+		s.Selector = *se.expandSelector(&s.Selector)
+	case *flow.DragPathStep: // maestro-d
+		for i, p := range s.Points {
+			s.Points[i] = se.ExpandVariables(p)
+		}
 	case *flow.MoveMouseStep: // maestro-d: the computer device's mouse steps
 		s.Point = se.ExpandVariables(s.Point)
 	case *flow.ClickOnStep: // maestro-d

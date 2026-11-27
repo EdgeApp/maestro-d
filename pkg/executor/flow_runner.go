@@ -572,6 +572,8 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		result = fr.executeStatusBarStep(s)
 	case *flow.StartSamplerStep, *flow.StopSamplerStep: // maestro-d: the driver's probe on a ticker (devicesteps.go)
 		result = fr.executeSamplerStep(step)
+	case *flow.HoverOnStep, *flow.HoldOnStep, *flow.DragPathStep: // maestro-d: pointer gestures (pointer.go)
+		result = fr.executePointerStep(step)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -1656,6 +1658,9 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 		result = fr.executeStatusBarStep(s)
 	case *flow.StartSamplerStep, *flow.StopSamplerStep: // maestro-d: the driver's probe on a ticker (devicesteps.go)
 		result = fr.executeSamplerStep(step)
+	case *flow.HoverOnStep, *flow.HoldOnStep, *flow.DragPathStep: // maestro-d: pointer gestures (pointer.go)
+		fr.script.ExpandStep(step)
+		result = fr.executePointerStep(step)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)

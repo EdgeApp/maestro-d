@@ -36,6 +36,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`dismissAlert`](#dismissalert) | _none_ | Dismisses a system alert dialog (taps Don't Allow/Cancel). |
 | [`doubleTapOn`](#doubletapon) | `text` | Double taps on an element (alias for tapOn with repeat=2). |
 | [`dragAndDrop`](#draganddrop) | — | SwipeStep performs a swipe gesture. |
+| [`dragPath`](#dragpath) | — | Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED. |
 | [`eraseText`](#erasetext) | `characters` | Erases text. |
 | [`evalBrowserScript`](#evalbrowserscript) | `script` | Executes JavaScript in the browser page context (web only). Unlike EvalScriptStep which runs in Maestro's internal JS engine, this runs directly in the browser via CDP, with access to window, document, DOM, etc. |
 | [`evalScript`](#evalscript) | `script` | Evaluates JavaScript. |
@@ -46,6 +47,8 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`getCookies`](#getcookies) | `output` | Retrieves browser cookies and stores them as JSON. |
 | [`grantPermissions`](#grantpermissions) | — | Grants browser permissions (notifications, camera, etc). |
 | [`hideKeyboard`](#hidekeyboard) | _none_ | Hides the keyboard. |
+| [`holdOn`](#holdon) | `text` | Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS. |
+| [`hoverOn`](#hoveron) | `text` | Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED. |
 | [`inputRandom`](#inputrandom) | `type` | Generates random input. |
 | [`inputRandomEmail`](#inputrandomemail) | _none_ | Generates random input. |
 | [`inputRandomNumber`](#inputrandomnumber) | _none_ | Generates random input. |
@@ -744,6 +747,27 @@ await m.dragAndDrop({ … })
 | `holdDuration` | `number` | HoldDuration is how long to press before moving (ms). Reorder UIs lift the item only after a long press, so the default is a full second. |
 | `duration` | `number` | Duration is how long the movement itself takes (ms). Drag targets track the finger, so moving too fast skips drop zones; default one second. |
 
+## `dragPath`
+
+Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED.
+
+```sh
+maestro-d dragPath --key value […]
+```
+```js
+await m.dragPath({ … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `points` | `string[]` | The path, at least two points, each "x, y" in screen pixels or "x%, y%" |
+| `duration` | `number` | How long the movement takes, in milliseconds, shared among the legs by length (default 1000) |
+| `holdDuration` | `number` | How long to press at the first point before moving, in milliseconds (default 0) |
+
 ## `eraseText`
 
 Erases text.
@@ -949,6 +973,124 @@ await m.hideKeyboard()
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+
+## `holdOn`
+
+Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS.
+
+```sh
+maestro-d holdOn <text>
+maestro-d holdOn --text <text> [--key value …]
+```
+```js
+await m.holdOn('<text>')
+await m.holdOn({ text: '<text>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `text` | `string` | Primary selectors |
+| `id` | `string` | Resource ID or accessibility ID |
+| `width` | `number` | Size matching |
+| `height` | `number` |  |
+| `tolerance` | `number` |  |
+| `enabled` | `boolean` | State filters |
+| `selected` | `boolean` |  |
+| `checked` | `boolean` |  |
+| `focused` | `boolean` |  |
+| `index` | `string` | Index for multiple matches (string for variable support) |
+| `traits` | `string` | Traits (comma-separated string, e.g., "button,heading") |
+| `css` | `string` | CSS selector for web views |
+| `placeholder` | `string` | Web-specific selectors |
+| `role` | `string` | Match by ARIA role (button, link, tab, etc.) |
+| `textContains` | `string` | Partial text match (contains) |
+| `href` | `string` | Match links by href attribute |
+| `alt` | `string` | Match by alt attribute (images) |
+| `title` | `string` | Match by title attribute (tooltips) |
+| `name` | `string` | Match by form field name attribute |
+| `testId` | `string` | Match by data-testid attribute |
+| `textRegex` | `string` | Match text by regex pattern |
+| `nth` | `number` | Pick Nth match (0-based) when multiple elements match |
+| `childOf` | `Selector` | Relative selectors |
+| `below` | `Selector` |  |
+| `above` | `Selector` |  |
+| `leftOf` | `Selector` |  |
+| `rightOf` | `Selector` |  |
+| `containsChild` | `Selector` |  |
+| `containsDescendants` | `Selector[]` |  |
+| `insideOf` | `Selector` | Visual containment (center point inside anchor bounds) |
+| `retryTapIfNoChange` | `boolean` |  |
+| `waitUntilVisible` | `boolean` |  |
+| `point` | `string` | Tap point "x%, y%" |
+| `start` | `string` | Swipe start "x%, y%" |
+| `end` | `string` | Swipe end "x%, y%" |
+| `repeat` | `number` | Tap repeat count |
+| `delay` | `number` | Delay between repeats (ms) |
+| `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
+| `duration` | `number` | How long to hold, in milliseconds (default 1000) |
+
+## `hoverOn`
+
+Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED.
+
+```sh
+maestro-d hoverOn <text>
+maestro-d hoverOn --text <text> [--key value …]
+```
+```js
+await m.hoverOn('<text>')
+await m.hoverOn({ text: '<text>', … })
+```
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `optional` | `boolean` |  |
+| `label` | `string` |  |
+| `timeout` | `number` |  |
+| `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
+| `text` | `string` | Primary selectors |
+| `id` | `string` | Resource ID or accessibility ID |
+| `width` | `number` | Size matching |
+| `height` | `number` |  |
+| `tolerance` | `number` |  |
+| `enabled` | `boolean` | State filters |
+| `selected` | `boolean` |  |
+| `checked` | `boolean` |  |
+| `focused` | `boolean` |  |
+| `index` | `string` | Index for multiple matches (string for variable support) |
+| `traits` | `string` | Traits (comma-separated string, e.g., "button,heading") |
+| `css` | `string` | CSS selector for web views |
+| `placeholder` | `string` | Web-specific selectors |
+| `role` | `string` | Match by ARIA role (button, link, tab, etc.) |
+| `textContains` | `string` | Partial text match (contains) |
+| `href` | `string` | Match links by href attribute |
+| `alt` | `string` | Match by alt attribute (images) |
+| `title` | `string` | Match by title attribute (tooltips) |
+| `name` | `string` | Match by form field name attribute |
+| `testId` | `string` | Match by data-testid attribute |
+| `textRegex` | `string` | Match text by regex pattern |
+| `nth` | `number` | Pick Nth match (0-based) when multiple elements match |
+| `childOf` | `Selector` | Relative selectors |
+| `below` | `Selector` |  |
+| `above` | `Selector` |  |
+| `leftOf` | `Selector` |  |
+| `rightOf` | `Selector` |  |
+| `containsChild` | `Selector` |  |
+| `containsDescendants` | `Selector[]` |  |
+| `insideOf` | `Selector` | Visual containment (center point inside anchor bounds) |
+| `retryTapIfNoChange` | `boolean` |  |
+| `waitUntilVisible` | `boolean` |  |
+| `point` | `string` | Tap point "x%, y%" |
+| `start` | `string` | Swipe start "x%, y%" |
+| `end` | `string` | Swipe end "x%, y%" |
+| `repeat` | `number` | Tap repeat count |
+| `delay` | `number` | Delay between repeats (ms) |
+| `waitToSettleTimeoutMs` | `number` | Wait for UI settle (ms) |
+| `duration` | `number` | How long to stay before the step ends, in milliseconds (default 0) |
 
 ## `inputRandom`
 

@@ -512,6 +512,21 @@ export interface DragAndDropParams {
   duration?: number
 }
 
+/** Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED. */
+export interface DragPathParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** The path, at least two points, each "x, y" in screen pixels or "x%, y%" */
+  points?: string[]
+  /** How long the movement takes, in milliseconds, shared among the legs by length (default 1000) */
+  duration?: number
+  /** How long to press at the first point before moving, in milliseconds (default 0) */
+  holdDuration?: number
+}
+
 /** Erases text. */
 export interface EraseTextParams {
   optional?: boolean
@@ -622,6 +637,154 @@ export interface HideKeyboardParams {
   timeout?: number
   /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
   platform?: string
+}
+
+/** Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS. */
+export interface HoldOnParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** Primary selectors */
+  text?: string
+  /** Resource ID or accessibility ID */
+  id?: string
+  /** Size matching */
+  width?: number
+  height?: number
+  tolerance?: number
+  /** State filters */
+  enabled?: boolean
+  selected?: boolean
+  checked?: boolean
+  focused?: boolean
+  /** Index for multiple matches (string for variable support) */
+  index?: string
+  /** Traits (comma-separated string, e.g., "button,heading") */
+  traits?: string
+  /** CSS selector for web views */
+  css?: string
+  /** Web-specific selectors */
+  placeholder?: string
+  /** Match by ARIA role (button, link, tab, etc.) */
+  role?: string
+  /** Partial text match (contains) */
+  textContains?: string
+  /** Match links by href attribute */
+  href?: string
+  /** Match by alt attribute (images) */
+  alt?: string
+  /** Match by title attribute (tooltips) */
+  title?: string
+  /** Match by form field name attribute */
+  name?: string
+  /** Match by data-testid attribute */
+  testId?: string
+  /** Match text by regex pattern */
+  textRegex?: string
+  /** Pick Nth match (0-based) when multiple elements match */
+  nth?: number
+  /** Relative selectors */
+  childOf?: Selector
+  below?: Selector
+  above?: Selector
+  leftOf?: Selector
+  rightOf?: Selector
+  containsChild?: Selector
+  containsDescendants?: Selector[]
+  /** Visual containment (center point inside anchor bounds) */
+  insideOf?: Selector
+  retryTapIfNoChange?: boolean
+  waitUntilVisible?: boolean
+  /** Tap point "x%, y%" */
+  point?: string
+  /** Swipe start "x%, y%" */
+  start?: string
+  /** Swipe end "x%, y%" */
+  end?: string
+  /** Tap repeat count */
+  repeat?: number
+  /** Delay between repeats (ms) */
+  delay?: number
+  /** Wait for UI settle (ms) */
+  waitToSettleTimeoutMs?: number
+  /** How long to hold, in milliseconds (default 1000) */
+  duration?: number
+}
+
+/** Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED. */
+export interface HoverOnParams {
+  optional?: boolean
+  label?: string
+  timeout?: number
+  /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
+  platform?: string
+  /** Primary selectors */
+  text?: string
+  /** Resource ID or accessibility ID */
+  id?: string
+  /** Size matching */
+  width?: number
+  height?: number
+  tolerance?: number
+  /** State filters */
+  enabled?: boolean
+  selected?: boolean
+  checked?: boolean
+  focused?: boolean
+  /** Index for multiple matches (string for variable support) */
+  index?: string
+  /** Traits (comma-separated string, e.g., "button,heading") */
+  traits?: string
+  /** CSS selector for web views */
+  css?: string
+  /** Web-specific selectors */
+  placeholder?: string
+  /** Match by ARIA role (button, link, tab, etc.) */
+  role?: string
+  /** Partial text match (contains) */
+  textContains?: string
+  /** Match links by href attribute */
+  href?: string
+  /** Match by alt attribute (images) */
+  alt?: string
+  /** Match by title attribute (tooltips) */
+  title?: string
+  /** Match by form field name attribute */
+  name?: string
+  /** Match by data-testid attribute */
+  testId?: string
+  /** Match text by regex pattern */
+  textRegex?: string
+  /** Pick Nth match (0-based) when multiple elements match */
+  nth?: number
+  /** Relative selectors */
+  childOf?: Selector
+  below?: Selector
+  above?: Selector
+  leftOf?: Selector
+  rightOf?: Selector
+  containsChild?: Selector
+  containsDescendants?: Selector[]
+  /** Visual containment (center point inside anchor bounds) */
+  insideOf?: Selector
+  retryTapIfNoChange?: boolean
+  waitUntilVisible?: boolean
+  /** Tap point "x%, y%" */
+  point?: string
+  /** Swipe start "x%, y%" */
+  start?: string
+  /** Swipe end "x%, y%" */
+  end?: string
+  /** Tap repeat count */
+  repeat?: number
+  /** Delay between repeats (ms) */
+  delay?: number
+  /** Wait for UI settle (ms) */
+  waitToSettleTimeoutMs?: number
+  /** How long to stay before the step ends, in milliseconds (default 0) */
+  duration?: number
 }
 
 /** Generates random input. */
@@ -1677,6 +1840,7 @@ export const COMMANDS = {
   dismissAlert: { name: 'dismissAlert', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Dismisses a system alert dialog (taps Don\'t Allow/Cancel).' },
   doubleTapOn: { name: 'doubleTapOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Double taps on an element (alias for tapOn with repeat=2).' },
   dragAndDrop: { name: 'dragAndDrop', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'SwipeStep performs a swipe gesture.' },
+  dragPath: { name: 'dragPath', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Presses at the first point, moves through each later point in turn and releases at the last, one unbroken stroke: on the browser (the mouse), iOS (WebDriverAgent) and Android (uiautomator2, and devicelab through input motionevent on Android 11 or later); other drivers answer UNSUPPORTED.' },
   eraseText: { name: 'eraseText', scalar: 'characters', bareField: 'characters', valueLess: false, compound: false, doc: 'Erases text.' },
   evalBrowserScript: { name: 'evalBrowserScript', scalar: 'script', bareField: 'script', valueLess: false, compound: false, doc: 'Executes JavaScript in the browser page context (web only). Unlike EvalScriptStep which runs in Maestro\'s internal JS engine, this runs directly in the browser via CDP, with access to window, document, DOM, etc.' },
   evalScript: { name: 'evalScript', scalar: 'script', bareField: 'script', valueLess: false, compound: false, doc: 'Evaluates JavaScript.' },
@@ -1687,6 +1851,8 @@ export const COMMANDS = {
   getCookies: { name: 'getCookies', scalar: 'output', bareField: 'output', valueLess: false, compound: false, doc: 'Retrieves browser cookies and stores them as JSON.' },
   grantPermissions: { name: 'grantPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Grants browser permissions (notifications, camera, etc).' },
   hideKeyboard: { name: 'hideKeyboard', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Hides the keyboard.' },
+  holdOn: { name: 'holdOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS.' },
+  hoverOn: { name: 'hoverOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED.' },
   inputRandom: { name: 'inputRandom', scalar: 'type', bareField: 'type', valueLess: false, compound: false, doc: 'Generates random input.' },
   inputRandomEmail: { name: 'inputRandomEmail', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Generates random input.' },
   inputRandomNumber: { name: 'inputRandomNumber', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Generates random input.' },
@@ -1778,6 +1944,7 @@ export interface CommandParams {
   dismissAlert: DismissAlertParams
   doubleTapOn: DoubleTapOnParams
   dragAndDrop: DragAndDropParams
+  dragPath: DragPathParams
   eraseText: EraseTextParams
   evalBrowserScript: EvalBrowserScriptParams
   evalScript: EvalScriptParams
@@ -1788,6 +1955,8 @@ export interface CommandParams {
   getCookies: GetCookiesParams
   grantPermissions: GrantPermissionsParams
   hideKeyboard: HideKeyboardParams
+  holdOn: HoldOnParams
+  hoverOn: HoverOnParams
   inputRandom: InputRandomParams
   inputRandomEmail: InputRandomEmailParams
   inputRandomNumber: InputRandomNumberParams

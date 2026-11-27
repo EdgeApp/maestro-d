@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
@@ -218,6 +219,31 @@ func (c *Client) DragFromTo(fromX, fromY, toX, toY, pressDurationSec float64) er
 		"toX":      toX,
 		"toY":      toY,
 		"duration": pressDurationSec,
+	})
+	return err
+}
+
+// PerformTouchPath presses one finger at start, holds holdMs, moves
+// through each leg over its time, and lifts: a W3C touch action
+// (POST /session/{id}/actions). (maestro-d)
+func (c *Client) PerformTouchPath(start [2]int, holdMs int, legs []core.PathLeg) error {
+	actions := []map[string]interface{}{
+		{"type": "pointerMove", "duration": 0, "x": start[0], "y": start[1]},
+		{"type": "pointerDown", "button": 0},
+	}
+	if holdMs > 0 {
+		actions = append(actions, map[string]interface{}{"type": "pause", "duration": holdMs})
+	}
+	for _, l := range legs {
+		actions = append(actions, map[string]interface{}{"type": "pointerMove", "duration": l.Ms, "x": l.X, "y": l.Y})
+	}
+	actions = append(actions, map[string]interface{}{"type": "pointerUp", "button": 0})
+	_, err := c.post(c.sessionPath("/actions"), map[string]interface{}{
+		"actions": []map[string]interface{}{{
+			"type": "pointer", "id": "finger1",
+			"parameters": map[string]interface{}{"pointerType": "touch"},
+			"actions":    actions,
+		}},
 	})
 	return err
 }

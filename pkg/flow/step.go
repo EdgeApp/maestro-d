@@ -121,6 +121,11 @@ const (
 	StepStartSampler    StepType = "startSampler"
 	StepStopSampler     StepType = "stopSampler"
 
+	// maestro-d: pointer gestures (pointer_steps.go)
+	StepHoverOn  StepType = "hoverOn"
+	StepHoldOn   StepType = "holdOn"
+	StepDragPath StepType = "dragPath"
+
 	// maestro-d: the computer device's mouse (desktop_steps.go)
 	StepMoveMouse StepType = "moveMouse"
 	StepClickOn   StepType = "clickOn"

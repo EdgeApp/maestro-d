@@ -481,20 +481,34 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 	x, y := step.X, step.Y
 
-	// Handle percentage-based point
+	// A point in viewport pixels ("x, y") or percent ("x%, y%").
 	if step.Point != "" {
-		px, py, err := parsePercentageCoords(step.Point)
+		px, py, err := core.ParsePointCoords(step.Point, d.viewportW, d.viewportH)
 		if err != nil {
 			return errorResult(err, "Failed to parse point coordinates")
 		}
-		x = int(px * float64(d.viewportW))
-		y = int(py * float64(d.viewportH))
+		x, y = px, py
 	}
 
 	mouse := d.page.Mouse
 	pt := proto.NewPoint(float64(x), float64(y))
 	if err := mouse.MoveTo(pt); err != nil {
 		return errorResult(err, "Failed to move mouse")
+	}
+	// maestro-d: longPress or a duration holds the press (holdOn on a point).
+	if step.LongPress || step.DurationMs > 0 {
+		hold := time.Duration(step.DurationMs) * time.Millisecond
+		if hold <= 0 {
+			hold = time.Duration(flow.DefaultHoldMs) * time.Millisecond
+		}
+		if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to press at point")
+		}
+		time.Sleep(hold)
+		if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to release at point")
+		}
+		return successResult(fmt.Sprintf("Pressed at (%d, %d) for %v", x, y, hold), nil)
 	}
 	if err := mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to click at point")
