@@ -90,6 +90,7 @@ export type ErrorCode =
   | 'INTERNAL'
   | 'FORBIDDEN'
   | 'PEER_UNAVAILABLE'
+  | 'HUB_RUNNING'
   | 'HUB_NAME_TAKEN'
   | 'HUB_VERSION'
   | 'LEASE_REQUIRED'
@@ -229,6 +230,8 @@ export interface DeviceInfo {
   name?: string
   /** Hardware model: `ro.product.model` on Android (`Pixel 8`), the product type on iOS (`iPhone14,2`). */
   model?: string
+  /** Configured virtual hardware profile, when available. */
+  deviceType?: string
   osVersion?: string
   state?: string
   ready: boolean
@@ -236,8 +239,13 @@ export interface DeviceInfo {
   bootedBy?: 'daemon' | 'external' | string
   bootedAt?: string
   attached: boolean
+  /** Present on attach responses when the hub reports whether the existing driver was reused. */
+  attachReused?: boolean
   attachedAt?: string
   appId?: string
+  /** The attached app's version and build number, as the driver read them. */
+  appVersion?: string
+  appBuild?: string
   driver?: string
   reportDir?: string
   busy?: boolean
@@ -444,6 +452,25 @@ export interface CloudStatus {
   held: number
 }
 
+/** One entry from the hub's local device configuration. */
+export interface HubConfigDevice {
+  id: string
+  description?: string
+  trafficShaping: boolean
+  /** Whether the hub currently discovers this configured device. */
+  listed: boolean
+  lease?: DeviceLease
+  reservations?: DeviceLease[]
+}
+
+/** The local configuration file and its devices, in file order. */
+export interface HubDevicesResult extends Envelope {
+  path: string
+  /** A malformed hand edit leaves the last good device list in place. */
+  configError?: string
+  devices: HubConfigDevice[]
+}
+
 /** A hub and its peers (`GET /v1/hub`, `md.hubStatus()`). */
 export interface HubStatus {
   name: string
@@ -452,6 +479,8 @@ export interface HubStatus {
   /** The --advertise address, when set. */
   addr?: string
   listen?: string
+  /** Address and port bound by the hub’s public HTTPS dashboard. */
+  webAddr?: string
   tls?: boolean
   /** False with --no-mdns. */
   mdns: boolean
@@ -482,7 +511,8 @@ export interface HubPeer {
 /** The lease state a hub's device listings carry. */
 export interface DeviceLease {
   holder?: string
-  /** RFC 3339: a reservation's start (in `reservations`). */
+  description?: string
+  /** RFC 3339 start of the grant or reservation. Older hubs omit the active start. */
   startsAt?: string
   /** RFC 3339: the end of the lease's fixed window. */
   expiresAt: string
@@ -490,10 +520,13 @@ export interface DeviceLease {
 
 /** A hub's lease on one device (`POST /v1/leases`). */
 export interface Lease {
+  /** The hub restored this active grant and awaits its holder’s next attach. */
+  awaitingAttach?: boolean
   /** Sent as X-Maestro-Lease. */
   id: string
   device: string
   holder?: string
+  description?: string
   /** RFC 3339: the start of the window (the grant, for a lease taken now). A renew leaves it. */
   startsAt?: string
   /** RFC 3339: the end of the window. Using the lease never moves it; only `renew()` does. */
@@ -759,6 +792,8 @@ export interface DaemonInfo {
   version: string
   socketPath: string
   httpAddr?: string
+  /** Address and port bound by the hub’s public HTTPS dashboard. */
+  webAddr?: string
   startedAt: string
   startArgs?: string[]
   runDir: string

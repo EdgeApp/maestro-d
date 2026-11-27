@@ -25,12 +25,15 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/capture"
 	"github.com/devicelab-dev/maestro-runner/pkg/executor"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/fsage"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
 // Config configures a daemon process.
 type Config struct {
-	Name string
+	// HubProcess selects the singleton hub runtime instead of a named daemon.
+	HubProcess bool
+	Name       string
 	// KeepRunDir names run directories the housekeeping sweep never removes
 	// whole (a daemon with an installed launchd service); nil keeps none.
 	KeepRunDir func(name string) bool
@@ -43,21 +46,9 @@ type Config struct {
 	TLSCert, TLSKey string
 	// Hub makes every TCP caller remote, loopback included: only the unix
 	// socket is local. (`hub start` sets it.)
-	Hub bool
+	Hub Hub
 	// HubName names a hub (default: the short host name).
 	HubName string
-	// ShareDevices, on a hub, names the devices remote callers see and may
-	// lease, by id or name (--share-device). A hub shares only the devices
-	// it names here, in ShareTVs or in ShareConfig: none by default.
-	ShareDevices []string
-	// ShareTVs, on a hub, names the Apple TVs it shares, by id or name. A
-	// TV pairs with several Macs, so it is shared only when named, and
-	// naming it on one hub keeps one owner for it. TVs are left out of
-	// ShareDevices either way.
-	ShareTVs []string
-	// ShareConfig, on a hub, is its config.json's hubDevices, read when it
-	// starts: it shares each of them, TVs included.
-	ShareConfig []string
 	// LeaseMax, on a hub, is the longest lease window (default 8 hours);
 	// LeaseMaxDevices sets it per device, by id or name.
 	LeaseMax        time.Duration
@@ -82,12 +73,8 @@ type Config struct {
 	IdleTimeout time.Duration
 	// ReportsDir is the root for per-device report directories.
 	ReportsDir string
-	// DeviceConfig is the device config (--config): read as config.json,
-	// with no fallback. NetworkConfig (--network-config) is an older
-	// network.json, read as one. With neither, <home>/config.json is read
-	// when it exists, else <home>/network.json.
-	DeviceConfig  string
-	NetworkConfig string
+	// DeviceConfig overrides the default <home>/config.json.
+	DeviceConfig string
 	// BlobsDir is the blob store's root (default <home>/blobs).
 	BlobsDir string
 	// StartArgs are recorded in daemon.json for `ps`.
@@ -99,6 +86,16 @@ type Config struct {
 	// Mesh, on a hub, links it with its peers (pkg/hub): its router fronts
 	// both listeners, and READY waits for its start.
 	Mesh Mesh
+	// OpenWeb binds the public dashboard under this home's singleton lock.
+	// It starts serving after the peer mesh is ready.
+	OpenWeb func() (WebListener, error)
+}
+
+// WebListener is a bound hub dashboard, served when the mesh is ready.
+type WebListener interface {
+	Addr() net.Addr
+	Serve() error
+	Close() error
 }
 
 // Server is the daemon: registry + attached devices + HTTP handlers.
@@ -110,9 +107,6 @@ type Server struct {
 	cloud    providerSet
 	remoteMu sync.Mutex
 	remotes  map[string]*remoteDevice
-	// cloudLaunching counts the cloud launches under way for leases, under
-	// leaseMu, so the hub's cap counts them.
-	cloudLaunching int
 	// launches is cancelled when the daemon shuts down: every cloud launch
 	// joins it, so none registers a device after the teardown ran.
 	launches       context.Context
@@ -122,23 +116,6 @@ type Server struct {
 	idle           *idleTimer
 	idem           *idemCache
 	blobs          *BlobStore
-	// leases are a hub's device leases; leaseMu serialises granting and
-	// ending them.
-	leases *leaseTable
-	// reservationsMu serialises the writes of scheduled-leases.json.
-	reservationsMu sync.Mutex
-	leaseMu        sync.Mutex
-	// teardowns counts the lease teardowns not finished yet, the
-	// sweeper's and those waiting for work under their lease included:
-	// Shutdown waits for them before it detaches and shuts down devices.
-	teardowns pending
-	// sharedIDs remembers the stable device ids found in the
-	// --share-device pool; shareSeen, other answers for a short while
-	// (shared). shareGen counts forgetShared calls.
-	shareMu   sync.Mutex
-	sharedIDs map[string]bool
-	shareSeen map[string]shareAnswer
-	shareGen  int
 	// idemGrace: how long a dropped TCP request waits for its retry.
 	idemGrace time.Duration
 
@@ -155,7 +132,7 @@ type Server struct {
 	startedAt    time.Time
 	shuttingDown atomic.Bool
 	done         chan struct{}
-	shutdownOnce sync.Once
+	shutdownMu   sync.Mutex
 	listeners    []net.Listener
 	servers      []*http.Server
 	info         Info
@@ -167,7 +144,7 @@ func New(cfg Config, deps Deps) *Server {
 		cfg.Name = DefaultName
 	}
 	if cfg.ReportsDir == "" {
-		cfg.ReportsDir = ReportsDir(cfg.Name)
+		cfg.ReportsDir = filepath.Join(cfg.RunDir(), reportsDirName)
 	}
 	if cfg.BlobsDir == "" {
 		cfg.BlobsDir = DefaultBlobRoot()
@@ -182,18 +159,23 @@ func New(cfg Config, deps Deps) *Server {
 		events:         NewEventBus(0),
 		idem:           newIdemCache(),
 		blobs:          NewBlobStore(cfg.BlobsDir),
-		leases:         newLeaseTable(),
-		sharedIDs:      map[string]bool{},
-		shareSeen:      map[string]shareAnswer{},
 		idemGrace:      idemGrace,
 		attached:       map[string]*attached{},
 		attaching:      map[string]chan struct{}{},
 		done:           make(chan struct{}),
 	}
+	s.registry.runDir = cfg.RunDir()
 	s.registry.deps = deps
-	s.events.observe = s.forgetShared
-	if cfg.Hub {
-		s.info.Hub = s.hubName()
+	if deps.BootDevice != nil {
+		s.registry.boot = deps.BootDevice
+	}
+	if deps.ShutdownDevice != nil {
+		s.registry.shutdown = deps.ShutdownDevice
+	}
+	if cfg.Hub != nil {
+		cfg.Hub.Bind(s, cfg, deps)
+		s.events.observe = cfg.Hub.OnEvent
+		s.info.Hub = s.HubName()
 	}
 	s.idle = newIdleTimer(cfg.IdleTimeout, func() {
 		logger.Info("Idle for %v, shutting down", cfg.IdleTimeout)
@@ -221,8 +203,7 @@ func (s *Server) listenerHandler(tcp bool) http.Handler {
 	return s.routes(tcp)
 }
 
-// checkListen refuses a TCP listener that would let anyone in: a hub, or a
-// --http address beyond loopback, needs a token; TLS needs both files.
+// checkListen validates the client daemon and hub listener policies before binding.
 func (s *Server) checkListen() *Error {
 	if s.cfg.HTTPAddr == "" {
 		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
@@ -230,7 +211,13 @@ func (s *Server) checkListen() *Error {
 		}
 		return nil
 	}
-	if s.cfg.Token == "" && (s.cfg.Hub || !isLoopbackListen(s.cfg.HTTPAddr)) {
+	if s.cfg.Hub == nil {
+		if s.cfg.TLSCert != "" || s.cfg.TLSKey != "" {
+			return Errorf(CodeUsage, "--tls-cert and --tls-key were removed from maestro-d serve; use maestro-d-hub start")
+		}
+		return CheckLocalListen(s.cfg.HTTPAddr)
+	}
+	if s.cfg.Token == "" {
 		return Errorf(CodeUsage, "listening on %s, beyond loopback, needs --token (MAESTRO_D_TOKEN)", s.cfg.HTTPAddr)
 	}
 	if (s.cfg.TLSCert == "") != (s.cfg.TLSKey == "") {
@@ -257,26 +244,55 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
-	if err := os.MkdirAll(RunDir(s.cfg.Name), 0o700); err != nil {
+	if err := os.MkdirAll(s.cfg.RunDir(), 0o700); err != nil {
 		return err
 	}
 	// The run-dir lock, held until Run returns, is what makes this the one
 	// daemon of its name: daemon.json alone is not, since a hub writes it
 	// only once its mesh has started, seconds after it binds the socket.
 	// A second start in that window must not remove the socket.
-	lock, err := lockRunDir(LockPath(s.cfg.Name))
-	if errors.Is(err, errRunLocked) {
+	var lock *os.File
+	var err error
+	if s.cfg.HubProcess {
+		lock, err = fsage.TryHubLock(Home())
+	} else {
+		lock, err = fsage.TryLockFile(LockPath(s.cfg.Name))
+	}
+	if errors.Is(err, fsage.ErrLocked) {
+		if s.cfg.HubProcess {
+			return Errorf(CodeHubRunning, "a hub is already running in %s", Home())
+		}
 		return Errorf(CodeDaemonUnavailable, "daemon %q is already running or starting (another process holds %s)", s.cfg.Name, LockPath(s.cfg.Name))
 	}
 	if err != nil {
 		return err
 	}
-	defer unlockRunDir(lock)
-	if live, _ := LiveInfo(s.cfg.Name); live != nil {
+	defer fsage.UnlockFile(lock)
+	if live, _ := readInfoAt(s.cfg.RunDir()); !s.cfg.HubProcess && live != nil && PIDAlive(live.PID) {
 		return Errorf(CodeDaemonUnavailable, "daemon %q is already running (pid %d)", s.cfg.Name, live.PID)
 	}
 	if err := os.MkdirAll(s.cfg.ReportsDir, 0o755); err != nil {
 		return err
+	}
+	// A hub's reservations are back before its listeners serve: a request
+	// in between would see them missing, and a reservation taken then would
+	// be written over the file they are read from.
+	if s.cfg.Hub != nil {
+		sweepCtx, stopSweep := context.WithCancel(ctx)
+		defer stopSweep()
+		if err := s.cfg.Hub.Start(sweepCtx); err != nil {
+			return err
+		}
+	}
+	var dashboard WebListener
+	var webAddr string
+	if s.cfg.OpenWeb != nil {
+		dashboard, err = s.cfg.OpenWeb()
+		if err != nil {
+			return err
+		}
+		defer dashboard.Close()
+		webAddr = dashboard.Addr().String()
 	}
 	// The housekeeping sweep (old blobs, idle reports, dead daemons' run
 	// dirs, orphaned Chrome profiles) runs now and hourly while this
@@ -285,6 +301,15 @@ func (s *Server) Run(ctx context.Context) error {
 	defer stopHousekeeping()
 	go s.housekeep(hkCtx)
 	sockPath := SocketPath(s.cfg.Name)
+	if s.cfg.HubProcess {
+		sockPath, err = hubSocketPath()
+		if err != nil {
+			return err
+		}
+		if dir := filepath.Dir(sockPath); dir != s.cfg.RunDir() {
+			defer os.Remove(dir)
+		}
+	}
 	_ = os.Remove(sockPath)
 	unixLn, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -297,10 +322,10 @@ func (s *Server) Run(ctx context.Context) error {
 	httpAddr := ""
 	if s.cfg.HTTPAddr != "" {
 		addr := s.cfg.HTTPAddr
-		// `serve --http :port` means loopback; a hub's --listen :port binds
-		// every interface.
-		if strings.HasPrefix(addr, ":") && !s.cfg.Hub {
-			addr = "127.0.0.1" + addr
+		if s.cfg.Hub == nil {
+			if host, port, err := net.SplitHostPort(addr); err == nil && strings.EqualFold(host, "localhost") {
+				addr = net.JoinHostPort("127.0.0.1", port)
+			}
 		}
 		tcpLn, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -323,15 +348,16 @@ func (s *Server) Run(ctx context.Context) error {
 		Version:     s.deps.Version,
 		SocketPath:  sockPath,
 		HTTPAddr:    httpAddr,
+		WebAddr:     webAddr,
 		StartedAt:   s.startedAt.Format(time.RFC3339),
 		StartArgs:   s.cfg.StartArgs,
-		RunDir:      RunDir(s.cfg.Name),
+		RunDir:      s.cfg.RunDir(),
 		ReportsDir:  s.cfg.ReportsDir,
 		IdleTimeout: int(s.cfg.IdleTimeout / time.Second),
 		TLS:         tlsConfig != nil,
 	}
-	if s.cfg.Hub {
-		s.info.Hub = s.hubName()
+	if s.cfg.Hub != nil {
+		s.info.Hub = s.HubName()
 	}
 	// A hub with a mesh writes daemon.json once its mesh has started:
 	// spawners (hub start, the launchd service's wait) treat daemon.json
@@ -346,14 +372,8 @@ func (s *Server) Run(ctx context.Context) error {
 	s.registry.mu.Lock()
 	s.registry.persistLocked()
 	s.registry.mu.Unlock()
-	// A hub's reservations are back before its listeners serve: a request
-	// in between would see them missing, and a reservation taken then would
-	// be written over the file they are read from.
-	if s.cfg.Hub {
-		s.loadReservations()
-	}
 
-	errCh := make(chan error, len(s.servers))
+	errCh := make(chan error, len(s.servers)+1)
 	for i, srv := range s.servers {
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -371,17 +391,6 @@ func (s *Server) Run(ctx context.Context) error {
 		logger.Info("sessions import no environment from this daemon (pass-env: %s)", strings.Join(s.cfg.PassEnv, ","))
 	}
 	s.logDeviceConfig()
-	if s.cfg.Hub {
-		share := "nothing (name devices with --share-device, --share-tv or config.json's hubDevices)"
-		if list := s.shareList(); list != "" {
-			share = list
-		}
-		logger.Info("hub %q: leases on (max window %v%s); sharing %s; remote runShell %t", s.info.Hub, s.hubLeaseMax(),
-			leaseMaxNote(s.cfg.LeaseMaxDevices), share, s.cfg.AllowRemoteShell)
-		sweepCtx, stopSweep := context.WithCancel(ctx)
-		defer stopSweep()
-		go s.runLeaseSweeper(sweepCtx)
-	}
 	if s.cfg.Mesh != nil {
 		if err := s.cfg.Mesh.Start(ctx, s.info); err != nil {
 			e := asError(err)
@@ -399,69 +408,112 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	var webNote string
+	if dashboard != nil {
+		webNote = " web=https://" + webAddr
+		go func() {
+			if err := dashboard.Serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 	if s.cfg.Ready != nil {
-		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d\n", sockPath, httpAddr, os.Getpid())
+		fmt.Fprintf(s.cfg.Ready, "READY socket=%s http=%s pid=%d%s\n", sockPath, httpAddr, os.Getpid(), webNote)
 	}
 	// Cloud sessions an earlier run of this daemon left (a crash, kill -9,
 	// a launchd restart) are released once it serves, so a spawning client
 	// never waits on it.
 	go s.selfRelease()
 
+	var serveErr error
 	select {
 	case <-s.done:
 		return nil
-	case err := <-errCh:
-		s.Shutdown("listener error: " + err.Error())
-		return err
+	case serveErr = <-errCh:
+		s.Shutdown("listener error: " + serveErr.Error())
 	case sig := <-sigCh:
 		logger.Info("Received %v, shutting down", sig)
 		s.Shutdown("signal " + sig.String())
-		return nil
 	case <-ctx.Done():
 		s.Shutdown("context cancelled")
-		return nil
 	}
+	// Keep the process and its singleton lock until teardown has finished.
+	<-s.done
+	return serveErr
 }
 
 // Done is closed when the daemon has finished shutting down.
 func (s *Server) Done() <-chan struct{} { return s.done }
 
+type shutdownMode int
+
+const (
+	shutdownProcess shutdownMode = iota // Signals, cancellation and internal exits.
+	shutdownKeepLeases
+	shutdownEndLeases
+)
+
 // Shutdown detaches every device, shuts down daemon-booted devices,
 // removes the run files and closes the listeners. Idempotent.
 func (s *Server) Shutdown(reason string) {
-	s.shutdownOnce.Do(func() {
-		s.shuttingDown.Store(true)
-		if s.cancelLaunches != nil {
-			// Cloud launches under way stop, and release what they made.
-			s.cancelLaunches()
+	_ = s.shutdown(reason, shutdownProcess)
+}
+
+func (s *Server) shutdown(reason string, mode shutdownMode) error {
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	if s.shuttingDown.Load() {
+		if mode == shutdownEndLeases {
+			return Errorf(CodeDaemonUnavailable, "daemon %q is already stopping", s.cfg.Name)
 		}
-		s.idle.Stop()
-		go func() {
-			defer close(s.done)
-			// A hub's leases end first, while the mesh still carries their
-			// events to peers' clients and before daemon.shutdown: requests
-			// under them are cancelled, and every teardown (one that waits
-			// for work that ignores its cancellation too, for a while) is
-			// done before the devices are detached and shut down below.
-			s.endAllLeases()
-			if s.cfg.Mesh != nil {
-				s.cfg.Mesh.Close()
+		return nil
+	}
+	s.shuttingDown.Store(true)
+	hub := s.cfg.Hub
+	if hub != nil && mode != shutdownProcess {
+		// Keep the socket open on a journal failure so stop can retry.
+		if err := hub.PrepareStop(mode == shutdownEndLeases); err != nil {
+			s.shuttingDown.Store(false)
+			return err
+		}
+	}
+	if s.cancelLaunches != nil {
+		// Cloud launches under way stop, and release what they made.
+		s.cancelLaunches()
+	}
+	s.idle.Stop()
+	go func() {
+		defer close(s.done)
+		// Process the hub's leases while the mesh still carries their
+		// events to peers' clients and before daemon.shutdown: requests
+		// under them are cancelled, and every teardown (one that waits
+		// for work that ignores its cancellation too, for a while) is
+		// done before the devices are detached and shut down below.
+		if hub != nil {
+			if err := hub.Shutdown(context.Background()); err != nil {
+				logger.Warn("flushing leases at shutdown: %v", err)
 			}
-			s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
-			s.detachAll()
-			s.releaseAllRemote("daemon-exit")
-			s.registry.ShutdownOwned()
-			RemoveRunFiles(s.cfg.Name)
-			// Close listeners after cleanup so a `stop` caller can still
-			// read its response; give in-flight responses a moment.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			for _, srv := range s.servers {
-				_ = srv.Shutdown(ctx)
-			}
-			logger.Info("maestro-d %q stopped (%s)", s.cfg.Name, reason)
-		}()
-	})
+		}
+		if s.cfg.Mesh != nil {
+			s.cfg.Mesh.Close()
+		}
+		s.events.Publish(Event{Type: "daemon.shutdown", Message: reason})
+		s.detachAll()
+		s.releaseAllRemote("daemon-exit")
+		s.registry.ShutdownOwned()
+		_ = os.Remove(s.info.SocketPath)
+		_ = os.Remove(filepath.Join(s.cfg.RunDir(), infoFile))
+		_ = os.Remove(filepath.Join(s.cfg.RunDir(), devicesFile))
+		// Close listeners after cleanup so a `stop` caller can still
+		// read its response; give in-flight responses a moment.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for _, srv := range s.servers {
+			_ = srv.Shutdown(ctx)
+		}
+		logger.Info("maestro-d %q stopped (%s)", s.cfg.Name, reason)
+	}()
+	return nil
 }
 
 func (s *Server) detachAll() {
@@ -501,36 +553,43 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("GET /v1/viewer", s.handleViewer)
 	mux.HandleFunc("GET /v1/devices", s.handleListDevices)
 	mux.HandleFunc("POST /v1/devices", s.handleBootDevice)
-	mux.HandleFunc("POST /v1/leases", s.idempotent(s.handleAcquireLease))
-	mux.HandleFunc("POST /v1/reservations", s.idempotent(s.handleReserve))
-	mux.HandleFunc("GET /v1/leases", s.handleListLeases)
-	mux.HandleFunc("GET /v1/leases/{lid}", s.handleGetLease)
-	mux.HandleFunc("POST /v1/leases/{lid}/renew", s.handleRenewLease)
-	mux.HandleFunc("DELETE /v1/leases/{lid}", s.handleReleaseLease)
+	if hub := s.cfg.Hub; hub != nil {
+		hub.Routes(mux)
+	} else {
+		noLeases := func(w http.ResponseWriter, r *http.Request) {
+			WriteError(w, Errorf(CodeUsage, "daemon %q is not a hub and has no leases (a hub is started with `maestro-d hub start`)", s.cfg.Name))
+		}
+		mux.HandleFunc("POST /v1/leases", noLeases)
+		mux.HandleFunc("POST /v1/reservations", noLeases)
+		mux.HandleFunc("GET /v1/leases", noLeases)
+		mux.HandleFunc("GET /v1/leases/{lid}", noLeases)
+		mux.HandleFunc("POST /v1/leases/{lid}/renew", noLeases)
+		mux.HandleFunc("DELETE /v1/leases/{lid}", noLeases)
+	}
 	// Every device route goes through dev: a remote caller sees only the
 	// shared devices, and on a hub the request carries the device's lease.
-	open, leased := func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseOpen, h) },
-		func(h http.HandlerFunc) http.HandlerFunc { return s.dev(leaseNeeded, h) }
+	open, leased := func(h http.HandlerFunc) http.HandlerFunc { return s.dev(LeaseOpen, h) },
+		func(h http.HandlerFunc) http.HandlerFunc { return s.dev(LeaseNeeded, h) }
 	// busy counts a request on a cloud device's idle clock, for the routes
 	// that do not take the step lock (acquire does that for the rest).
 	busy := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			done, e := s.cloudBusy(r.PathValue("id"))
+			done, e := s.CloudBusy(r.PathValue("id"))
 			if e != nil {
-				writeError(w, e)
+				WriteError(w, e)
 				return
 			}
 			defer done()
 			h(w, r)
 		}
 	}
-	mux.HandleFunc("DELETE /v1/devices/{id}", s.dev(leaseIfHeld, s.handleStopDevice))
+	mux.HandleFunc("DELETE /v1/devices/{id}", s.dev(LeaseIfHeld, s.handleStopDevice))
 	mux.HandleFunc("POST /v1/devices/{id}/attach", leased(busy(s.handleAttach)))
 	mux.HandleFunc("POST /v1/devices/{id}/detach", leased(s.handleDetach))
 	mux.HandleFunc("GET /v1/devices/{id}", open(s.handleGetDevice))
-	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", leased(s.idempotent(s.handleCommand)))
-	mux.HandleFunc("POST /v1/devices/{id}/steps", leased(s.idempotent(s.handleSteps)))
-	mux.HandleFunc("POST /v1/devices/{id}/flows", leased(s.idempotent(s.handleFlow)))
+	mux.HandleFunc("POST /v1/devices/{id}/commands/{name}", leased(s.Idempotent(s.handleCommand)))
+	mux.HandleFunc("POST /v1/devices/{id}/steps", leased(s.Idempotent(s.handleSteps)))
+	mux.HandleFunc("POST /v1/devices/{id}/flows", leased(s.Idempotent(s.handleFlow)))
 	mux.HandleFunc("GET /v1/devices/{id}/screenshot", leased(s.handleScreenshot))
 	mux.HandleFunc("GET /v1/devices/{id}/stream", leased(s.handleStream))
 	mux.HandleFunc("GET /v1/devices/{id}/hierarchy", leased(s.handleHierarchy))
@@ -544,12 +603,12 @@ func (s *Server) routes(tcp bool) http.Handler {
 	mux.HandleFunc("POST /v1/devices/{id}/eval", leased(s.handleEval))
 	mux.HandleFunc("HEAD /v1/devices/{id}/blobs/{sha256}", leased(busy(s.handleBlobHead)))
 	mux.HandleFunc("PUT /v1/devices/{id}/blobs/{sha256}", leased(busy(s.handleBlobPut)))
-	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(busy(s.idempotent(s.handleInstallApp))))
+	mux.HandleFunc("POST /v1/devices/{id}/apps", leased(busy(s.Idempotent(s.handleInstallApp))))
 	mux.HandleFunc("DELETE /v1/devices/{id}/apps/{appId}", leased(s.handleUninstallApp))
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts", leased(s.handleListArtifacts))
 	mux.HandleFunc("GET /v1/devices/{id}/artifacts/{path...}", leased(s.handleGetArtifact))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, Errorf(CodeUsage, "%s", NoRouteMessage(r.Method, r.URL.Path)))
+		WriteError(w, Errorf(CodeUsage, "%s", NoRouteMessage(r.Method, r.URL.Path)))
 	})
 	return s.middleware(mux, tcp)
 }
@@ -574,18 +633,18 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 			return
 		}
 		if s.shuttingDown.Load() && r.URL.Path != "/v1/status" {
-			writeError(w, Errorf(CodeDaemonUnavailable, "daemon %q is shutting down", s.cfg.Name))
+			WriteError(w, Errorf(CodeDaemonUnavailable, "daemon %q is shutting down", s.cfg.Name))
 			return
 		}
 		if v := r.Header.Get("X-Maestro-Api-Version"); v != "" && v != APIVersion {
-			writeError(w, Errorf(CodeDaemonUnavailable, "API version mismatch: daemon %s, client %s", APIVersion, v))
+			WriteError(w, Errorf(CodeDaemonUnavailable, "API version mismatch: daemon %s, client %s", APIVersion, v))
 			return
 		}
 		s.idle.Touch()
 		w.Header().Set("X-Maestro-Api-Version", APIVersion)
 		clientOutputs := r.Header.Get(HeaderClientOutputs) != ""
 		if tcp {
-			r = r.WithContext(withCaller(r.Context(), Caller{Remote: s.remoteTCP(r.RemoteAddr), Addr: r.RemoteAddr, ClientOutputs: clientOutputs}))
+			r = r.WithContext(withCaller(r.Context(), s.tcpCaller(r.RemoteAddr, clientOutputs)))
 		} else if clientOutputs {
 			r = r.WithContext(withCaller(r.Context(), Caller{ClientOutputs: true}))
 		}
@@ -596,7 +655,7 @@ func (s *Server) middleware(next http.Handler, tcp bool) http.Handler {
 // ---------------------------------------------------------------------------
 // JSON helpers
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
@@ -604,16 +663,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-func writeError(w http.ResponseWriter, e *Error) {
+func WriteError(w http.ResponseWriter, e *Error) {
 	writeErrorStatus(w, e.HTTPStatus(), e)
 }
 
 func writeErrorStatus(w http.ResponseWriter, status int, e *Error) {
 	w.Header().Set(HeaderErrorCode, string(e.Code))
-	writeJSON(w, status, FailureEnvelope(e))
+	WriteJSON(w, status, FailureEnvelope(e))
 }
 
-func decodeBody(r *http.Request, v any) *Error {
+func DecodeBody(r *http.Request, v any) *Error {
 	if r.Body == nil {
 		return nil
 	}
@@ -650,7 +709,7 @@ func (s *Server) statusResult() StatusResult {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	res := s.statusResult()
 	res.Devices = s.visible(r, res.Devices)
-	writeJSON(w, http.StatusOK, res)
+	WriteJSON(w, http.StatusOK, res)
 }
 
 // handleShutdown serves POST /v1/shutdown. On a hub only the unix socket
@@ -658,17 +717,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // is remote there, and a request a peer forwarded would end every other
 // client's leases and take the hub off the mesh.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Hub && CallerFrom(r.Context()).Remote {
-		e := forbidden("hub %q is stopped from its own machine (maestro-d hub stop), not over TCP", s.hubName())
-		s.logForbidden(r, e)
-		writeError(w, e)
+	if s.cfg.Hub != nil && CallerFrom(r.Context()).Remote {
+		e := Forbidden("hub %q is stopped from its own machine (maestro-d hub stop), not over TCP", s.HubName())
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, Envelope{OK: true})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	mode := shutdownKeepLeases
+	if r.URL.Query().Get("endLeases") == "true" {
+		mode = shutdownEndLeases
 	}
-	s.Shutdown("shutdown request")
+	if err := s.shutdown("shutdown request", mode); err != nil {
+		WriteError(w, WrapErr(CodeInternal, err))
+		return
+	}
+	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
 // ---------------------------------------------------------------------------
@@ -680,42 +743,46 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	q, e := ParseDeviceQuery(r.URL.Query())
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	devs := s.visible(r, s.registry.List(q.Platform))
-	if !s.cfg.Hub {
-		annotateAvailable(devs, otherOwners(s.cfg.Name))
+	if s.cfg.Hub == nil {
+		annotateAvailable(devs, s.cfg.OtherOwners())
 	}
 	SetLocations(devs, s.callerMachine(r))
 	s.decorateCloud(devs)
 	devs = q.Filter(devs)
-	s.applyDeviceConfig(devs)
-	writeJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
+	s.ApplyDeviceConfig(devs)
+	WriteJSON(w, http.StatusOK, DevicesResult{Envelope: Envelope{OK: true}, Devices: devs})
 }
 
 func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	info, ok := s.registry.Lookup(id)
 	if !ok {
-		writeError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
+		WriteError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
 		return
 	}
 	devs := []DeviceInfo{info}
-	if s.cfg.Hub {
-		s.annotate(devs)
+	if s.cfg.Hub != nil {
+		devs = s.cfg.Hub.Visible(r, devs)
+		if len(devs) == 0 {
+			WriteError(w, Errorf(CodeDeviceNotFound, "device %s not found", id))
+			return
+		}
 	} else {
 		devs[0].Machine = MachineName()
 	}
 	SetLocations(devs, s.callerMachine(r))
 	s.decorateCloud(devs)
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(devs[0])})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(devs[0])})
 }
 
 func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 	var req BootRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	// A cloud create goes to remote.go before the share and simulator
@@ -725,7 +792,7 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := s.checkShareBoot(r, req); e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	if req.Create != nil {
@@ -736,18 +803,18 @@ func (s *Server) handleBootDevice(w http.ResponseWriter, r *http.Request) {
 	defer s.idle.Release()
 	info, err := s.registry.Boot(r.Context(), req)
 	if err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+		WriteError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	s.events.Publish(Event{Type: "device.booted", Device: info.ID, Message: req.Name})
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(info)})
 }
 
 func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req StopDeviceRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if r.URL.Query().Get("force") == "true" {
@@ -760,67 +827,101 @@ func (s *Server) handleStopDevice(w http.ResponseWriter, r *http.Request) {
 		s.handleStopCloud(w, r, rd, req.Delete)
 		return
 	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
+	}
 	if req.Delete {
 		s.handleDeleteDevice(w, r, id, req.Force)
 		return
 	}
 	// Detach first if we hold it.
-	s.detachForStop(id)
+	s.DetachForStop(id)
 	if err := s.registry.Stop(id, req.Force); err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+		WriteError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	// On a hub, stopping the device ends its lease.
-	s.endStoppedLease(r.Context(), endStopped, id)
+	if err := s.deviceStopped(r.Context(), false, id); err != nil {
+		WriteError(w, err)
+		return
+	}
 	s.events.Publish(Event{Type: "device.stopped", Device: id})
-	writeJSON(w, http.StatusOK, Envelope{OK: true})
+	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
-// detachForStop closes the driver on a device about to be stopped or
+// DetachForStop closes the driver on a device about to be stopped or
 // deleted, if this daemon holds one.
-func (s *Server) detachForStop(id string) {
+func (s *Server) DetachForStop(id string) {
 	if a := s.takeAttached(id); a != nil {
-		defer s.finishDetach(a) // even if the teardown panics
-		a.close()
-		s.registry.MarkDetached(id)
-		s.events.Publish(Event{Type: "device.detached", Device: id})
+		s.closeAttachment(a)
 	}
+}
+
+// DetachLease closes the sessions opened by one grant, including sessions
+// on emulator serials which have disappeared or since changed identity.
+func (s *Server) DetachLease(lease <-chan struct{}) {
+	if lease == nil {
+		return
+	}
+	s.mu.Lock()
+	var owned []*attached
+	for _, a := range s.attached {
+		if a.lease == lease {
+			owned = append(owned, a)
+		}
+	}
+	s.mu.Unlock()
+	for _, session := range owned {
+		if a := s.takeAttachedIf(session); a != nil {
+			s.closeAttachment(a)
+		}
+	}
+}
+
+func (s *Server) closeAttachment(a *attached) {
+	defer s.finishDetach(a) // even if the teardown panics
+	a.close()
+	s.registry.MarkDetached(a.id)
+	s.events.Publish(Event{Type: "device.detached", Device: a.id})
 }
 
 func (s *Server) handleAttach(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var cfg AttachConfig
-	if e := decodeBody(r, &cfg); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &cfg); e != nil {
+		WriteError(w, e)
 		return
 	}
-	if CallerFrom(r.Context()).Remote {
-		if e := checkRemoteAttach(&cfg); e != nil {
-			s.logForbidden(r, e)
-			writeError(w, e)
-			return
-		}
+	attach := s.AttachDevice
+	if hub := s.cfg.Hub; hub != nil {
+		attach = hub.Attach
 	}
-	a, e := s.attachLeased(r.Context(), id, &cfg)
+	device, e := attach(r.Context(), id, &cfg)
 	if e != nil {
-		writeError(w, e)
+		if e.Code == CodeForbidden {
+			s.LogForbidden(r, e)
+		}
+		WriteError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(s.deviceInfo(a))})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: s.withDeviceConfig(*device)})
 }
 
 func (s *Server) handleDetach(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	a := s.takeAttached(id)
+	s.mu.Lock()
+	var a *attached
+	if current := s.attached[id]; current != nil && current.lease == leaseEnded(r.Context()) {
+		a = s.takeAttachedLocked(id)
+	}
+	s.mu.Unlock()
 	if a == nil {
-		writeError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id))
+		WriteError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id))
 		return
 	}
-	defer s.finishDetach(a) // even if the teardown panics
-	a.close()
-	s.registry.MarkDetached(id)
-	s.events.Publish(Event{Type: "device.detached", Device: id})
-	writeJSON(w, http.StatusOK, Envelope{OK: true})
+	s.closeAttachment(a)
+	WriteJSON(w, http.StatusOK, Envelope{OK: true})
 }
 
 func (s *Server) deviceInfo(a *attached) DeviceInfo {
@@ -867,15 +968,30 @@ func (s *Server) finishDetach(a *attached) {
 	}
 }
 
+// AttachDevice opens the driver's session and returns the device information
+// that the local attach route and hub lease responses publish.
+func (s *Server) AttachDevice(ctx context.Context, id string, cfg *AttachConfig) (*DeviceInfo, *Error) {
+	a, reused, err := s.ensureAttached(ctx, id, cfg)
+	if err != nil {
+		return nil, err
+	}
+	device := s.deviceInfo(a)
+	device.AttachReused = &reused
+	return &device, nil
+}
+
 // ensureAttached returns the attached device, opening it when cfg is
 // given and it isn't attached yet. Concurrent attaches for one device
 // wait for the first.
-func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfig) (*attached, *Error) {
+func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfig) (*attached, bool, *Error) {
 	for {
 		s.mu.Lock()
 		if a := s.attached[id]; a != nil {
 			s.mu.Unlock()
-			return a, nil
+			if a.lease != leaseEnded(ctx) {
+				return nil, false, Errorf(CodeDeviceInUse, "device %s still has an attachment for another lease", id)
+			}
+			return a, true, nil
 		}
 		if ch := s.attaching[id]; ch != nil {
 			s.mu.Unlock()
@@ -883,12 +999,12 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, Errorf(CodeInterrupted, "attach %s cancelled", id)
+				return nil, false, Errorf(CodeInterrupted, "attach %s cancelled", id)
 			}
 		}
 		if cfg == nil {
 			s.mu.Unlock()
-			return nil, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).
+			return nil, false, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).
 				WithDetails("attached", s.attachedIDs())
 		}
 		ch := make(chan struct{})
@@ -915,7 +1031,7 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 				s.mu.Unlock()
 				unlockInstall()
 				a.close()
-				return nil, Errorf(CodeDaemonUnavailable, "daemon is shutting down")
+				return nil, false, Errorf(CodeDaemonUnavailable, "daemon is shutting down")
 			}
 			s.attached[id] = a
 		}
@@ -927,7 +1043,7 @@ func (s *Server) ensureAttached(ctx context.Context, id string, cfg *AttachConfi
 			s.watchIdle(a, a.session.Driver())
 			s.watchConnection(a, a.session.Driver())
 		}
-		return a, e
+		return a, false, e
 	}
 }
 
@@ -944,15 +1060,16 @@ func (s *Server) attachedIDs() []string {
 func (s *Server) requireAttached(w http.ResponseWriter, r *http.Request) *attached {
 	id := r.PathValue("id")
 	a := s.getAttached(id)
-	if a == nil {
+	lease := leaseEnded(r.Context())
+	if a == nil || (lease != nil && a.lease != lease) {
 		if e := s.cloudGone(id); e != nil {
-			writeError(w, e)
+			WriteError(w, e)
 			return nil
 		}
 		s.mu.Lock()
 		ids := s.attachedIDs()
 		s.mu.Unlock()
-		writeError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).WithDetails("attached", ids))
+		WriteError(w, Errorf(CodeDeviceNotAttached, "device %s is not attached", id).WithDetails("attached", ids))
 		return nil
 	}
 	return a
@@ -964,17 +1081,22 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request, a *attached) bo
 		// A cloud device's keepalive holds the lock for one ping: that is
 		// not a step in flight, so wait it out.
 		if !a.busy.TryLock() && !(s.isPinging(a.id) && lockWithin(&a.busy, 5*time.Second)) {
-			writeError(w, Errorf(CodeBusy, "device %s has a step in flight", a.id))
+			WriteError(w, Errorf(CodeBusy, "device %s has a step in flight", a.id))
 			return false
 		}
 	} else {
 		a.busy.Lock()
 	}
+	if e := s.verifyBinding(r.Context(), a.id); e != nil {
+		a.busy.Unlock()
+		WriteError(w, e)
+		return false
+	}
 	// A cloud device counts the request on its idle clock (remote.go).
 	if rd := s.remote(a.id); rd != nil {
 		if e := rd.begin(); e != nil {
 			a.busy.Unlock()
-			writeError(w, e)
+			WriteError(w, e)
 			return false
 		}
 	}
@@ -1062,19 +1184,19 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	if !flow.IsStepType(name) {
-		writeError(w, Errorf(CodeUsage, "unknown command %q", name))
+		WriteError(w, Errorf(CodeUsage, "unknown command %q", name))
 		return
 	}
 	var value any
-	if e := decodeBody(r, &value); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &value); e != nil {
+		WriteError(w, e)
 		return
 	}
 	cwd := r.URL.Query().Get("cwd")
 	if cwd != "" && CallerFrom(r.Context()).Remote {
-		e := forbidden("?cwd= names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("?cwd= names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	src := "request"
@@ -1083,7 +1205,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	step, err := buildStep(name, value, src)
 	if err != nil {
-		writeError(w, WrapErr(CodeUsage, err))
+		WriteError(w, WrapErr(CodeUsage, err))
 		return
 	}
 	if !s.acquire(w, r, a) {
@@ -1102,7 +1224,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
-	writeJSON(w, status, res)
+	WriteJSON(w, status, res)
 }
 
 func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
@@ -1111,21 +1233,21 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req StepsRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if req.Cwd != "" && CallerFrom(r.Context()).Remote {
-		e := forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	var steps []flow.Step
 	var e *Error
 	if req.Bundle != nil {
 		if len(req.Steps) > 0 || req.YAML != "" {
-			writeError(w, Errorf(CodeUsage, "steps: send bundle, steps or yaml, not more than one"))
+			WriteError(w, Errorf(CodeUsage, "steps: send bundle, steps or yaml, not more than one"))
 			return
 		}
 		if e = req.Bundle.Validate(); e != nil {
@@ -1133,7 +1255,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if steps, e = resolveSteps(req); e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	if !s.acquire(w, r, a) {
@@ -1149,7 +1271,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 		}
 		f, err := flow.ParseFile(root)
 		if err != nil {
-			writeError(w, WrapErr(CodeUsage, err))
+			WriteError(w, WrapErr(CodeUsage, err))
 			return
 		}
 		// The root file's own directory, not the bundle's: its relative
@@ -1173,7 +1295,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
-	writeJSON(w, status, res)
+	WriteJSON(w, status, res)
 }
 
 func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
@@ -1182,28 +1304,28 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req FlowRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if CallerFrom(r.Context()).Remote {
 		var e *Error
 		switch {
 		case req.Cwd != "":
-			e = forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
+			e = Forbidden("cwd names a directory on the daemon's host; a remote caller may not send it").WithDetails("field", "cwd")
 		case req.File != "":
-			e = forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (bundle or yaml)", req.File).WithDetails("field", "file")
+			e = Forbidden("file %s is a path on the daemon's host; a remote caller sends the flow itself (bundle or yaml)", req.File).WithDetails("field", "file")
 		}
 		if e != nil {
-			s.logForbidden(r, e)
-			writeError(w, e)
+			s.LogForbidden(r, e)
+			WriteError(w, e)
 			return
 		}
 	}
 	var f *flow.Flow
 	var err error
 	if req.Bundle != nil && (req.File != "" || req.YAML != "") {
-		writeError(w, Errorf(CodeUsage, "flows: send bundle, file or yaml, not more than one"))
+		WriteError(w, Errorf(CodeUsage, "flows: send bundle, file or yaml, not more than one"))
 		return
 	}
 	bundleDir, flowDir := "", ""
@@ -1240,12 +1362,15 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 		}
 		f, err = flow.Parse([]byte(req.YAML), src)
 	default:
-		writeError(w, Errorf(CodeUsage, "flows: file or yaml is required"))
+		WriteError(w, Errorf(CodeUsage, "flows: file or yaml is required"))
 		return
 	}
 	if err != nil {
-		writeError(w, WrapErr(CodeUsage, err))
+		WriteError(w, WrapErr(CodeUsage, err))
 		return
+	}
+	if f.Config.EffectiveAppID() == "" {
+		f.Config.AppID = req.DefaultAppID
 	}
 	if len(req.Env) > 0 {
 		if f.Config.Env == nil {
@@ -1263,7 +1388,15 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.runCtxBundle(r, a, bundleDir, flowDir)
 	defer cancel()
-	out := a.session.RunFlow(ctx, *f)
+	if req.Bundle != nil {
+		logger.Info("Running flow bundle %q on %s", req.Bundle.Root, a.id)
+	}
+	var out *executor.StepOutcome
+	if req.Test != nil {
+		out = a.session.RunTestFlow(ctx, *f, *req.Test)
+	} else {
+		out = a.session.RunFlow(ctx, *f)
+	}
 	res := ResultFromOutcome(a.id, a.reportDir, out)
 	s.cloudResult(&res)
 	if c := CallerFrom(r.Context()); c.Remote || c.ClientOutputs {
@@ -1273,7 +1406,7 @@ func (s *Server) handleFlow(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		status = s.stepStatus(r, &Error{ErrorBody: *res.Error})
 	}
-	writeJSON(w, status, res)
+	WriteJSON(w, status, res)
 }
 
 // runCtx is the context a step runs under: cancelled when the client goes
@@ -1299,7 +1432,7 @@ func (s *Server) stepStatus(r *http.Request, res *Error) int {
 		return http.StatusOK
 	}
 	if res.Code == CodeForbidden {
-		s.logForbidden(r, res)
+		s.LogForbidden(r, res)
 	}
 	return res.Code.HTTPStatus()
 }
@@ -1307,13 +1440,13 @@ func (s *Server) stepStatus(r *http.Request, res *Error) int {
 // writeBundleError answers a bad bundle, logging a FORBIDDEN one.
 func (s *Server) writeBundleError(w http.ResponseWriter, r *http.Request, e *Error) {
 	if e.Code == CodeForbidden {
-		s.logForbidden(r, e)
+		s.LogForbidden(r, e)
 	}
-	writeError(w, e)
+	WriteError(w, e)
 }
 
-func (s *Server) logForbidden(r *http.Request, e *Error) {
-	logger.Info("FORBIDDEN %s %s from %s: %s", r.Method, r.URL.Path, describeCaller(CallerFrom(r.Context())), e.Message)
+func (s *Server) LogForbidden(r *http.Request, e *Error) {
+	logger.Info("FORBIDDEN %s %s from %s: %s", r.Method, r.URL.Path, DescribeCaller(CallerFrom(r.Context())), e.Message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,7 +1459,7 @@ func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	opts, e := parseShotOptions(r.URL.Query()) // maestro-d: screenshot.go
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	if !s.acquire(w, r, a) {
@@ -1335,11 +1468,11 @@ func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	defer s.release(a)
 	sh, e := takeShot(r.Context(), a.session, opts)
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
-		writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: base64.StdEncoding.EncodeToString(sh.data)})
+		WriteJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: base64.StdEncoding.EncodeToString(sh.data)})
 		return
 	}
 	w.Header().Set("Content-Type", sh.contentType)
@@ -1363,7 +1496,7 @@ func (s *Server) handleHierarchy(w http.ResponseWriter, r *http.Request) {
 	defer s.release(a)
 	data, err := a.session.Hierarchy(r.Context())
 	if err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+		WriteError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	if r.URL.Query().Get("format") == "raw" {
@@ -1388,7 +1521,7 @@ func (s *Server) handleHierarchy(w http.ResponseWriter, r *http.Request) {
 			parsed = string(data)
 		}
 	}
-	writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: parsed})
+	WriteJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: parsed})
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -1400,7 +1533,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.release(a)
-	writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: a.session.State(r.Context())})
+	WriteJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: a.session.State(r.Context())})
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -1408,7 +1541,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: a.session.PlatformInfo()})
+	WriteJSON(w, http.StatusOK, DataResult{Envelope: Envelope{OK: true}, Data: a.session.PlatformInfo()})
 }
 
 func (s *Server) handleGetVars(w http.ResponseWriter, r *http.Request) {
@@ -1416,7 +1549,7 @@ func (s *Server) handleGetVars(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, VarsResult{Envelope: Envelope{OK: true}, Vars: a.session.Vars()})
+	WriteJSON(w, http.StatusOK, VarsResult{Envelope: Envelope{OK: true}, Vars: a.session.Vars()})
 }
 
 func (s *Server) handleSetVars(w http.ResponseWriter, r *http.Request) {
@@ -1426,21 +1559,21 @@ func (s *Server) handleSetVars(w http.ResponseWriter, r *http.Request) {
 	}
 	// Accept {"vars": {...}} (the shape GET returns) as well as a bare map.
 	var body map[string]json.RawMessage
-	if e := decodeBody(r, &body); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &body); e != nil {
+		WriteError(w, e)
 		return
 	}
 	vars := map[string]string{}
 	if raw, ok := body["vars"]; ok && len(body) == 1 && len(raw) > 0 && raw[0] == '{' {
 		if err := json.Unmarshal(raw, &vars); err != nil {
-			writeError(w, Errorf(CodeUsage, "invalid vars: %v", err))
+			WriteError(w, Errorf(CodeUsage, "invalid vars: %v", err))
 			return
 		}
 	} else {
 		for k, raw := range body {
 			var v string
 			if err := json.Unmarshal(raw, &v); err != nil {
-				writeError(w, Errorf(CodeUsage, "variable %q must be a string", k))
+				WriteError(w, Errorf(CodeUsage, "variable %q must be a string", k))
 				return
 			}
 			vars[k] = v
@@ -1449,7 +1582,7 @@ func (s *Server) handleSetVars(w http.ResponseWriter, r *http.Request) {
 	for k, v := range vars {
 		a.session.SetVar(k, v)
 	}
-	writeJSON(w, http.StatusOK, VarsResult{Envelope: Envelope{OK: true}, Vars: a.session.Vars()})
+	WriteJSON(w, http.StatusOK, VarsResult{Envelope: Envelope{OK: true}, Vars: a.session.Vars()})
 }
 
 func (s *Server) handleEval(w http.ResponseWriter, r *http.Request) {
@@ -1458,12 +1591,12 @@ func (s *Server) handleEval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req EvalRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if strings.TrimSpace(req.Script) == "" {
-		writeError(w, Errorf(CodeUsage, "eval: script is required"))
+		WriteError(w, Errorf(CodeUsage, "eval: script is required"))
 		return
 	}
 	if !s.acquire(w, r, a) {
@@ -1474,10 +1607,10 @@ func (s *Server) handleEval(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		e := Errorf(CodeCommandFailed, "%v", err)
 		e.Step = "eval"
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
-	writeJSON(w, http.StatusOK, EvalResult{Envelope: Envelope{OK: true}, Value: jsonSafe(v)})
+	WriteJSON(w, http.StatusOK, EvalResult{Envelope: Envelope{OK: true}, Value: jsonSafe(v)})
 }
 
 // jsonSafe converts goja exports that encoding/json can't handle (e.g.

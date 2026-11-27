@@ -24,10 +24,6 @@ func TestParseConfig_AIBlock(t *testing.T) {
 			t.Fatalf("%s: %v", body, err)
 		}
 	}
-	// network.json takes no ai block.
-	if _, err := Parse([]byte(`{"devices": {}, "ai": {"jevKeyFile": "a"}}`)); err == nil {
-		t.Fatal("network.json took an ai block")
-	}
 }
 
 func TestAIKeys_ReadFromFilesBesideTheConfig(t *testing.T) {

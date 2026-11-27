@@ -23,12 +23,19 @@ import (
 // by --peer, and returns their infos.
 func startTwoHubs(t *testing.T, e *e2e, prefix string, extraA ...string) (daemon.Info, daemon.Info, []string, []string) {
 	t.Helper()
+	return startMockHubPair(t, e, prefix, []string{"mock-1", "mock-2"}, []string{"mock-3"}, extraA...)
+}
+
+func startMockHubPair(t *testing.T, e *e2e, prefix string, poolA, poolB []string, extraA ...string) (daemon.Info, daemon.Info, []string, []string) {
+	t.Helper()
 	homeA, homeB := filepath.Join(e.cwd, prefix+"-home-a"), filepath.Join(e.cwd, prefix+"-home-b")
-	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
-	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
+	writeSharedMocks(t, homeA, poolA...)
+	writeSharedMocks(t, homeB, poolB...)
+	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=" + strings.Join(poolA, ",")}
+	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=" + strings.Join(poolB, ",")}
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", prefix+"-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", prefix+"-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "res-tok", "--peer-token", "res-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -41,10 +48,8 @@ func startTwoHubs(t *testing.T, e *e2e, prefix string, extraA ...string) (daemon
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append(append([]string{"hub", "start", "--daemon", prefix + "-a", "--name", "hub-a",
-		"--share-device", "mock-1", "--share-device", "mock-2"}, extraA...), mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", prefix + "-b", "--name", "hub-b", "--peer", a.HTTPAddr,
-		"--share-device", "mock-3"}, mesh...)...))
+	a := started(e.runEnv(envA, append(append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, extraA...), mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr}, mesh...)...))
 	return a, b, envA, envB
 }
 
@@ -67,7 +72,7 @@ func TestE2E_HubReservations(t *testing.T) {
 	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 	// By id through hub-b, on hub-a's device.
-	res, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1@hub-a", StartAt: rfc(start), TTLSec: 30, Holder: "alice"})
+	res, err := c.Reserve(ctx, daemon.ReservationRequest{Device: "mock-1@hub-a", StartAt: rfc(start), TTLSec: 30, Holder: "alice", Description: "routed reservation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +99,7 @@ func TestE2E_HubReservations(t *testing.T) {
 	}
 	devs, _ := c.Devices(ctx, "mock")
 	for _, d := range devs {
-		if d.ID == "mock-1@hub-a" && (len(d.Reservations) != 1 || d.Reservations[0].Holder != "alice") {
+		if d.ID == "mock-1@hub-a" && (len(d.Reservations) != 1 || d.Reservations[0].Holder != "alice" || d.Reservations[0].Description != "routed reservation") {
 			t.Fatalf("listing: %+v", d)
 		}
 	}
@@ -127,15 +132,16 @@ func TestE2E_HubReservations(t *testing.T) {
 
 // A hub keeps its reservations across a clean stop and a crash: one whose
 // start passed while it was down starts as it comes back; a lease that
-// had started is gone after the crash, as every started lease is.
-func TestE2E_HubReservationsRestart(t *testing.T) {
+// had started is still present after the crash with the original expiry.
+func testReservationsRestart(t *testing.T) {
 	e := newE2E(t)
 	home := filepath.Join(e.cwd, "restart-home")
+	writeSharedMocks(t, home, "mock-1", "mock-2")
 	env := []string{daemon.EnvHome + "=" + home, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
-	t.Cleanup(func() { e.runEnv(env, "hub", "stop", "--daemon", "rst") })
+	t.Cleanup(func() { e.runEnv(env, "maestro-d-hub", "stop") })
 	start := func() daemon.Info {
 		t.Helper()
-		r := e.runEnv(env, "hub", "start", "--daemon", "rst", "--name", "hub-r", "--share-device", "mock-1", "--share-device", "mock-2",
+		r := e.runEnv(env, "maestro-d-hub", "start", "--name", "hub-r",
 			"--listen", "127.0.0.1:0", "--no-mdns", "--token", "rst-tok", "--peer-token", "rst-peer", "--json")
 		var out struct {
 			Daemon daemon.Info `json:"daemon"`
@@ -161,10 +167,10 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := e.runEnv(env, "hub", "stop", "--daemon", "rst"); r.code != 0 {
+	if r := e.runEnv(env, "maestro-d-hub", "stop"); r.code != 0 {
 		t.Fatalf("hub stop: %s%s", r.stdout, r.stderr)
 	}
-	path := filepath.Join(home, "hub", "daemons", "rst", "scheduled-leases.json")
+	path := filepath.Join(home, "hub", "leases.json")
 	fi, err := os.Stat(path)
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("%s: %v %v", path, fi, err)
@@ -181,7 +187,7 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 		l2.Lease.ExpiresAt != soon.Lease.ExpiresAt || l1.Lease.ID != later.Lease.ID {
 		t.Fatalf("after a stop: %+v %v / %+v %v", l1, err1, l2, err2)
 	}
-	// A crash keeps the reservation and loses the started lease.
+	// A crash keeps both the future reservation and the one that started.
 	if p, err := os.FindProcess(info.PID); err == nil {
 		_ = p.Signal(syscall.SIGKILL)
 	}
@@ -189,7 +195,21 @@ func TestE2E_HubReservationsRestart(t *testing.T) {
 	info = start()
 	c = daemon.NewHTTPClient("http://"+info.HTTPAddr, "rst-tok", nil)
 	ls, err := c.Leases(ctx)
-	if err != nil || len(ls) != 1 || ls[0].ID != later.Lease.ID || ls[0].State != daemon.LeaseScheduled {
+	if err != nil || len(ls) != 2 {
 		t.Fatalf("after a crash: %+v %v", ls, err)
+	}
+	for _, l := range ls {
+		switch l.ID {
+		case later.Lease.ID:
+			if l.State != daemon.LeaseScheduled || l.ExpiresAt != later.Lease.ExpiresAt {
+				t.Fatalf("future reservation after crash: %+v", l)
+			}
+		case soon.Lease.ID:
+			if l.State != daemon.LeaseActive || l.ExpiresAt != soon.Lease.ExpiresAt {
+				t.Fatalf("started reservation after crash: %+v", l)
+			}
+		default:
+			t.Fatalf("unexpected grant after crash: %+v", l)
+		}
 	}
 }

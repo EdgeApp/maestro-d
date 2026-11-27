@@ -36,8 +36,8 @@ func (s *Server) providerNames() []string {
 func (s *Server) provider(name string) (cloudprov.RemoteProvider, *Error) {
 	mk := s.deps.Providers[name]
 	if mk == nil {
-		if s.cfg.Hub {
-			return nil, Errorf(CodeUsage, "hub %q has no %s credentials (start it with --%s)", s.hubName(), name, name)
+		if s.cfg.Hub != nil {
+			return nil, Errorf(CodeUsage, "hub %q has no %s credentials (start it with --%s)", s.HubName(), name, name)
 		}
 		return nil, Errorf(CodeUsage, "cloud provider %q is not supported", name)
 	}
@@ -74,13 +74,13 @@ func (s *Server) madeProviders() []string {
 // used.
 func (s *Server) cloudStatus() []CloudStatus {
 	names := s.madeProviders()
-	if s.cfg.Hub {
+	if s.cfg.Hub != nil {
 		names = s.providerNames()
 	}
 	out := make([]CloudStatus, 0, len(names))
 	for _, n := range names {
-		st := CloudStatus{Provider: n, Held: s.cloudHeld(n)}
-		if s.cfg.Hub {
+		st := CloudStatus{Provider: n, Held: s.CloudHeld(n)}
+		if s.cfg.Hub != nil {
 			st.MaxDevices = s.cfg.CloudMaxDevices
 		}
 		out = append(out, st)
@@ -91,8 +91,8 @@ func (s *Server) cloudStatus() []CloudStatus {
 	return out
 }
 
-// cloudHeld counts the devices of provider this daemon holds.
-func (s *Server) cloudHeld(provider string) int {
+// CloudHeld counts the devices of provider this daemon holds.
+func (s *Server) CloudHeld(provider string) int {
 	n := 0
 	for _, d := range s.registry.Held() {
 		if d.Provider == provider {
@@ -149,8 +149,8 @@ func (s *Server) cloudCatalog(ctx context.Context, q DeviceQuery) ([]CloudCatalo
 		return nil, e
 	}
 	hub := ""
-	if s.cfg.Hub {
-		hub = s.hubName()
+	if s.cfg.Hub != nil {
+		hub = s.HubName()
 	}
 	out := make([]CloudCatalog, 0, len(names))
 	for _, n := range names {

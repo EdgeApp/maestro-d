@@ -3,8 +3,8 @@
 A host's `config.json` describes the devices it serves: which ones a hub
 shares, each one's description and capabilities, and each one's
 [traffic-shaping](network.md) calls; the keys its [AI checks](#ai)
-spend; and the hosts [`installApp`](#installapp) may download a build from. Nothing else writes it — there is no API to change it — and a device
-listing returns what it says.
+spend; and the hosts [`installApp`](#installapp) may download a build from.
+Device listings include descriptions, capabilities and shaping support.
 
 ```json
 {
@@ -44,28 +44,28 @@ listing returns what it says.
 
 ## Where it is read
 
-| | |
-| --- | --- |
-| `--config FILE` on `serve`, `hub start` and `hub service install` (or `MAESTRO_D_CONFIG`) | That file, as `config.json`, and nothing else. A file that does not exist is `USAGE` when the daemon starts |
-| neither flag | `<home>/config.json` (`~/.maestro-d/config.json`, or under `$MAESTRO_D_HOME`) when it exists, else `<home>/network.json` |
-| `--network-config FILE` (or `MAESTRO_D_NETWORK_CONFIG`) | Deprecated: that file, in the older [network.json](network.md#the-older-networkjson) format |
+Use `--config FILE` or `MAESTRO_D_CONFIG` to select the file. By default,
+maestro-d reads `<home>/config.json`, under `MAESTRO_D_HOME` or
+`~/.maestro-d`. A hub service uses the file selected at installation.
+An explicitly selected file must exist at startup.
 
-Only one file is ever read: `network.json` is read only when there is no
-`config.json`, and `--config` with `--network-config` is `USAGE`.
-`hub service install` passes the flag on to the LaunchAgent. The daemon
-logs the file it reads when it starts, and warns about any other config
-file that this order leaves unread.
+To migrate from 3.x, move each entry from `network.json` into
+`hubDevices`. Set its `id` to the old device key and copy both calls into
+`trafficShaping`. Move devices previously shared with `--share-device` or
+`--share-tv` into the same array using their stable IDs. Remove those flags
+and replace `--network-config` or `MAESTRO_D_NETWORK_CONFIG` with
+`--config` or `MAESTRO_D_CONFIG` if you need a custom path.
 
 - It must be readable by its owner only (`chmod 600`), because a shaping
   call may carry credentials. On Windows the file's access control list
   governs instead.
-- A missing `<home>` file, a missing `--network-config` file, or a `--config`
+- A missing default file, or a `--config`
   file removed while the daemon runs is an empty config.
 - A malformed file, an unknown key, an entry with no `id`, an id listed
   twice, or `trafficShaping` without both of its calls is an error naming the
   file, the device and the problem: `hub start` refuses to start, shaping
-  commands answer `USAGE`, and device listings log it and carry no
-  descriptions or shaping.
+  commands on the local daemon answer `USAGE`. A running hub keeps serving
+  its last valid config until the file is repaired.
 
 ## hubDevices
 
@@ -73,25 +73,47 @@ Each entry is one device of this host:
 
 | Key | | Meaning |
 | --- | --- | --- |
-| `id` | required | The device's id, as `maestro-d devices` lists it: a UDID, an adb serial or `avd:<name>`. `avd:<name>` also names that AVD while it runs under an emulator serial, and an Android boot or create of that bare name (a boot with no platform is Android when only an AVD has the name). A device's name does not match, as it does for `--share-device` |
+| `id` | required | The device's id, as `maestro-d devices` lists it: a UDID, an adb serial or `avd:<name>`. `avd:<name>` also names that AVD while it runs under an emulator serial, and an Android boot or create of that bare name (a boot with no platform is Android when only an AVD has the name) |
 | `description` | optional | Free text, returned as `description` |
 | `capabilities` | optional | Any JSON value, returned as `capabilities` exactly as written (key order, number literals and all). maestro-d gives it no meaning: each installation defines its own convention, and a test runner matches devices against it |
 | `trafficShaping` | optional | The device's `setTrafficShape` and `resetTrafficShape` calls, both required when the key is there ([the calls](network.md#a-call)) |
 
 ### Sharing
 
-**A hub shares exactly the devices it names**: every `hubDevices` entry, plus
-`--share-device` and `--share-tv` on its command line. A device named nowhere
-is private to its machine, and a hub that names nothing shares nothing. An
-Apple TV listed in `hubDevices` is shared like one named with `--share-tv`.
-Two exceptions: a cloud device the hub launches for a lease is always in its
-pool, and the [computer device](../macos.md) (`mac`) never is, even when
-`hubDevices` lists it; its entry still gives it a description.
+List each shared device in `hubDevices`, including Apple TVs. An empty
+list keeps all local devices private. A cloud device launched for a lease
+joins the pool for that lease. The computer device (`mac`) stays private,
+even when its entry supplies a local description.
 
-The hub reads `hubDevices` when it starts, so a change to which devices it
-shares takes a restart (`hub stop` and `hub start`, or the service's
-kickstart). A daemon that is not a hub reads no share list: its remote
-callers see every device, as before.
+The local daemon uses the file for descriptions and shaping. Local commands
+can still use any device on this computer.
+
+### Editing the shared devices
+
+On the device host, run:
+
+```sh
+maestro-d-hub devices --json
+maestro-d-hub devices add "$UDID" --description "Rack 2"
+maestro-d-hub devices set "$UDID" --description "Camera bench"
+maestro-d-hub devices remove "$UDID"
+```
+
+The commands use the running hub's Unix socket and update the active file
+immediately. When the hub is stopped, the CLI locks the home and edits
+the file directly. Use `--config FILE` for a custom path. A running hub
+checks that the requested path matches its own active config.
+
+You can configure a device before connecting it. The listing's `listed`
+field tells you whether discovery sees it. Removal reports the holder and
+time window of each live lease or reservation. To end them and remove the
+device in one operation, pass `--end-leases` to `devices remove`.
+An ordinary hand edit that removes a device keeps existing grants usable
+by their holders until their windows end. New clients see the updated pool.
+
+The hub checks hand edits at most once a second. While a file is invalid,
+the hub retains its last valid list and reports the error in `configError`
+on the local config listing. Repairing the file clears that error.
 
 ### Descriptions and shaping
 

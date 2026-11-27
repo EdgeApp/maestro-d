@@ -118,7 +118,7 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 		}
 		var rr *refusedRedirect
 		if errors.As(err, &rr) {
-			return nil, forbidden("install: download %s redirects to %s, which installApp.allowHosts does not list", redactedURL(req.URL), rr.host).WithDetails("field", "url")
+			return nil, Forbidden("install: download %s redirects to %s, which installApp.allowHosts does not list", redactedURL(req.URL), rr.host).WithDetails("field", "url")
 		}
 		return nil, Errorf(CodeDeviceError, "install: download %s: %v", redactedURL(req.URL), err)
 	}
@@ -156,19 +156,19 @@ func (r *refusedRedirect) Error() string { return "redirect to " + r.host + " is
 // goes) for a local caller of a daemon without one. A remote caller of a
 // daemon without one is refused.
 func (s *Server) installAllowHosts(ctx context.Context, u *url.URL) (*netshape.InstallApp, *Error) {
-	cfg, _, err := s.deviceConfig().Load()
+	cfg, err := netshape.LoadConfig(DeviceConfigPath(s.cfg.DeviceConfig))
 	if err != nil {
 		return nil, Errorf(CodeInternal, "install: device config: %v", err)
 	}
 	allow := cfg.InstallApp
 	if allow == nil {
 		if CallerFrom(ctx).Remote {
-			return nil, forbidden("install: a remote caller may download only from installApp.allowHosts, and this daemon's config.json lists none").WithDetails("field", "url")
+			return nil, Forbidden("install: a remote caller may download only from installApp.allowHosts, and this daemon's config.json lists none").WithDetails("field", "url")
 		}
 		return nil, nil
 	}
 	if !allow.Allows(u.Hostname()) {
-		return nil, forbidden("install: url host %s is not in installApp.allowHosts", u.Hostname()).WithDetails("field", "url")
+		return nil, Forbidden("install: url host %s is not in installApp.allowHosts", u.Hostname()).WithDetails("field", "url")
 	}
 	return allow, nil
 }

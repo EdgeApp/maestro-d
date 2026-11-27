@@ -412,9 +412,9 @@ func (s sessionBlobs) Resolve(ref string) (string, error) {
 func (s *Server) blobHash(w http.ResponseWriter, r *http.Request) (string, bool) {
 	h := r.PathValue("sha256")
 	if !executor.ValidBlobHash(h) {
-		e := forbidden("blob hash %q is not 64 lowercase hex digits", h).WithDetails("field", "sha256")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("blob hash %q is not 64 lowercase hex digits", h).WithDetails("field", "sha256")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return "", false
 	}
 	return h, true
@@ -453,16 +453,16 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	res, e := s.blobs.Put(h, r.Header.Get("Content-Range"), r.Body)
 	w.Header().Set(HeaderUploadOffset, strconv.FormatInt(res.Offset, 10))
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	status := http.StatusOK
 	switch {
 	case res.Created:
 		status = http.StatusCreated
-		logger.Info("blob %s stored (%d bytes) from %s", h, res.Offset, describeCaller(CallerFrom(r.Context())))
+		logger.Info("blob %s stored (%d bytes) from %s", h, res.Offset, DescribeCaller(CallerFrom(r.Context())))
 	case !res.Complete:
 		status = http.StatusAccepted
 	}
-	writeJSON(w, status, BlobResult{Envelope: Envelope{OK: true}, SHA256: h, Offset: res.Offset, Complete: res.Complete})
+	WriteJSON(w, status, BlobResult{Envelope: Envelope{OK: true}, SHA256: h, Offset: res.Offset, Complete: res.Complete})
 }

@@ -38,6 +38,7 @@ type DriverInfo struct {
 // bookkeeping the server needs.
 type attached struct {
 	id         string
+	lease      <-chan struct{} // owning grant window, nil on a plain daemon
 	cfg        AttachConfig
 	session    *executor.Session
 	cleanup    func()
@@ -74,14 +75,19 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if s.deps.NewDriver == nil {
 		return nil, Errorf(CodeInternal, "attach: no driver factory configured")
 	}
-	if owner := FindDeviceOwner(id, s.cfg.Name); owner != nil {
+	if owner := s.cfg.FindDeviceOwner(id); owner != nil {
 		e := Errorf(CodeDeviceInUse, "device %s is attached to daemon %q (pid %d)", id, owner.Name, owner.Info.PID)
 		return nil, e.WithDetails("owner", owner.Name, "ownerPid", owner.Info.PID)
 	}
 
 	reportDir := cfg.OutputDir
 	if reportDir == "" {
-		reportDir = filepath.Join(s.cfg.ReportsDir, unsafePath.ReplaceAllString(id, "_"), time.Now().Format("20060102-150405"))
+		name := time.Now().Format("20060102-150405")
+		if leaseEnded(ctx) != nil {
+			// Two holders can attach within one second. Each gets its own artifacts.
+			name += "-" + uuid.New().String()
+		}
+		reportDir = filepath.Join(s.cfg.ReportsDir, unsafePath.ReplaceAllString(id, "_"), name)
 	}
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return nil, WrapErr(CodeInternal, err)
@@ -126,6 +132,9 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	} else if strings.HasPrefix(id, "df:") {
 		return nil, Errorf(CodeUsage, "%s is a cloud model, not a device: launch it first (device create --provider devicefarm, or lease --location cloud)", id)
 	}
+	if e := s.verifyBinding(ctx, id); e != nil {
+		return nil, e
+	}
 	base, cancel := context.WithCancel(context.Background())
 	logger.Info("Attaching device %s (platform=%s driver=%s app=%s)", id, cfg.Platform, cfg.Driver, cfg.AppID)
 	var (
@@ -152,7 +161,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 		cleanup = func() {}
 	}
 	giveBuildSource(id, driver) // clearState on a physical iPhone reinstalls installApp's build (appbuild.go)
-	if leaseFrom(ctx) != nil && ctx.Err() != nil {
+	if leaseEnded(ctx) != nil && ctx.Err() != nil {
 		// The lease (or its client) ended while a driver start that cannot
 		// be cancelled ran: the driver is discarded, never attached.
 		logger.Info("attach %s: cancelled while the driver started; discarding it", id)
@@ -210,8 +219,8 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 
 	info := DeviceInfo{
 		ID: id, Platform: dinfo.Platform, Kind: dinfo.Kind, Name: dinfo.Name,
-		Attached: true, AttachedAt: nowRFC3339(), AppID: cfg.AppID, Driver: dinfo.DriverName, ReportDir: reportDir,
-		Ready: true,
+		Attached: true, AttachedAt: nowRFC3339(), AppID: cfg.AppID, AppVersion: dinfo.App.Version,
+		AppBuild: dinfo.App.Build, Driver: dinfo.DriverName, ReportDir: reportDir, Ready: true,
 	}
 	if info.Platform == "" {
 		info.Platform = strings.ToLower(cfg.Platform)
@@ -230,7 +239,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if name, ok := strings.CutPrefix(shaper.Alias, AVDPrefix); ok && name != "" {
 		info.Kind, info.Name = "emulator", name
 	}
-	a := &attached{id: id, cfg: cfg, session: session, cleanup: cleanup, info: info,
+	a := &attached{id: id, lease: leaseEnded(ctx), cfg: cfg, session: session, cleanup: cleanup, info: info,
 		reportDir: reportDir, attachedAt: time.Now(), base: base, cancel: cancel}
 	daemonOwned, discard := cfg.OutputDir == "", cfg.DiscardReports
 	a.release = func() { s.releaseReportDir(reportKey, blobDir, daemonOwned && discard) }
@@ -321,6 +330,18 @@ var sessionInputDirs = []string{"blobs", "bundles"}
 type reportUse struct {
 	n       int
 	created map[string]bool
+}
+
+// ActiveReportDirs returns the report directories still held by sessions or
+// their detach cleanups. The returned slice is independent of future changes.
+func (s *Server) ActiveReportDirs() []string {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	dirs := make([]string, 0, len(s.reportUsers))
+	for dir := range s.reportUsers {
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // addReportUser counts one more session using reportDir. The first one
@@ -453,7 +474,7 @@ func keys(m map[string]any) []string {
 func (s *Server) mapAttachBlobs(cfg *AttachConfig, dir string) *Error {
 	mapRef := func(field, ref string) (string, *Error) {
 		if _, _, err := executor.ParseBlobRef(ref); err != nil {
-			return "", forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
+			return "", Forbidden("%s %s: %v", field, ref, err).WithDetails("field", field)
 		}
 		local, err := s.blobs.Materialize(ref, dir)
 		if err != nil {

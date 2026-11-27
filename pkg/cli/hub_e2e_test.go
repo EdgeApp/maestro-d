@@ -40,16 +40,36 @@ func copyTree(t *testing.T, src, dst string) {
 	}
 }
 
+func writeSharedMocks(t *testing.T, home string, ids ...string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	devices := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		devices = append(devices, map[string]string{"id": id})
+	}
+	data, err := json.Marshal(map[string]any{"hubDevices": devices})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestE2E_TwoHubs(t *testing.T) {
 	e := newE2E(t)
 	homeA, homeB, homeC := filepath.Join(e.cwd, "home-a"), filepath.Join(e.cwd, "home-b"), filepath.Join(e.cwd, "home-c")
+	writeSharedMocks(t, homeA, "mock-1", "mock-2")
+	writeSharedMocks(t, homeB, "mock-3")
 	envA := []string{daemon.EnvHome + "=" + homeA, "MAESTRO_D_MOCK_DEVICES=mock-1,mock-2"}
 	envB := []string{daemon.EnvHome + "=" + homeB, "MAESTRO_D_MOCK_DEVICES=mock-3"}
 	// Each hub has its own daemon name: a long test home puts the unix
 	// socket in the temp dir, named by the daemon.
 	t.Cleanup(func() {
-		e.runEnv(envB, "hub", "stop", "--daemon", "two-b")
-		e.runEnv(envA, "hub", "stop", "--daemon", "two-a")
+		e.runEnv(envB, "maestro-d-hub", "stop")
+		e.runEnv(envA, "maestro-d-hub", "stop")
 	})
 	mesh := []string{"--listen", "127.0.0.1:0", "--no-mdns", "--token", "two-tok", "--peer-token", "two-peer", "--json"}
 	started := func(r result) daemon.Info {
@@ -62,8 +82,8 @@ func TestE2E_TwoHubs(t *testing.T) {
 		}
 		return out.Daemon
 	}
-	a := started(e.runEnv(envA, append([]string{"hub", "start", "--daemon", "two-a", "--name", "hub-a", "--share-device", "mock-1", "--share-device", "mock-2"}, mesh...)...))
-	b := started(e.runEnv(envB, append([]string{"hub", "start", "--daemon", "two-b", "--name", "hub-b", "--peer", a.HTTPAddr, "--share-device", "mock-3",
+	a := started(e.runEnv(envA, append([]string{"maestro-d-hub", "start", "--name", "hub-a"}, mesh...)...))
+	b := started(e.runEnv(envB, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", a.HTTPAddr,
 		"--advertise", "hub-b.example:7433", "--lease-max", "mock-3=90s"}, mesh...)...))
 	for _, arg := range b.StartArgs {
 		if strings.Contains(arg, "two-peer") || strings.Contains(arg, "two-tok") {
@@ -73,15 +93,15 @@ func TestE2E_TwoHubs(t *testing.T) {
 	client := []string{daemon.EnvHome + "=" + homeC, "MAESTRO_D_HUB=" + b.HTTPAddr, "MAESTRO_D_TOKEN=two-tok"}
 
 	// hub status through b names a, linked.
-	r := e.runEnv(client, "hub", "status", "--json")
+	r := e.runEnv(envB, "maestro-d-hub", "status", "--json")
 	var st daemon.HubStatusResult
 	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &st) != nil || len(st.Hub.Peers) != 1 || st.Hub.Peers[0].State != "linked" || st.Hub.Peers[0].Name != "hub-a" {
 		t.Fatalf("hub status: %s%s", r.stdout, r.stderr)
 	}
-	if r = e.runEnv(client, "hub", "status"); !strings.Contains(r.stdout, "hub-a") || !strings.Contains(r.stdout, "linked") {
+	if r = e.runEnv(envB, "maestro-d-hub", "status"); !strings.Contains(r.stdout, "hub-a") || !strings.Contains(r.stdout, "linked") {
 		t.Fatalf("hub status text: %s", r.stdout)
 	}
-	if r = e.runEnv(envA, "hub", "status", "--daemon", "two-a"); r.code != 0 || !strings.Contains(r.stdout, "hub hub-a") || !strings.Contains(r.stdout, "inbound") {
+	if r = e.runEnv(envA, "maestro-d-hub", "status"); r.code != 0 || !strings.Contains(r.stdout, "hub hub-a") || !strings.Contains(r.stdout, "inbound") {
 		t.Fatalf("hub status over the unix socket: %s%s", r.stdout, r.stderr)
 	}
 
@@ -134,14 +154,14 @@ func TestE2E_TwoHubs(t *testing.T) {
 	if r = e.runEnv(client, "run", filepath.Join(flowDir, "main.yaml"), "--device", "mock-1@hub-a"); r.code != 0 || !strings.Contains(r.stdout, "runScript") {
 		t.Fatalf("routed run: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
-	data, _ := os.ReadFile(filepath.Join(homeA, "run", "two-a", "daemon.log"))
+	data, _ := os.ReadFile(filepath.Join(homeA, "hub", "run", "daemon.log"))
 	if !strings.Contains(string(data), "forwarded by hub-b: POST /v1/devices/mock-1@hub-a/flows") {
 		t.Fatalf("the owner's log has no forwarded flow:\n%s", data)
 	}
 
 	// A hub named like a linked one is refused: exit 5, HUB_NAME_TAKEN.
 	envD := []string{daemon.EnvHome + "=" + filepath.Join(e.cwd, "home-d")}
-	r = e.runEnv(envD, append([]string{"hub", "start", "--daemon", "two-d", "--name", "hub-b", "--peer", b.HTTPAddr}, mesh...)...)
+	r = e.runEnv(envD, append([]string{"maestro-d-hub", "start", "--name", "hub-b", "--peer", b.HTTPAddr}, mesh...)...)
 	if r.code != 5 || envelopeCode(t, r.stderr) != daemon.CodeHubNameTaken {
 		t.Fatalf("taken name: exit %d\n%s", r.code, r.stderr)
 	}

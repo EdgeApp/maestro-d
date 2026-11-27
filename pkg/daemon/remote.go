@@ -96,9 +96,10 @@ type remoteDevice struct {
 	// an install under way, and an install sees an attach that came first.
 	installMu sync.Mutex
 
-	// lease is the hub lease the device was launched for (nil in direct
-	// mode): its release ends the lease, and the lease's end releases it.
-	lease *leaseEntry
+	// An independently ended allocation notifies the owner, including when it
+	// ends between launch and registration. Both fields are guarded by mu.
+	onEnd      func()
+	ownerEnded bool
 
 	stop        chan struct{}
 	releaseOnce sync.Once
@@ -168,10 +169,10 @@ func (s *Server) remote(id string) *remoteDevice {
 	return s.remotes[id]
 }
 
-// cloudBusy counts a request on id when it is a cloud device: the idle clock
+// CloudBusy counts a request on id when it is a cloud device: the idle clock
 // stops until done is called. It never takes the device's step lock. For
 // any other device it does nothing.
-func (s *Server) cloudBusy(id string) (done func(), e *Error) {
+func (s *Server) CloudBusy(id string) (done func(), e *Error) {
 	rd := s.remote(id)
 	if rd == nil {
 		return func() {}, nil
@@ -294,7 +295,7 @@ func (s *Server) launchCloud(ctx context.Context, spec cloudprov.CloudSpec, rese
 			s.events.Publish(Event{Type: "device.allocating", Device: id, Message: state})
 		},
 		Created: func(ref string) error {
-			return addLedgerEntry(CloudEntry{Daemon: s.cfg.Name, PID: pid, ID: id, Provider: spec.Provider, ProviderRef: ref, StartedAt: nowRFC3339()})
+			return addLedgerEntry(CloudEntry{Daemon: s.cfg.Name, Hub: s.cfg.HubProcess, PID: pid, ID: id, Provider: spec.Provider, ProviderRef: ref, StartedAt: nowRFC3339()})
 		},
 		Abandoned: func(ref string) {
 			if err := removeLedgerEntry(ref); err != nil {
@@ -506,7 +507,7 @@ func (s *Server) endRemote(rd *remoteDevice, reason string) {
 	go func() {
 		// Read the minutes and drop the ledger entry; the session is over.
 		s.finishRemote(rd, "ended", false)
-		s.endCloudLease(rd, "ended")
+		rd.notifyOwner("ended")
 	}()
 }
 
@@ -519,21 +520,37 @@ func (s *Server) releaseRemote(rd *remoteDevice, reason string) (*cloudprov.Devi
 	}
 	rd.mu.Unlock()
 	m, e := s.finishRemote(rd, reason, true)
-	s.endCloudLease(rd, reason)
+	rd.notifyOwner(reason)
 	return m, e
 }
 
-// endCloudLease ends the lease rd was launched for when rd went for a reason
-// of its own (its idle timeout, the session cap, its provider): the lease
-// publishes lease.expired, and later requests under it answer
-// LEASE_EXPIRED.
-func (s *Server) endCloudLease(rd *remoteDevice, reason string) {
-	// The lease's own end, and a stop or delete under it (which ends the
-	// lease as stopped or deleted), are not the device ending the lease.
-	if rd.lease == nil || reason == "lease-end" || reason == "stopped" || reason == "deleted" {
+// notifyOwner reports a provider or idle release. The owner handles an explicit
+// stop, delete, or lease release in the request that initiated it.
+func (rd *remoteDevice) notifyOwner(reason string) {
+	if reason == "lease-end" || reason == "stopped" || reason == "deleted" {
 		return
 	}
-	s.endLease(rd.lease, endCloudReleased)
+	rd.mu.Lock()
+	rd.ownerEnded = true
+	notify := rd.onEnd
+	rd.onEnd = nil
+	rd.mu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
+func (rd *remoteDevice) setOwner(onEnd func()) {
+	rd.mu.Lock()
+	ended := rd.ownerEnded
+	if !ended {
+		rd.onEnd = onEnd
+	}
+	rd.mu.Unlock()
+	if ended {
+		// Registration runs under the lease grant lock.
+		go onEnd()
+	}
 }
 
 // finishRemote ends rd's session and everything the daemon held for it:
@@ -543,7 +560,7 @@ func (s *Server) finishRemote(rd *remoteDevice, reason string, drop bool) (*clou
 	rd.releaseOnce.Do(func() {
 		defer close(rd.released)
 		close(rd.stop)
-		s.detachForStop(rd.id)
+		s.DetachForStop(rd.id)
 		rd.closeDriver()
 		ctx, cancel := context.WithTimeout(context.Background(), rd.timing.releaseTimeout)
 		defer cancel()
@@ -689,7 +706,7 @@ func (s *Server) selfRelease() {
 	}
 	pid := os.Getpid()
 	for _, e := range entries {
-		if e.Daemon != s.cfg.Name || e.PID == pid {
+		if e.Daemon != s.cfg.Name || e.Hub != s.cfg.HubProcess || e.PID == pid {
 			continue
 		}
 		if _, ok := s.deps.Providers[e.Provider]; !ok {
@@ -722,16 +739,16 @@ func (s *Server) selfRelease() {
 // create.cloud: direct mode, which a plain daemon offers its local callers
 // only. A hub launches cloud devices for leases alone.
 func (s *Server) handleCreateCloud(w http.ResponseWriter, r *http.Request, req BootRequest) {
-	if s.cfg.Hub {
-		e := forbidden("launch cloud devices through a lease: maestro-d lease --location cloud --platform ios|android …")
-		s.logForbidden(r, e)
-		writeError(w, e)
+	if s.cfg.Hub != nil {
+		e := Forbidden("launch cloud devices through a lease: maestro-d lease --location cloud --platform ios|android …")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	if CallerFrom(r.Context()).Remote {
-		e := forbidden("only a local caller launches cloud devices on a daemon (the daemon's own AWS credentials pay for them)")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("only a local caller launches cloud devices on a daemon (the daemon's own AWS credentials pay for them)")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	spec := *req.Create.Cloud
@@ -739,12 +756,12 @@ func (s *Server) handleCreateCloud(w http.ResponseWriter, r *http.Request, req B
 	for f, set := range map[string]bool{"name": c.Name != "", "type": c.Type != "", "runtime": c.Runtime != "", "image": c.Image != "",
 		"profile": c.Profile != "", "data-size": c.DataSize != "", "install-image": c.InstallImage, "accept-licenses": c.AcceptLicenses} {
 		if set {
-			writeError(w, Errorf(CodeUsage, "device create: --%s does not apply to a cloud device", f).WithDetails("field", f))
+			WriteError(w, Errorf(CodeUsage, "device create: --%s does not apply to a cloud device", f).WithDetails("field", f))
 			return
 		}
 	}
 	if req.Boot != nil && !*req.Boot {
-		writeError(w, Errorf(CodeUsage, "a cloud device always runs: boot false does not apply").WithDetails("field", "boot"))
+		WriteError(w, Errorf(CodeUsage, "a cloud device always runs: boot false does not apply").WithDetails("field", "boot"))
 		return
 	}
 	top := strings.ToLower(req.Platform)
@@ -752,17 +769,17 @@ func (s *Server) handleCreateCloud(w http.ResponseWriter, r *http.Request, req B
 	case spec.Platform == "":
 		spec.Platform = top
 	case top != "" && !strings.EqualFold(top, spec.Platform):
-		writeError(w, Errorf(CodeUsage, "platform %s and cloud.platform %s differ", top, spec.Platform).WithDetails("field", "platform"))
+		WriteError(w, Errorf(CodeUsage, "platform %s and cloud.platform %s differ", top, spec.Platform).WithDetails("field", "platform"))
 		return
 	}
 	if e := validateCloudSpec(&spec, cloudTimings()); e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	// A blob ref is materialized for the provider's upload.
 	tmp, e := s.materializeCloudApps(&spec)
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	if tmp != "" {
@@ -772,7 +789,7 @@ func (s *Server) handleCreateCloud(w http.ResponseWriter, r *http.Request, req B
 	defer s.idle.Release()
 	rd, e := s.launchCloud(r.Context(), spec)
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	info, _ := s.registry.Lookup(rd.id)
@@ -782,7 +799,7 @@ func (s *Server) handleCreateCloud(w http.ResponseWriter, r *http.Request, req B
 	s.decorateCloud(devs)
 	s.events.Publish(Event{Type: "device.created", Device: rd.id, Message: info.Name})
 	s.events.Publish(Event{Type: "device.booted", Device: rd.id, Message: info.Name})
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: devs[0]})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: devs[0]})
 }
 
 // materializeCloudApps turns blob refs among spec's apps into files in a
@@ -826,21 +843,20 @@ func (s *Server) handleStopCloud(w http.ResponseWriter, r *http.Request, rd *rem
 	}
 	minutes, e := s.releaseRemote(rd, reason)
 	s.forgetRemote(rd)
-	how := endStopped
-	if del {
-		how = endDeleted
+	if err := s.deviceStopped(r.Context(), del, rd.id); err != nil {
+		WriteError(w, err)
+		return
 	}
-	s.endStoppedLease(r.Context(), how, rd.id)
 	s.events.Publish(Event{Type: "device.stopped", Device: rd.id})
 	if del {
 		s.events.Publish(Event{Type: "device.deleted", Device: rd.id, Message: info.Name})
 	}
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	info.State, info.Ready, info.Attached, info.DeviceMinutes = "released", false, false, minutes
-	writeJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
+	WriteJSON(w, http.StatusOK, DeviceResult{Envelope: Envelope{OK: true}, Device: info})
 }
 
 // handleProviderSessions serves GET /v1/providers/{provider}/sessions: the
@@ -848,20 +864,20 @@ func (s *Server) handleStopCloud(w http.ResponseWriter, r *http.Request, rd *rem
 func (s *Server) handleProviderSessions(w http.ResponseWriter, r *http.Request) {
 	p, e := s.provider(r.PathValue("provider"))
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	s.idle.Hold()
 	defer s.idle.Release()
 	list, err := p.Sessions(r.Context())
 	if err != nil {
-		writeError(w, cloudError(err))
+		WriteError(w, cloudError(err))
 		return
 	}
 	if list == nil {
 		list = []cloudprov.SessionSummary{}
 	}
-	writeJSON(w, http.StatusOK, ProviderSessionsResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Sessions: list})
+	WriteJSON(w, http.StatusOK, ProviderSessionsResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Sessions: list})
 }
 
 // ProviderSessionsResult answers GET /v1/providers/{provider}/sessions.
@@ -874,24 +890,21 @@ type ProviderSessionsResult struct {
 
 // hubLabel is the hub's name on a hub, "" on a plain daemon.
 func (s *Server) hubLabel() string {
-	if s.cfg.Hub {
-		return s.hubName()
+	if s.cfg.Hub != nil {
+		return s.HubName()
 	}
 	return ""
 }
 
-// leaseCloud launches a cloud device for a selector lease with location
-// cloud, on this hub, and leases it: the hub's --cloud-max-devices caps how
-// many it holds (BUSY when full, launches in progress included), the window
-// is at most the provider's session, and the device is reserved from its
-// launch until the lease is granted, so no other request takes it.
-func (s *Server) leaseCloud(r *http.Request, sel LeaseSelector, cloud *cloudprov.CloudSpec, holder string, ttlSec int) (*leaseEntry, *Error) {
+// PrepareCloudLease validates the requested cloud device and checks that its
+// provider is available before a hub reserves launch capacity.
+func (s *Server) PrepareCloudLease(sel LeaseSelector, cloud *cloudprov.CloudSpec) (cloudprov.CloudSpec, *Error) {
 	spec := cloudprov.CloudSpec{}
 	if cloud != nil {
 		spec = *cloud
 	}
 	if spec.App != "" || len(spec.AuxiliaryApps) > 0 {
-		return nil, Errorf(CodeUsage, "lease: a cloud lease takes no app; install it once the device is leased (install, POST /v1/devices/{id}/apps)").
+		return spec, Errorf(CodeUsage, "lease: a cloud lease takes no app; install it once the device is leased (install, POST /v1/devices/{id}/apps)").
 			WithDetails("field", "cloud.app")
 	}
 	spec.Provider = firstNonEmpty(strings.ToLower(sel.Provider), strings.ToLower(spec.Provider), "devicefarm")
@@ -901,73 +914,39 @@ func (s *Server) leaseCloud(r *http.Request, sel LeaseSelector, cloud *cloudprov
 	spec.OSVersionMin = firstNonEmpty(sel.OSVersionMin, spec.OSVersionMin)
 	spec.OSVersionMax = firstNonEmpty(sel.OSVersionMax, spec.OSVersionMax)
 	if e := validateCloudSpec(&spec, cloudTimings()); e != nil {
-		return nil, e
+		return spec, e
 	}
 	if _, e := s.provider(spec.Provider); e != nil {
-		return nil, e
+		return spec, e
 	}
-	maxTTL := min(s.hubLeaseMax(), cloudLeaseMax)
-	if sel.Name != "" {
-		// A per-device maximum named for the model is checked before the
-		// launch, so a window over it costs no session. (A model the name
-		// matches only as a pattern is checked once it is launched.)
-		maxTTL = min(maxTTL, s.leaseMaxInfo(DeviceInfo{ID: sel.Name, Name: sel.Name, Provider: spec.Provider}))
-	}
-	if _, e := leaseWindow("", ttlSec, maxTTL); e != nil {
-		return nil, e
-	}
-	// The cap counts the devices held and the launches under way.
-	s.leaseMu.Lock()
-	held := s.cloudHeld(spec.Provider) + s.cloudLaunching
-	if held >= s.cfg.CloudMaxDevices {
-		s.leaseMu.Unlock()
-		return nil, Errorf(CodeBusy, "hub %s holds %d cloud device(s), its limit (--cloud-max-devices %d); release one or try another hub",
-			s.hubName(), held, s.cfg.CloudMaxDevices).WithDetails("limit", s.cfg.CloudMaxDevices)
-	}
-	s.cloudLaunching++
-	s.leaseMu.Unlock()
-	defer func() {
-		s.leaseMu.Lock()
-		s.cloudLaunching--
-		s.leaseMu.Unlock()
-	}()
-	rd, e := s.launchCloud(r.Context(), spec, func(id string) {
-		// Reserved before it is listed: nothing else leases it first.
-		s.leases.mu.Lock()
-		s.leases.booting[id] = true
-		s.leases.mu.Unlock()
-	})
+	return spec, nil
+}
+
+// CloudAllocation identifies one specific launch. Its release callbacks remain
+// bound to that allocation even after another device reuses its id.
+type CloudAllocation struct {
+	ID      string
+	OnEnd   func(func())
+	Release func(forget bool) *cloudprov.DeviceMinutes
+}
+
+// LaunchCloudAllocation reserves an id before the device appears in the catalog.
+func (s *Server) LaunchCloudAllocation(ctx context.Context, spec cloudprov.CloudSpec, reserve func(string)) (*CloudAllocation, *Error) {
+	rd, e := s.launchCloud(ctx, spec, reserve)
 	if e != nil {
 		return nil, e
 	}
-	defer func() {
-		s.leases.mu.Lock()
-		delete(s.leases.booting, rd.id)
-		s.leases.mu.Unlock()
-	}()
-	d, ok := s.registry.Lookup(rd.id)
-	if !ok {
-		_, _ = s.releaseRemote(rd, "lease-end")
-		return nil, Errorf(CodeDeviceError, "cloud device %s vanished before its lease was granted", rd.id)
-	}
-	if s.shuttingDown.Load() {
-		// The hub's leases have ended: no new one, and the device goes.
-		_, _ = s.releaseRemote(rd, "lease-end")
-		return nil, Errorf(CodeDaemonUnavailable, "hub %s is shutting down", s.hubName())
-	}
-	// The device is bound to the lease as it is granted, under leaseMu: a
-	// lease ended at once (the hub stopping) still releases it.
-	entry, le := s.leaseDevice(d, holder, ttlSec, claimReserved, func(e *leaseEntry) {
-		e.cloud, e.cloudDone = rd, make(chan struct{})
-		rd.lease = e
-	})
-	if le != nil {
-		_, _ = s.releaseRemote(rd, "lease-end")
-		return nil, le
-	}
-	s.events.Publish(Event{Type: "device.created", Device: rd.id, Message: d.Name})
-	s.events.Publish(Event{Type: "device.booted", Device: rd.id, Message: d.Name})
-	return entry, nil
+	return &CloudAllocation{
+		ID:    rd.id,
+		OnEnd: rd.setOwner,
+		Release: func(forget bool) *cloudprov.DeviceMinutes {
+			minutes, _ := s.releaseRemote(rd, "lease-end")
+			if forget {
+				s.forgetRemote(rd)
+			}
+			return minutes
+		},
+	}, nil
 }
 
 func firstNonEmpty(v ...string) string {
@@ -990,9 +969,9 @@ func firstNonEmpty(v ...string) string {
 // WebDriver session's restart wait for any step in flight, and no step or
 // attach starts while they run.
 func (s *Server) handleInstallCloud(w http.ResponseWriter, r *http.Request, rd *remoteDevice, path string) {
-	done, e := s.cloudBusy(rd.id)
+	done, e := s.CloudBusy(rd.id)
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	defer done()
@@ -1000,7 +979,7 @@ func (s *Server) handleInstallCloud(w http.ResponseWriter, r *http.Request, rd *
 	defer s.idle.Release()
 	ref, err := rd.provider.Upload(r.Context(), path)
 	if err != nil {
-		writeError(w, cloudError(err))
+		WriteError(w, cloudError(err))
 		return
 	}
 	rd.installMu.Lock()
@@ -1013,18 +992,18 @@ func (s *Server) handleInstallCloud(w http.ResponseWriter, r *http.Request, rd *
 	}
 	appID := s.appIDOf(path)
 	if e := s.installRef(r.Context(), rd, *ref, appID); e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
-	logger.Info("Installed %s (%s) on cloud device %s for %s", filepath.Base(path), appID, rd.id, describeCaller(CallerFrom(r.Context())))
+	logger.Info("Installed %s (%s) on cloud device %s for %s", filepath.Base(path), appID, rd.id, DescribeCaller(CallerFrom(r.Context())))
 	s.events.Publish(Event{Type: "app.installed", Device: rd.id, Message: appID})
-	writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: rd.id, AppID: appID})
+	WriteJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: rd.id, AppID: appID})
 }
 
 // installCloud installs path into rd while it is being attached (attach's
 // appFile): nothing else drives it yet. It returns the app's id.
 func (s *Server) installCloud(ctx context.Context, rd *remoteDevice, path string, _ *attached) (string, *Error) {
-	done, e := s.cloudBusy(rd.id)
+	done, e := s.CloudBusy(rd.id)
 	if e != nil {
 		return "", e
 	}
@@ -1164,32 +1143,32 @@ type ProviderUploadResult struct {
 func (s *Server) handleProviderAccount(w http.ResponseWriter, r *http.Request) {
 	p, e := s.provider(r.PathValue("provider"))
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	acct, err := p.Account(r.Context())
 	if err != nil {
-		writeError(w, cloudError(err))
+		WriteError(w, cloudError(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, ProviderAccountResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Account: acct})
+	WriteJSON(w, http.StatusOK, ProviderAccountResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Account: acct})
 }
 
 func (s *Server) handleProviderApps(w http.ResponseWriter, r *http.Request) {
 	p, e := s.provider(r.PathValue("provider"))
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	apps, err := p.Apps(r.Context())
 	if err != nil {
-		writeError(w, cloudError(err))
+		WriteError(w, cloudError(err))
 		return
 	}
 	if apps == nil {
 		apps = []cloudprov.AppRef{}
 	}
-	writeJSON(w, http.StatusOK, ProviderAppsResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Apps: apps})
+	WriteJSON(w, http.StatusOK, ProviderAppsResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), Apps: apps})
 }
 
 // handleProviderUpload uploads an app from the daemon's own disk: a local
@@ -1197,31 +1176,31 @@ func (s *Server) handleProviderApps(w http.ResponseWriter, r *http.Request) {
 // install route on a leased cloud device.
 func (s *Server) handleProviderUpload(w http.ResponseWriter, r *http.Request) {
 	if CallerFrom(r.Context()).Remote {
-		e := forbidden("upload reads a file on the daemon's own machine; a remote caller installs through install on a leased cloud device (the app is uploaded under the lease)")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("upload reads a file on the daemon's own machine; a remote caller installs through install on a leased cloud device (the app is uploaded under the lease)")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	var req ProviderUploadRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	if req.App == "" {
-		writeError(w, Errorf(CodeUsage, "upload: app is required (a path on this machine)").WithDetails("field", "app"))
+		WriteError(w, Errorf(CodeUsage, "upload: app is required (a path on this machine)").WithDetails("field", "app"))
 		return
 	}
 	p, e := s.provider(r.PathValue("provider"))
 	if e != nil {
-		writeError(w, e)
+		WriteError(w, e)
 		return
 	}
 	s.idle.Hold()
 	defer s.idle.Release()
 	ref, err := p.Upload(r.Context(), req.App)
 	if err != nil {
-		writeError(w, cloudError(err))
+		WriteError(w, cloudError(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, ProviderUploadResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), AppRef: *ref})
+	WriteJSON(w, http.StatusOK, ProviderUploadResult{Envelope: Envelope{OK: true}, Provider: p.Name(), Hub: s.hubLabel(), AppRef: *ref})
 }

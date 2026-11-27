@@ -79,7 +79,7 @@ function png(r, g, b, a) {
  */ let faults = []
 
 before(async () => {
-  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
   tcp = await MaestroD.connect({ name: 'jsfiles', http: '127.0.0.1:0', token: 'files-token', idleTimeout: 120 })
   const port = Number(tcp.info.httpAddr.split(':').pop())
   proxy = http.createServer((req, res) => {

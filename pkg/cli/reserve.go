@@ -18,6 +18,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -47,24 +48,25 @@ func parseStartAt(v string, now time.Time) (time.Time, error) {
 	return now.Add(d), nil
 }
 
-var reserveFlags = flagSet(daemonSelectFlags, one(deviceFlag), targetFlags, []dflag{
-	strFlag("platform", "Select a device of this platform: ios, android, …", nil,
+var reserveFlags = common.FlagSet(daemonSelectFlags, common.One(deviceFlag), targetFlags, []dflag{
+	common.StringFlag("platform", "Select a device of this platform: ios, android, …", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Platform = v }, "p"),
-	strFlag("kind", "Select a device of this kind: simulator, device, tv", nil,
+	common.StringFlag("kind", "Select a device of this kind: simulator, device, tv", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Kind = v }),
-	strFlag("name", "Select the device with this name (or id)", nil,
+	common.StringFlag("name", "Select the device with this name (or id)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Name = v }),
-	strFlag("os", "Select an OS version, or a prefix of one (26 matches 26.5)", nil,
+	common.StringFlag("os", "Select an OS version, or a prefix of one (26 matches 26.5)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.OSVersion = v }),
-	strFlag("os-min", "Select an OS version at least this", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMin = v }),
-	strFlag("os-max", "Select an OS version at most this, at its own precision (17 admits 17.5)", nil,
+	common.StringFlag("os-min", "Select an OS version at least this", nil, func(o *daemonOpts, v string) { o.lease.sel.OSVersionMin = v }),
+	common.StringFlag("os-max", "Select an OS version at most this, at its own precision (17 admits 17.5)", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.OSVersionMax = v }),
-	strFlag("hub", "Select a device on this hub", nil,
+	common.StringFlag("hub", "Select a device on this hub", nil,
 		func(o *daemonOpts, v string) { o.lease.sel.Hub = v }),
-	strFlag("start-at", "When the window starts: an RFC 3339 time, or a duration from now (90m, 2h); required", nil,
+	common.StringFlag("start-at", "When the window starts: an RFC 3339 time, or a duration from now (90m, 2h); required", nil,
 		func(o *daemonOpts, v string) { o.lease.startAt = v }),
 	ttlFlag("The window: a duration (8h, 90m) or seconds (default the hub's, 8h or the device's maximum)"),
-	strFlag("holder", "Who holds the reservation, as listings show it (default user@host)", nil,
+	leaseDescriptionFlag,
+	common.StringFlag("holder", "Who holds the reservation, as listings show it (default user@host)", nil,
 		func(o *daemonOpts, v string) { o.lease.holder = v }),
 })
 
@@ -72,7 +74,7 @@ var reserveCommand = &cli.Command{
 	Name:      "reserve",
 	Usage:     "Reserve a device on a hub for a window that starts later, by id or by selector",
 	ArgsUsage: " ",
-	Description: flagsDoc(`The hub holds the device for the window, and no other lease may reach into
+	Description: common.FlagHelp(`The hub holds the device for the window, and no other lease may reach into
 it. The start is at most the hub's lead ahead (24 hours by default) and the
 window at most the device's maximum (8 hours by default); this machine's
 clock must be within a minute of the hub's. The reservation is recorded in
@@ -113,7 +115,7 @@ func runReserve(ctx context.Context, o *daemonOpts, args []string) error {
 		return daemon.Errorf(daemon.CodeUsage, "%s is not a hub and has no reservations (start one with `maestro-d hub start`)", targetLabel(o))
 	}
 	req := daemon.ReservationRequest{StartAt: start.UTC().Format(time.RFC3339), ClientTime: time.Now().UTC().Format(time.RFC3339),
-		TTLSec: o.lease.ttl, Holder: o.holder()}
+		TTLSec: o.lease.ttl, Holder: o.holder(), Description: o.lease.description}
 	if o.Device != "" {
 		id, _, err := lookupDevice(ctx, c, o.Device)
 		if err != nil {
@@ -137,10 +139,10 @@ func runReserve(ctx context.Context, o *daemonOpts, args []string) error {
 	return printLease(o, res.Lease, res.Device)
 }
 
-var claimFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags, targetFlags, []dflag{
-	strFlag("lease", "The lease to claim, by id; required", nil, func(o *daemonOpts, v string) { o.lease.id = v }),
-	{name: "attach", kind: kindBool, value: "true", usage: "Attach the device once claimed (default true; --no-attach only records the lease)",
-		apply: func(o *daemonOpts, v string) error {
+var claimFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags, targetFlags, []dflag{
+	common.StringFlag("lease", "The lease to claim, by id; required", nil, func(o *daemonOpts, v string) { o.lease.id = v }),
+	{Name: "attach", Kind: common.Bool, Value: "true", Usage: "Attach the device once claimed (default true; --no-attach only records the lease)",
+		Apply: func(o *daemonOpts, v string) error {
 			o.lease.noAttach = v == "false"
 			return nil
 		}},
@@ -150,7 +152,7 @@ var claimCommand = &cli.Command{
 	Name:      "claim",
 	Usage:     "Take a lease by its id (a reservation once it has started), record it and attach the device",
 	ArgsUsage: " ",
-	Description: flagsDoc(`The lease id is all a client needs: a reservation made on another machine,
+	Description: common.FlagHelp(`The lease id is all a client needs: a reservation made on another machine,
 or a lease another client handed over. claim records it in leases.json, so
 later commands on its device send it, and attaches the device (--no-attach
 only records it). A reservation that has not started is LEASE_NOT_STARTED
@@ -181,6 +183,9 @@ func runClaim(ctx context.Context, o *daemonOpts, args []string) error {
 		return err
 	}
 	l := res.Lease
+	if l.Device == "" {
+		return daemon.Errorf(daemon.CodeDeviceNotFound, "the emulator for lease %s is unavailable", l.ID)
+	}
 	if l.State == daemon.LeaseScheduled {
 		return daemon.Errorf(daemon.CodeLeaseNotStarted, "lease %s on %s starts at %s (in %s); claim it then", l.ID, l.Device, l.StartsAt,
 			untilExpiry(l.StartsAt)).WithDetails("lease", l.ID, "startsAt", l.StartsAt)

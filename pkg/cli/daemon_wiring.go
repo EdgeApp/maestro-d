@@ -7,7 +7,9 @@ package cli
 // when RunConfig or CreateDriver change shape.
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -20,7 +22,14 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/computer"
 	"github.com/devicelab-dev/maestro-runner/pkg/emulator"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
+	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
+
+// HubDriverDeps discovers local TVs before the hub accepts its first request.
+func HubDriverDeps() daemon.Deps {
+	cachedTVs()
+	return daemonDeps()
+}
 
 // UpstreamVersion is the maestro-runner release this fork is based on.
 const UpstreamVersion = "1.1.26"
@@ -29,7 +38,7 @@ const UpstreamVersion = "1.1.26"
 // driver and device code.
 func daemonDeps() daemon.Deps {
 	return daemon.Deps{
-		Version:            Version,
+		Version:            version.Version,
 		NewDriver:          daemonNewDriver,
 		ListDevices:        daemonListDevices,
 		NormalizeHierarchy: NormalizeHierarchy,
@@ -89,7 +98,7 @@ func guessPlatform(id string) string {
 // so CreateDriver behaves exactly as it does for `test`.
 func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	platform := strings.ToLower(cfg.Platform)
-	if platform == "" && isMockDevice(id) {
+	if isMockDevice(id) {
 		platform = "mock"
 	}
 	if platform == "" && cfg.Driver != "mock" {
@@ -151,6 +160,9 @@ func attachToRunConfig(id string, cfg daemon.AttachConfig) *RunConfig {
 	}
 	if v, ok := cfg.Extra["androidTcpForward"].(bool); ok {
 		rc.AndroidTCPForward = v
+	}
+	if v, ok := cfg.Extra["noFlutterFallback"].(bool); ok {
+		rc.NoFlutterFallback = v
 	}
 	if v, ok := cfg.Extra["capsFile"].(string); ok {
 		rc.CapsFile = v
@@ -255,10 +267,20 @@ func mockDevices() []daemon.DeviceInfo {
 	if v == "" {
 		return nil
 	}
+	// Only listing metadata can be overridden. IDs and driver dispatch still
+	// come from the explicit mock device list.
+	var props map[string]struct{ Name, Platform, Kind, Model, DeviceType, OSVersion string }
+	if raw := os.Getenv("MAESTRO_D_MOCK_DEVICE_PROPS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &props); err != nil {
+			props = nil
+		}
+	}
 	var out []daemon.DeviceInfo
 	for _, id := range strings.Split(v, ",") {
 		if id = strings.TrimSpace(id); id != "" {
-			out = append(out, daemon.DeviceInfo{ID: id, Platform: "mock", Kind: "device", Name: id, State: "device", Ready: true})
+			p := props[id]
+			out = append(out, daemon.DeviceInfo{ID: id, Name: cmp.Or(p.Name, id), Platform: cmp.Or(p.Platform, "mock"),
+				Kind: cmp.Or(p.Kind, "device"), Model: p.Model, DeviceType: p.DeviceType, OSVersion: p.OSVersion, State: "device", Ready: true})
 		}
 	}
 	return out
@@ -277,12 +299,14 @@ func isMockDevice(id string) bool {
 // daemonListDevices adapts `maestro-runner devices` discovery.
 func daemonListDevices(platform string) []daemon.DeviceInfo {
 	platform = strings.ToLower(platform)
-	mocks := mockDevices()
-	if platform == "mock" {
-		return mocks
+	var mocks []daemon.DeviceInfo
+	for _, device := range mockDevices() {
+		if platform == "" || device.Platform == platform {
+			mocks = append(mocks, device)
+		}
 	}
-	if platform == "web" {
-		return nil
+	if platform == "mock" || platform == "web" {
+		return mocks
 	}
 	if platform == computer.Platform {
 		if mac, ok := computerEntry(); ok {
@@ -292,15 +316,15 @@ func daemonListDevices(platform string) []daemon.DeviceInfo {
 	}
 	entries := collectDevices(platform, true)
 	out := make([]daemon.DeviceInfo, 0, len(entries)+len(mocks)+1)
+	out = append(out, mocks...)
 	if platform == "" {
-		out = append(out, mocks...)
 		if mac, ok := computerEntry(); ok {
 			out = append(out, mac)
 		}
 	}
 	for _, e := range entries {
 		out = append(out, daemon.DeviceInfo{
-			ID: e.ID, Platform: e.Platform, Kind: e.Kind, Name: e.Name, Model: e.Model,
+			ID: e.ID, Platform: e.Platform, Kind: e.Kind, Name: e.Name, Model: e.Model, DeviceType: e.DeviceType,
 			OSVersion: e.OSVersion, State: e.State, Ready: e.Ready,
 		})
 	}

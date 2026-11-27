@@ -37,7 +37,8 @@ const (
 	CodeCommandFailed Code = "COMMAND_FAILED"
 	// CodeUsage: unknown command, bad flags, unparsable step/YAML, unknown
 	// device, bad request body. Exit 2 / HTTP 400.
-	CodeUsage Code = "USAGE"
+	CodeUsage      Code = "USAGE"
+	CodeHubRunning Code = "HUB_RUNNING"
 	// CodeDaemonUnavailable: could not connect to or spawn the daemon, API
 	// version mismatch, daemon shutting down. Exit 3 / HTTP 503.
 	CodeDaemonUnavailable Code = "DAEMON_UNAVAILABLE"
@@ -101,7 +102,7 @@ const (
 
 // Codes lists every code, for tables and tests.
 var Codes = []Code{
-	CodeCommandFailed, CodeUsage, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
+	CodeCommandFailed, CodeUsage, CodeHubRunning, CodeDaemonUnavailable, CodeDeviceError, CodeBusy,
 	CodeDeviceExternal, CodeDeviceInUse, CodeDeviceNotFound, CodeDeviceNotAttached,
 	CodeInterrupted, CodeInternal, CodeForbidden, CodePeerUnavailable, CodeHubNameTaken,
 	CodeHubVersion, CodeLeaseRequired, CodeLeaseExpired, CodeLeaseNotStarted, CodeCaptureUnavailable, CodeUnsupported,
@@ -114,7 +115,7 @@ func (c Code) ExitCode() int {
 		return 0
 	case CodeCommandFailed:
 		return 1
-	case CodeUsage, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
+	case CodeUsage, CodeHubRunning, CodeDeviceNotAttached, CodeForbidden, CodeUnsupported:
 		return 2
 	case CodeDaemonUnavailable, CodePeerUnavailable:
 		return 3
@@ -135,6 +136,8 @@ func (c Code) HTTPStatus() int {
 		return http.StatusOK
 	case CodeCommandFailed:
 		return http.StatusUnprocessableEntity
+	case CodeHubRunning:
+		return http.StatusConflict
 	case CodeUsage:
 		return http.StatusBadRequest
 	case CodeDaemonUnavailable, CodePeerUnavailable, CodeCaptureUnavailable:
@@ -252,7 +255,7 @@ func WrapErr(code Code, err error) *Error {
 // WithDetails adds structured context and returns the same error.
 // detail returns a string detail of e ("" and false when e is nil or has
 // none).
-func (e *Error) detail(key string) (string, bool) {
+func (e *Error) Detail(key string) (string, bool) {
 	if e == nil {
 		return "", false
 	}
@@ -290,19 +293,20 @@ func FailureEnvelope(e *Error) Envelope {
 // `error` still populated so callers can see what went wrong.
 type StepResult struct {
 	Envelope
-	Device     string                  `json:"device"`
-	Step       string                  `json:"step"`
-	Type       string                  `json:"type"`
-	Index      int                     `json:"index"`
-	DurationMs int64                   `json:"durationMs"`
-	Message    string                  `json:"message,omitempty"`
-	Skipped    bool                    `json:"skipped,omitempty"`
-	Optional   bool                    `json:"optional,omitempty"`
-	Element    *core.ElementInfo       `json:"element,omitempty"`
-	Data       any                     `json:"data,omitempty"`
-	Artifacts  report.CommandArtifacts `json:"artifacts"`
-	SubSteps   []report.Command        `json:"subSteps,omitempty"`
-	ReportDir  string                  `json:"reportDir,omitempty"`
+	Device     string                   `json:"device"`
+	Step       string                   `json:"step"`
+	Type       string                   `json:"type"`
+	Index      int                      `json:"index"`
+	DurationMs int64                    `json:"durationMs"`
+	Message    string                   `json:"message,omitempty"`
+	Skipped    bool                     `json:"skipped,omitempty"`
+	Optional   bool                     `json:"optional,omitempty"`
+	Element    *core.ElementInfo        `json:"element,omitempty"`
+	Data       any                      `json:"data,omitempty"`
+	Artifacts  report.CommandArtifacts  `json:"artifacts"`
+	SubSteps   []report.Command         `json:"subSteps,omitempty"`
+	TestReport *executor.TestFlowReport `json:"testReport,omitempty"`
+	ReportDir  string                   `json:"reportDir,omitempty"`
 	// Outputs name the files a remote call's output fields wrote, as
 	// paths under the report directory (outputs/<path>), fetched with
 	// GET …/artifacts/{path}. Absent for local calls.
@@ -312,8 +316,40 @@ type StepResult struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// wireSeparator is the host's path separator; tests set it to exercise a
+// Windows hub.
+var wireSeparator = string(filepath.Separator)
+
+// wireArtifacts names report files with forward slashes on every host, so a
+// Windows hub's references pass the client's artifact path checks.
+func wireArtifacts(a report.CommandArtifacts) report.CommandArtifacts {
+	if wireSeparator == "/" {
+		return a
+	}
+	for _, p := range []*string{&a.ScreenshotBefore, &a.ScreenshotAfter, &a.ViewHierarchy} {
+		*p = strings.ReplaceAll(*p, wireSeparator, "/")
+	}
+	return a
+}
+
+// wireCommands copies the report's command tree with wire artifact paths,
+// leaving the hub's own report untouched.
+func wireCommands(cs []report.Command) []report.Command {
+	if cs == nil || wireSeparator == "/" {
+		return cs
+	}
+	out := make([]report.Command, len(cs))
+	for i, c := range cs {
+		c.Artifacts = wireArtifacts(c.Artifacts)
+		c.SubCommands = wireCommands(c.SubCommands)
+		out[i] = c
+	}
+	return out
+}
+
 // ResultFromOutcome converts an executor outcome into the wire result.
 func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepResult {
+	artifacts := wireArtifacts(o.Artifacts)
 	r := StepResult{
 		Device:     device,
 		Step:       o.Description,
@@ -325,8 +361,9 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		Optional:   o.Optional,
 		Element:    o.Element,
 		Data:       o.Data,
-		Artifacts:  o.Artifacts,
-		SubSteps:   o.SubSteps,
+		Artifacts:  artifacts,
+		SubSteps:   wireCommands(o.SubSteps),
+		TestReport: o.TestReport,
 		ReportDir:  reportDir,
 		Outputs:    o.Outputs,
 	}
@@ -358,11 +395,11 @@ func ResultFromOutcome(device, reportDir string, o *executor.StepOutcome) StepRe
 		if o.Error.Suggestion != "" {
 			details["suggestion"] = o.Error.Suggestion
 		}
-		if o.Artifacts.ScreenshotAfter != "" {
-			details["screenshot"] = o.Artifacts.ScreenshotAfter
+		if artifacts.ScreenshotAfter != "" {
+			details["screenshot"] = artifacts.ScreenshotAfter
 		}
-		if o.Artifacts.ViewHierarchy != "" {
-			details["hierarchy"] = o.Artifacts.ViewHierarchy
+		if artifacts.ViewHierarchy != "" {
+			details["hierarchy"] = artifacts.ViewHierarchy
 		}
 		if reportDir != "" {
 			details["reportDir"] = reportDir
@@ -448,24 +485,30 @@ type DeviceInfo struct {
 	ID string `json:"id"`
 	// Hub and LocalID, on a hub, split ID: the hub that owns the device
 	// and the device's id on that hub's machine.
-	Hub       string `json:"hub,omitempty"`
-	LocalID   string `json:"localId,omitempty"`
-	Platform  string `json:"platform"`       // android | ios | web | mock
-	Kind      string `json:"kind,omitempty"` // device | emulator | simulator | tv
-	Name      string `json:"name,omitempty"`
-	Model     string `json:"model,omitempty"` // hardware: "Pixel 8" (ro.product.model), "iPhone14,2"
-	OSVersion string `json:"osVersion,omitempty"`
-	State     string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
-	Ready     bool   `json:"ready"`
+	Hub        string `json:"hub,omitempty"`
+	LocalID    string `json:"localId,omitempty"`
+	Platform   string `json:"platform"`       // android | ios | web | mock
+	Kind       string `json:"kind,omitempty"` // device | emulator | simulator | tv
+	Name       string `json:"name,omitempty"`
+	Model      string `json:"model,omitempty"`      // hardware: "Pixel 8" (ro.product.model), "iPhone14,2"
+	DeviceType string `json:"deviceType,omitempty"` // configured virtual hardware profile
+	OSVersion  string `json:"osVersion,omitempty"`
+	State      string `json:"state,omitempty"` // device | offline | Booted | Shutdown | …
+	Ready      bool   `json:"ready"`
 	// BootedBy is "daemon" for devices this daemon booted, "external" for
 	// everything else.
 	BootedBy string `json:"bootedBy,omitempty"`
 	BootedAt string `json:"bootedAt,omitempty"`
 	// Attached is true while the daemon holds a driver for the device.
 	Attached bool `json:"attached"`
-	// AttachedAt / AppID / Driver / ReportDir describe the attachment.
+	// AttachReused is set on attach responses. A reused driver kept its original options.
+	AttachReused *bool `json:"attachReused,omitempty"`
+	// AttachedAt / AppID / AppVersion / AppBuild / Driver / ReportDir
+	// describe the attachment.
 	AttachedAt string `json:"attachedAt,omitempty"`
 	AppID      string `json:"appId,omitempty"`
+	AppVersion string `json:"appVersion,omitempty"`
+	AppBuild   string `json:"appBuild,omitempty"`
 	Driver     string `json:"driver,omitempty"`
 	ReportDir  string `json:"reportDir,omitempty"`
 	// Busy is true while a step is in flight.
@@ -494,7 +537,7 @@ type DeviceInfo struct {
 	Machine   string   `json:"machine,omitempty"`
 	Addresses []string `json:"addresses,omitempty"`
 	// TrafficShaping is true when the device's host has both traffic-shaping
-	// calls configured for it in its network.json.
+	// calls configured for it in its config.json.
 	TrafficShaping bool `json:"trafficShaping,omitempty"`
 	// Location is where the device is, relative to the caller's computer:
 	// local, mesh or cloud. It is computed per request (location.go).
@@ -647,10 +690,13 @@ type StepsRequest struct {
 
 // FlowRequest is the body of POST /v1/devices/{dev}/flows.
 type FlowRequest struct {
-	File string            `json:"file,omitempty"`
-	YAML string            `json:"yaml,omitempty"`
-	Env  map[string]string `json:"env,omitempty"`
-	Cwd  string            `json:"cwd,omitempty"`
+	Test *executor.TestFlowOptions `json:"test,omitempty"`
+	// DefaultAppID is inherited from a suite when its child has no app ID or URL.
+	DefaultAppID string            `json:"defaultAppId,omitempty"`
+	File         string            `json:"file,omitempty"`
+	YAML         string            `json:"yaml,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Cwd          string            `json:"cwd,omitempty"`
 	// Bundle, used instead of File or YAML, is an uploaded flow bundle;
 	// its root file runs as the flow.
 	Bundle *BundleManifest `json:"bundle,omitempty"`
@@ -723,6 +769,7 @@ type Info struct {
 	Version    string   `json:"version"`
 	SocketPath string   `json:"socketPath"`
 	HTTPAddr   string   `json:"httpAddr,omitempty"`
+	WebAddr    string   `json:"webAddr,omitempty"`
 	StartedAt  string   `json:"startedAt"`
 	StartArgs  []string `json:"startArgs,omitempty"`
 	RunDir     string   `json:"runDir"`
@@ -736,10 +783,15 @@ type Info struct {
 	Hub string `json:"hub,omitempty"`
 }
 
+// ConfigLocalOnlyMessage is the refusal at both the mesh and the hub handler.
+const ConfigLocalOnlyMessage = "device config can be changed only on the hub's own machine, over its unix socket"
+
 // Event is one entry on the /v1/events stream.
 type Event struct {
-	Seq  int64  `json:"seq"`
-	Time string `json:"time"`
+	// PreviouslyShared records public visibility at an unshare transition.
+	PreviouslyShared bool   `json:"-"`
+	Seq              int64  `json:"seq"`
+	Time             string `json:"time"`
 	// Type: step | nestedStep | device.attached | device.detached |
 	// device.booted | device.stopped | device.capture | daemon.shutdown |
 	// lease.granted | lease.released | lease.expired. device.capture's
@@ -754,6 +806,7 @@ type Event struct {
 	Passed     bool   `json:"passed,omitempty"`
 	DurationMs int64  `json:"durationMs,omitempty"`
 	Error      string `json:"error,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 	Message    string `json:"message,omitempty"`
 	// DeviceMinutes, on device.released, is the device time the cloud
 	// session used.

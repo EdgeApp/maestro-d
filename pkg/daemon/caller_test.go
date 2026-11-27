@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 )
 
@@ -32,6 +33,11 @@ func fromAddr(addr string, h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 	})
 }
+
+// Route tests for files and apps exercise the handler after lease admission.
+type handlerTestHub struct{ Hub }
+
+func (h handlerTestHub) Gate(_ LeaseMode, next http.HandlerFunc) http.HandlerFunc { return next }
 
 type callerEnv struct {
 	s      *Server
@@ -68,7 +74,7 @@ func newCallerEnv(t *testing.T, cfg Config) *callerEnv {
 // client of the env send it.
 func (e *callerEnv) lease(t *testing.T, device string) {
 	t.Helper()
-	if !e.s.cfg.Hub {
+	if e.s.cfg.Hub == nil {
 		return
 	}
 	res, err := e.local.AcquireLease(context.Background(), LeaseRequest{Device: device, Holder: "test"})
@@ -93,7 +99,8 @@ func wantErrCode(t *testing.T, err error, code Code) *Error {
 }
 
 func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")})
+	env.lease(t, "mock-1")
 	ctx := context.Background()
 	if _, err := env.local.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 		t.Fatal(err)
@@ -109,13 +116,17 @@ func TestCaller_RemoteRunShellForbiddenLocalRuns(t *testing.T) {
 		t.Fatalf("unix-socket runShell: %v", err)
 	}
 	// On a plain serve --http daemon, loopback stays local.
-	if _, err := env.lo.Command(ctx, "mock-1", "runShell", "echo hi", true); err != nil {
+	plain := newCallerEnv(t, Config{HTTPAddr: "127.0.0.1:7433"})
+	if _, err := plain.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.lo.Command(ctx, "mock-1", "runShell", "echo hi", true); err != nil {
 		t.Fatalf("loopback runShell on serve --http: %v", err)
 	}
 }
 
 func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: true, ShareDevices: []string{"mock-1", "mock-2"}})
+	env := newCallerEnv(t, Config{HTTPAddr: ":7433", Token: "t", Hub: NewTestHub(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")})
 	ctx := context.Background()
 	env.lease(t, "mock-1")
 	if _, err := env.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
@@ -128,14 +139,19 @@ func TestCaller_HubTreatsLoopbackAsRemote(t *testing.T) {
 		t.Fatalf("unix socket on a hub: %v", err)
 	}
 	// AllowRemoteShell lets remote callers through.
-	env.s.cfg.AllowRemoteShell = true
-	if _, err := env.lo.Command(ctx, "mock-1", "runShell", "echo hi", true); err != nil {
+	allowed := newCallerEnv(t, Config{Hub: NewTestHub(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1"), AllowRemoteShell: true})
+	allowed.lease(t, "mock-1")
+	if _, err := allowed.lo.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allowed.lo.Command(ctx, "mock-1", "runShell", "echo hi", true); err != nil {
 		t.Fatalf("with AllowRemoteShell: %v", err)
 	}
 }
 
 func TestCaller_RemoteHostDirectoriesRefusedAtTheRoute(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: NewTestHub(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")})
+	env.lease(t, "mock-1")
 	ctx := context.Background()
 	if _, err := env.remote.Attach(ctx, "mock-1", AttachConfig{Platform: "mock"}); err != nil {
 		t.Fatal(err)
@@ -170,7 +186,7 @@ func TestCaller_RemoteHostDirectoriesRefusedAtTheRoute(t *testing.T) {
 }
 
 func TestCaller_RemoteAttachRefusals(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")})
 	ctx := context.Background()
 	cases := map[string]AttachConfig{
 		"web":           {Platform: "web"},
@@ -213,8 +229,8 @@ func TestCaller_EnvironmentStaysOnTheHost(t *testing.T) {
 		cfg     Config
 		imports bool
 	}{
-		{"hub", Config{Hub: true, HTTPAddr: ":7433", Token: "t", ShareDevices: []string{"mock-1", "mock-2"}}, false},
-		{"non-loopback serve", Config{HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
+		{"hub", Config{Hub: NewTestHub(), HTTPAddr: ":7433", Token: "t", DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")}, false},
+		{"hub with pass-env", Config{Hub: NewTestHub(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1"), HTTPAddr: "0.0.0.0:7433", Token: "t", PassEnv: []string{"MAESTRO_D_PASSED"}}, false},
 		{"loopback serve", Config{HTTPAddr: "127.0.0.1:7433"}, true},
 		{"socket only", Config{}, true},
 	} {
@@ -253,17 +269,17 @@ func TestCaller_ListenChecks(t *testing.T) {
 		ok  bool
 	}{
 		{Config{}, true},
-		{Config{HTTPAddr: ":7433"}, true},
+		{Config{HTTPAddr: ":7433"}, false},
 		{Config{HTTPAddr: "127.0.0.1:7433"}, true},
 		{Config{HTTPAddr: "localhost:7433"}, true},
 		{Config{HTTPAddr: "[::1]:7433"}, true},
 		{Config{HTTPAddr: "0.0.0.0:7433"}, false},
-		{Config{HTTPAddr: "0.0.0.0:7433", Token: "t"}, true},
-		{Config{HTTPAddr: ":7433", Hub: true}, false},
-		{Config{HTTPAddr: ":7433", Hub: true, Token: "t"}, true},
+		{Config{HTTPAddr: "0.0.0.0:7433", Token: "t"}, false},
+		{Config{HTTPAddr: ":7433", Hub: NewTestHub()}, false},
+		{Config{HTTPAddr: ":7433", Hub: NewTestHub(), Token: "t"}, true},
 		{Config{TLSCert: "c"}, false},
 		{Config{HTTPAddr: ":7433", TLSCert: "c"}, false},
-		{Config{HTTPAddr: ":7433", TLSCert: "c", TLSKey: "k"}, true},
+		{Config{Hub: NewTestHub(), Token: "t", HTTPAddr: ":7433", TLSCert: "c", TLSKey: "k"}, true},
 	}
 	for _, tc := range cases {
 		s := New(tc.cfg, Deps{})
@@ -276,14 +292,14 @@ func TestCaller_ListenChecks(t *testing.T) {
 	// Run refuses before listening.
 	t.Setenv(EnvHome, t.TempDir())
 	s := New(Config{Name: "notoken", HTTPAddr: "0.0.0.0:0"}, Deps{})
-	if err := s.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "--token") {
+	if err := s.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("Run without a token: %v", err)
 	}
 	s = New(Config{Name: "badtls", HTTPAddr: "127.0.0.1:0", TLSCert: "/nope.pem", TLSKey: "/nope.key"}, Deps{})
 	if err := s.Run(context.Background()); err == nil || codeOf(t, err) != CodeUsage {
 		t.Fatalf("Run with missing TLS files: %v", err)
 	}
-	if isLoopbackListen("example.com:1") || !isLoopbackListen("localhost") {
+	if CheckLocalListen("example.com:1") == nil || CheckLocalListen("localhost:0") != nil {
 		t.Fatal("isLoopbackListen")
 	}
 }
@@ -318,7 +334,7 @@ func TestServer_RunServesTLS(t *testing.T) {
 	certFile, keyFile := selfSigned(t)
 	pr, pw, _ := os.Pipe()
 	var n int32
-	s := New(Config{Name: "tls", HTTPAddr: "127.0.0.1:0", Token: "tok", TLSCert: certFile, TLSKey: keyFile, Ready: pw,
+	s := New(Config{Hub: NewTestHub(), Name: "tls", HTTPAddr: "127.0.0.1:0", Token: "tok", TLSCert: certFile, TLSKey: keyFile, Ready: pw,
 		ReportsDir: t.TempDir()}, testDeps(&n, 0))
 	go func() { _ = s.Run(context.Background()) }()
 	defer func() { s.Shutdown("test"); <-s.Done() }()
@@ -355,52 +371,20 @@ func TestCallerHelpers(t *testing.T) {
 		c    Caller
 		want string
 	}{{Caller{}, "unix socket"}, {Caller{Remote: true, Addr: "a"}, "remote a"}, {Caller{Addr: "b"}, "local b"}} {
-		if got := describeCaller(c.c); got != c.want {
+		if got := DescribeCaller(c.c); got != c.want {
 			t.Errorf("%+v: %q", c.c, got)
 		}
 	}
 	s := New(Config{}, Deps{})
-	if !s.remoteTCP("garbage") || s.remoteTCP("127.0.0.1:1") || !s.remoteTCP("[2001:db8::1]:1") {
+	if s.tcpCaller("garbage", false).Remote || s.tcpCaller("127.0.0.1:1", false).Remote || s.tcpCaller("[2001:db8::1]:1", false).Remote {
 		t.Fatal("remoteTCP")
-	}
-}
-
-// 5.harness-review.1: Appium capabilities name host files and programs, and
-// appiumUrl aims the daemon at any address, so a remote attach gets no
-// Appium; the route applies this only to remote callers.
-func TestCheckRemoteAttach_Appium(t *testing.T) {
-	blob := "blob:sha256:" + strings.Repeat("a", 64) + "/caps.json"
-	for _, tc := range []struct {
-		name  string
-		cfg   AttachConfig
-		field string
-	}{
-		{"driver appium", AttachConfig{Platform: "android", Driver: "appium"}, "driver"},
-		{"driver Appium", AttachConfig{Driver: "Appium"}, "driver"},
-		{"driver APPIUM padded", AttachConfig{Platform: "ios", Driver: " APPIUM "}, "driver"},
-		{"appiumUrl", AttachConfig{Platform: "android", AppiumURL: "http://127.0.0.1:4723"}, "appiumUrl"},
-		{"capsFile blob", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": blob}}, "extra.capsFile"},
-		{"capsFile path", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": "/tmp/caps.json"}}, "extra.capsFile"},
-		{"capsFile non-string", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": map[string]any{"appium:app": "/bin/sh"}}}, "extra.capsFile"},
-		{"no driver", AttachConfig{Platform: "android"}, ""},
-		{"uiautomator2", AttachConfig{Platform: "android", Driver: "uiautomator2"}, ""},
-		{"devicelab", AttachConfig{Platform: "ios", Driver: "devicelab"}, ""},
-		{"empty capsFile", AttachConfig{Platform: "android", Extra: map[string]any{"capsFile": ""}}, ""},
-	} {
-		e := checkRemoteAttach(&tc.cfg)
-		switch {
-		case tc.field == "" && e != nil:
-			t.Errorf("%s: refused: %v", tc.name, e)
-		case tc.field != "" && (e == nil || e.Code != CodeForbidden || e.Details["field"] != tc.field):
-			t.Errorf("%s: want FORBIDDEN on %s, got %+v", tc.name, tc.field, e)
-		}
 	}
 }
 
 // A unix-socket caller attaches with Appium as today: the route never
 // applies the remote check to it.
 func TestCaller_LocalAppiumAttach(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t", Hub: handlerTestHub{NewTestHub()}, DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-2")})
 	ctx := context.Background()
 	var got AttachConfig
 	next := env.s.deps.NewDriver

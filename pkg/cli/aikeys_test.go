@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
@@ -63,7 +64,7 @@ func TestOneShot_AssertWithAIThresholds(t *testing.T) {
 
 // assertNoDefectsWithAI's assertion is built in, so a bare call is a step.
 func TestBuildStepValue_AssertNoDefectsWithAINeedsNoValue(t *testing.T) {
-	v, err := buildStepValue(daemon.CommandSpecs["assertNoDefectsWithAI"], &parsedArgs{})
+	v, err := buildStepValue(daemon.CommandSpecs["assertNoDefectsWithAI"], &common.ParsedArgs{})
 	if err != nil || v != nil {
 		t.Fatalf("got %v, %v", v, err)
 	}

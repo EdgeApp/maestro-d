@@ -43,7 +43,7 @@ const (
 )
 
 // DefaultPort is a hub's port when an address names none.
-const DefaultPort = 7433
+const DefaultPort = daemon.DefaultHubPort
 
 var nameRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
@@ -52,6 +52,8 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 // Config configures a hub's mesh.
 type Config struct {
+	// SelectorJournal records keyed mesh acquisitions with the hub's lease state.
+	SelectorJournal SelectorJournal
 	// Name is this hub's name, unique in the mesh.
 	Name string
 	// Token is the client bearer token; forwarded requests carry it.
@@ -126,10 +128,10 @@ func (c *Config) defaults() {
 }
 
 type peerState struct {
-	name, addr, instance string
-	link                 *Link
-	since                time.Time
-	reason               string
+	name, addr, instance, machine string
+	link                          *Link
+	since                         time.Time
+	reason                        string
 	// stopped: the peer closed its link because it was shutting down.
 	stopped bool
 }
@@ -184,6 +186,9 @@ type Mesh struct {
 	afterLinked atomic.Pointer[func()]
 
 	cache fanoutCache
+
+	selectorMu sync.Mutex
+	selectors  map[string]*selectorCall
 
 	// peerIDs remembers, for PeerIDCacheFor, the hub an unqualified id
 	// resolved to when this hub did not list it (router.resolve).
@@ -373,38 +378,9 @@ func advertisedAddr(v string, port int, useTLS bool) (string, error) {
 	return addr, nil
 }
 
-// ParseAddr parses a hub address, as --peer, --advertise and
-// --target-hub take it: HOST, HOST:PORT, http://HOST[:PORT] or
-// https://HOST[:PORT] (a bare IPv6 address too). It returns host:port, or
-// https://host:port for https, with port when the address names none.
+// ParseAddr parses an address for a mesh link.
 func ParseAddr(v string, port int) (string, error) {
-	v = strings.TrimSpace(v)
-	scheme := "http"
-	if i := strings.Index(v, "://"); i >= 0 {
-		scheme, v = strings.ToLower(v[:i]), v[i+3:]
-	}
-	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("unsupported scheme %q (use http:// or https://)", scheme)
-	}
-	v = strings.TrimRight(v, "/")
-	if v == "" || strings.ContainsAny(v, "/?#@ \t") {
-		return "", fmt.Errorf("want HOST[:PORT] or https://HOST[:PORT], got %q", v)
-	}
-	host, p := v, strconv.Itoa(port)
-	if h, hp, err := net.SplitHostPort(v); err == nil {
-		if n, err := strconv.Atoi(hp); err != nil || n < 1 || n > 65535 {
-			return "", fmt.Errorf("bad port %q", hp)
-		}
-		if h == "" {
-			return "", fmt.Errorf("want HOST[:PORT], got %q", v)
-		}
-		host, p = h, hp
-	}
-	addr := net.JoinHostPort(strings.Trim(host, "[]"), p)
-	if scheme == "https" {
-		return "https://" + addr, nil
-	}
-	return addr, nil
+	return daemon.ParseHubAddr(v, port)
 }
 
 // secure reports whether this hub dials only https:// peers: it serves
@@ -627,7 +603,7 @@ func (m *Mesh) httpClient() *http.Client {
 }
 
 func (m *Mesh) hello() Frame {
-	return Frame{T: frameHello, Name: m.cfg.Name, Version: m.cfg.Version, APIVersion: daemon.APIVersion,
+	return Frame{T: frameHello, Name: m.cfg.Name, Machine: daemon.MachineName(), Version: m.cfg.Version, APIVersion: daemon.APIVersion,
 		Instance: m.instance, Addr: m.cfg.Advertise, Port: m.port, TLS: m.useTLS, Peers: m.peerRefs(), Cloud: m.cfg.Cloud}
 }
 
@@ -700,7 +676,7 @@ func (m *Mesh) dial(addr, peer string, bulk bool) (*Link, error) {
 		l.close(websocket.StatusPolicyViolation, "API version")
 		return nil, daemon.Errorf(daemon.CodeHubVersion, "hub %s speaks API %s, this hub %s", f.Name, f.APIVersion, daemon.APIVersion)
 	}
-	l.peer, l.instance, l.cloud = f.Name, f.Instance, f.Cloud
+	l.peer, l.instance, l.cloud, l.machine = f.Name, f.Instance, f.Cloud, f.Machine
 	l.dialable.Store(true)
 	go l.readLoop()
 	go l.pingLoop(m.cfg.PingEvery, m.cfg.PingTimeout, m.cfg.MissedPongs)
@@ -782,6 +758,7 @@ func (m *Mesh) registerLink(l *Link) (bool, *daemon.Error) {
 			return false, nil
 		}
 	}
+	p.machine = l.machine
 	p.link, p.instance, p.since, p.stopped, p.reason = l, l.instance, time.Now(), false, ""
 	if l.addr != "" {
 		p.addr = l.addr
@@ -996,7 +973,7 @@ func (m *Mesh) acceptLink(w http.ResponseWriter, r *http.Request) {
 		l.close(websocket.StatusProtocolError, "bad hello")
 		return
 	}
-	l.instance, l.cloud = f.Instance, f.Cloud
+	l.instance, l.cloud, l.machine = f.Instance, f.Cloud, f.Machine
 	if f.Addr != "" {
 		if a, err := advertisedAddr(f.Addr, f.Port, f.TLS); err == nil {
 			l.addr = a
@@ -1088,7 +1065,7 @@ func (m *Mesh) routeCloud(named, provider string) (string, *daemon.Error) {
 // Status is GET /v1/hub's hub.
 func (m *Mesh) Status(ctx context.Context) daemon.HubStatus {
 	st := daemon.HubStatus{Name: m.cfg.Name, Version: m.cfg.Version, APIVersion: daemon.APIVersion,
-		Addr: m.cfg.Advertise, Listen: m.self.HTTPAddr, TLS: m.useTLS, MDNS: !m.cfg.NoMDNS, Peers: []daemon.HubPeer{},
+		Addr: m.cfg.Advertise, Listen: m.self.HTTPAddr, WebAddr: m.self.WebAddr, TLS: m.useTLS, MDNS: !m.cfg.NoMDNS, Peers: []daemon.HubPeer{},
 		ReservationLeadSec: int(m.cfg.ReservationLead / time.Second)}
 	counts := m.deviceCounts(ctx)
 	m.mu.Lock()

@@ -47,10 +47,10 @@ const (
 // FORBIDDEN, with the offending field in details.
 func (m *BundleManifest) Validate() *Error {
 	if m == nil {
-		return forbidden("bundle: no manifest").WithDetails("field", "bundle")
+		return Forbidden("bundle: no manifest").WithDetails("field", "bundle")
 	}
 	if err := executor.ValidBundlePath(m.Root); err != nil {
-		return forbidden("bundle root: %v", err).WithDetails("field", "bundle.root")
+		return Forbidden("bundle root: %v", err).WithDetails("field", "bundle.root")
 	}
 	if len(m.Files) > maxBundleFiles {
 		return Errorf(CodeUsage, "bundle: %d files is more than %d", len(m.Files), maxBundleFiles)
@@ -62,14 +62,14 @@ func (m *BundleManifest) Validate() *Error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		if err := executor.ValidBundlePath(k); err != nil {
-			return forbidden("bundle file: %v", err).WithDetails("field", "bundle.files")
+			return Forbidden("bundle file: %v", err).WithDetails("field", "bundle.files")
 		}
 		if !executor.ValidBlobHash(m.Files[k]) {
-			return forbidden("bundle file %s: hash %q is not 64 lowercase hex digits", k, m.Files[k]).WithDetails("field", "bundle.files")
+			return Forbidden("bundle file %s: hash %q is not 64 lowercase hex digits", k, m.Files[k]).WithDetails("field", "bundle.files")
 		}
 	}
 	if _, ok := m.Files[m.Root]; !ok {
-		return forbidden("bundle root %s is not one of the bundle's files", m.Root).WithDetails("field", "bundle.root")
+		return Forbidden("bundle root %s is not one of the bundle's files", m.Root).WithDetails("field", "bundle.root")
 	}
 	return nil
 }

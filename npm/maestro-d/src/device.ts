@@ -2,6 +2,7 @@
 // method of the same name; each call becomes one step in the device's
 // session, executed by the daemon with the unmodified maestro-runner code.
 
+import { isEmulatorTarget } from './leasefile.js'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -10,7 +11,7 @@ import * as path from 'node:path'
 import { MaestroError } from './errors.js'
 import { COMMANDS, type CommandName, type CommandParams } from './generated/commands.js'
 import { type FlowBundle, HubFiles, fetchBundleOutputs, packFlow, uploadBundle, uploadPath } from './pack.js'
-import type { Transport } from './transport.js'
+import { devicePath, type DeviceBase, type RequestPath, type Transport } from './transport.js'
 import type {
   ArtifactInfo,
   DaemonEvent,
@@ -51,6 +52,12 @@ export interface CallOptions {
    */
   cwd?: string
   signal?: AbortSignal
+}
+
+interface ExecutionRequest {
+  url: RequestPath
+  body: unknown
+  fetchOutputs?: (outputs?: string[]) => Promise<void>
 }
 
 export interface RunOptions extends CallOptions {
@@ -200,7 +207,7 @@ export interface MaestroDevice extends CommandMethods {}
 // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class MaestroDevice {
   /** Device id / UDID. */
-  readonly id: string
+  get id(): string { return this.info.id }
   /** The daemon this device is attached through. */
   readonly daemon: { readonly name: string }
   /** Device record as of attach; refresh with `refresh()`. */
@@ -213,7 +220,13 @@ export class MaestroDevice {
    */
   lease?: Lease
   private readonly transport: Transport
-  private readonly base: string
+  private emulatorGrant?: string
+  private get base(): DeviceBase {
+    const grant = this.emulatorGrant
+    return grant === undefined ? `/v1/devices/${encodeURIComponent(this.id)}` : (signal) => this.verifyLease(grant, signal)
+  }
+  private reattach?: (base: DeviceBase, signal?: AbortSignal) => Promise<DeviceInfo>
+  private onRebind?: (lease: Lease) => void
   private onRenew?: (lease: Lease) => void
   private onRelease?: (dev: MaestroDevice, lease: Lease) => void
 
@@ -221,14 +234,74 @@ export class MaestroDevice {
   constructor(transport: Transport, daemon: { readonly name: string }, info: DeviceInfo, signal?: AbortSignal) {
     this.transport = transport
     this.daemon = daemon
-    this.id = info.id
     this.info = info
     if (signal) this.signal = signal
-    this.base = `/v1/devices/${encodeURIComponent(info.id)}`
   }
 
   private sig(call: CallOptions): AbortSignal | undefined {
     return anySignal(call.signal, this.signal)
+  }
+
+  private async verifyLease(grant: string, signal?: AbortSignal): Promise<Lease> {
+    let found: Envelope & { lease: Lease; device?: DeviceInfo }
+    try {
+      found = await this.transport.json<Envelope & { lease: Lease; device?: DeviceInfo }>(`/v1/leases/${encodeURIComponent(grant)}`, { signal })
+    } catch (err) {
+      // The hub ended this grant: drop its credential and record, not a sibling's.
+      if (err instanceof MaestroError && err.code === 'LEASE_EXPIRED' && this.lease?.id === grant) this.forgetLease()
+      throw err
+    }
+    const { lease, device } = found
+    if (this.lease?.id !== grant || lease.id !== grant || lease.state !== 'active') throw MaestroError.of('LEASE_EXPIRED', 'the lease is no longer active')
+    const old = this.id
+    if (this.transport.leases.get(old) === grant && old !== lease.device) this.transport.leases.delete(old)
+    if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
+    this.transport.leases.set(lease.device, lease.id)
+    this.lease = lease
+    if (old !== lease.device) {
+      this.info = device ?? { ...this.info, id: lease.device, attached: false }
+      this.onRebind?.(lease)
+    }
+    return lease
+  }
+
+  private async recoverDetached(err: unknown, base: DeviceBase, signal?: AbortSignal): Promise<void> {
+    if (!(err instanceof MaestroError && err.code === 'DEVICE_NOT_ATTACHED' && !err.result) || !this.lease || !this.reattach) throw err
+    if (typeof base === 'string') await this.verifyLease(this.lease.id, signal)
+    this.info = await this.reattach(base, signal)
+  }
+
+  private async withDevice<T>(opts: CallOptions, operation: (base: DeviceBase) => Promise<T>): Promise<T> {
+    const signal = this.sig(opts)
+    const base = this.base
+    try {
+      return await operation(base)
+    } catch (err) {
+      await this.recoverDetached(err, base, signal)
+      return operation(base)
+    }
+  }
+
+  private async execute<T extends StepResult | StepsResult>(opts: CallOptions, prepare: (base: DeviceBase) => Promise<ExecutionRequest>): Promise<T> {
+    const signal = this.sig(opts)
+    const base = this.base
+    for (let attempt = 0; ; attempt++) {
+      const { url, body, fetchOutputs } = await prepare(base)
+      let result: T
+      try {
+        result = await this.transport.json<T>(url, { method: 'POST', body, signal, requestId: this.requestId() })
+      } catch (err) {
+        if (err instanceof MaestroError && err.result) {
+          if ('outputs' in err.result) await fetchOutputs?.(err.result.outputs)
+          throw err
+        }
+        if (attempt > 0) throw err
+        await this.recoverDetached(err, base, signal)
+        continue
+      }
+      await fetchOutputs?.(result.outputs)
+      return checkResult(result)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -242,26 +315,17 @@ export class MaestroDevice {
   async command(name: string, value?: unknown, opts?: Record<string, unknown>): Promise<StepResult> {
     if (typeof name !== 'string' || name === '') throw new TypeError('command name must be a non-empty string')
     const { fields, call } = splitOptions(opts)
-    let body = buildValue(name, value, fields)
-    const cwd = this.transport.hub ? undefined : (call.cwd ?? process.cwd())
-    const url =
-      `${this.base}/commands/${encodeURIComponent(name)}` + query({ cwd, wait: call.wait === false ? 'false' : undefined })
-    // On a hub, upload the input files and name the outputs ourselves; the
-    // outputs are fetched back to the caller's paths, also after a failure
-    // (an assertScreenshot mismatch's diff image).
-    const files = this.transport.hub ? new HubFiles(this.transport, this.base, call.cwd ?? process.cwd(), this.sig(call)) : undefined
-    if (files) body = await files.rewrite(name, body)
-    let res: StepResult
-    try {
-      res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(call), requestId: this.requestId() })
-    } catch (err) {
-      if (files && err instanceof MaestroError && err.result && 'outputs' in err.result) {
-        await files.fetchOutputs(err.result.outputs)
-      }
-      throw err
-    }
-    if (files) await files.fetchOutputs(res.outputs)
-    return checkResult(res)
+    return this.execute<StepResult>(call, async (base) => {
+      let body = buildValue(name, value, fields)
+      const cwd = this.transport.hub ? undefined : (call.cwd ?? process.cwd())
+      const url = devicePath(base, `/commands/${encodeURIComponent(name)}` + query({ cwd, wait: call.wait === false ? 'false' : undefined }))
+      // On a hub, upload the input files and name the outputs ourselves; the
+      // outputs are fetched back to the caller's paths, also after a failure
+      // (an assertScreenshot mismatch's diff image).
+      const files = this.transport.hub ? new HubFiles(this.transport, base, call.cwd ?? process.cwd(), this.sig(call)) : undefined
+      if (files) body = await files.rewrite(name, body)
+      return { url, body, fetchOutputs: files && ((outputs) => files.fetchOutputs(outputs)) }
+    })
   }
 
   /**
@@ -281,47 +345,29 @@ export class MaestroDevice {
   }
 
   private async steps(req: { steps?: Step[]; yaml?: string }, opts: RunOptions): Promise<StepsResult> {
-    const url = `${this.base}/steps` + query({ wait: opts.wait === false ? 'false' : undefined })
-    if (this.transport.hub) {
-      // The steps' relative references are on this machine: write them to
-      // a temporary root that stands in cwd, pack it with everything it
-      // uses, and post the bundle (a hub refuses host directories).
-      const cwd = opts.cwd ?? process.cwd()
-      const yaml = req.yaml ?? JSON.stringify(req.steps)
-      return withTempRoot(yaml, async (root) => {
-        const bundle = await packFlow([root], { base: cwd, include: opts.include, signal: this.sig(opts) })
-        const body = { bundle: bundle.manifest, continueOnError: opts.continueOnError === true }
-        return this.postBundle<StepsResult>(url, body, bundle, opts)
-      })
-    }
-    const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
-    const res = await this.transport.json<StepsResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
-    return checkResult(res)
+    return this.execute<StepsResult>(opts, async (base) => {
+      const url = devicePath(base, '/steps' + query({ wait: opts.wait === false ? 'false' : undefined }))
+      if (this.transport.hub) {
+        // The steps' relative references are on this machine: write them to
+        // a temporary root that stands in cwd, pack it with everything it
+        // uses, and post the bundle (a hub refuses host directories).
+        const cwd = opts.cwd ?? process.cwd()
+        const yaml = req.yaml ?? JSON.stringify(req.steps)
+        return withTempRoot(yaml, async (root) => {
+          const bundle = await packFlow([root], { base: cwd, include: opts.include, signal: this.sig(opts) })
+          const body = { bundle: bundle.manifest, continueOnError: opts.continueOnError === true }
+          return this.prepareBundle(base, url, body, bundle, opts)
+        })
+      }
+      const body: Record<string, unknown> = { ...req, continueOnError: opts.continueOnError === true, cwd: opts.cwd ?? process.cwd() }
+      return { url, body }
+    })
   }
 
-  /**
-   * Upload a bundle's files, post the call, and fetch its outputs back into
-   * the bundle's directory, also after a failure.
-   */
-  private async postBundle<T extends StepResult | StepsResult>(
-    url: string,
-    body: Record<string, unknown>,
-    bundle: FlowBundle,
-    opts: CallOptions,
-  ): Promise<T> {
+  private async prepareBundle(base: DeviceBase, url: RequestPath, body: Record<string, unknown>, bundle: FlowBundle, opts: CallOptions): Promise<ExecutionRequest> {
     const signal = this.sig(opts)
-    await uploadBundle(this.transport, this.base, bundle, { signal })
-    let res: T
-    try {
-      res = await this.transport.json<T>(url, { method: 'POST', body, signal, requestId: this.requestId() })
-    } catch (err) {
-      if (err instanceof MaestroError && err.result && 'outputs' in err.result) {
-        await fetchBundleOutputs(this.transport, this.base, bundle.dir, err.result.outputs, signal)
-      }
-      throw err
-    }
-    await fetchBundleOutputs(this.transport, this.base, bundle.dir, res.outputs, signal)
-    return checkResult(res)
+    await uploadBundle(this.transport, base, bundle, { signal })
+    return { url, body, fetchOutputs: (outputs) => fetchBundleOutputs(this.transport, base, bundle.dir, outputs, signal) }
   }
 
   /** A fresh request id for a step-running call over TCP (kept across retries). */
@@ -335,21 +381,22 @@ export class MaestroDevice {
    */
   async flow(opts: FlowOptions): Promise<StepResult> {
     if (!opts.file && !opts.yaml) throw new TypeError('flow() needs a file or yaml')
-    const url = `${this.base}/flows` + query({ wait: opts.wait === false ? 'false' : undefined })
-    if (this.transport.hub) {
-      // The flow is on this machine, not the hub's: pack it with everything
-      // it uses and post the bundle; inline YAML stands in cwd.
-      const cwd = opts.cwd ?? process.cwd()
-      const run = async (root: string, base?: string): Promise<StepResult> => {
-        const bundle = await packFlow([root], { base, env: opts.env, include: opts.include, signal: this.sig(opts) })
-        return this.postBundle<StepResult>(url, { bundle: bundle.manifest, env: opts.env }, bundle, opts)
+    return this.execute<StepResult>(opts, async (base) => {
+      const url = devicePath(base, '/flows' + query({ wait: opts.wait === false ? 'false' : undefined }))
+      if (this.transport.hub) {
+        // The flow is on this machine, not the hub's: pack it with everything
+        // it uses and post the bundle; inline YAML stands in cwd.
+        const cwd = opts.cwd ?? process.cwd()
+        const run = async (root: string, bundleBase?: string): Promise<ExecutionRequest> => {
+          const bundle = await packFlow([root], { base: bundleBase, env: opts.env, include: opts.include, signal: this.sig(opts) })
+          return this.prepareBundle(base, url, { bundle: bundle.manifest, env: opts.env }, bundle, opts)
+        }
+        if (opts.yaml !== undefined) return withTempRoot(opts.yaml, (root) => run(root, cwd))
+        return run(path.resolve(cwd, opts.file as string))
       }
-      if (opts.yaml !== undefined) return withTempRoot(opts.yaml, (root) => run(root, cwd))
-      return run(path.resolve(cwd, opts.file as string))
-    }
-    const body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
-    const res = await this.transport.json<StepResult>(url, { method: 'POST', body, signal: this.sig(opts), requestId: this.requestId() })
-    return checkResult(res)
+      const body = { file: opts.file, yaml: opts.yaml, env: opts.env, cwd: opts.cwd ?? process.cwd() }
+      return { url, body }
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -391,15 +438,17 @@ export class MaestroDevice {
       return out
     }
     if (typeof file !== 'string' || file === '') throw new TypeError('installApp() takes a file path')
-    let app = path.resolve(opts.cwd ?? process.cwd(), file)
-    if (this.transport.hub) app = (await uploadPath(this.transport, this.base, app, this.sig(opts))).ref
-    const res = await this.transport.json<Envelope & { appId?: string }>(`${this.base}/apps`, {
-      method: 'POST',
-      body: { app, reinstall: opts.reinstall === true || undefined, platform: opts.platform },
-      signal: this.sig(opts),
-      requestId: this.requestId(),
+    return this.withDevice(opts, async (base) => {
+      let app = path.resolve(opts.cwd ?? process.cwd(), file)
+      if (this.transport.hub) app = (await uploadPath(this.transport, base, app, this.sig(opts))).ref
+      const res = await this.transport.json<Envelope & { appId?: string }>(devicePath(base, '/apps'), {
+        method: 'POST',
+        body: { app, reinstall: opts.reinstall === true || undefined, platform: opts.platform },
+        signal: this.sig(opts),
+        requestId: this.requestId(),
+      })
+      return res.appId !== undefined ? { appId: res.appId } : {}
     })
-    return res.appId !== undefined ? { appId: res.appId } : {}
   }
 
   /**
@@ -414,19 +463,25 @@ export class MaestroDevice {
   /** Uninstall an app by bundle id or package name. */
   async uninstallApp(appId: string, opts: CallOptions = {}): Promise<void> {
     if (typeof appId !== 'string' || appId === '') throw new TypeError('uninstallApp() takes an app id')
-    await this.transport.json<Envelope>(`${this.base}/apps/${encodeURIComponent(appId)}`, { method: 'DELETE', signal: this.sig(opts) })
+    return this.withDevice(opts, async (base) => {
+      await this.transport.json<Envelope>(devicePath(base, `/apps/${encodeURIComponent(appId)}`), { method: 'DELETE', signal: this.sig(opts) })
+    })
   }
 
   /** The files of the session's report directory (screenshots, outputs/, recordings, logs). */
   async artifacts(opts: CallOptions = {}): Promise<ArtifactInfo[]> {
-    const res = await this.transport.json<Envelope & { artifacts: ArtifactInfo[] }>(`${this.base}/artifacts`, { signal: this.sig(opts) })
-    return res.artifacts
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { artifacts: ArtifactInfo[] }>(devicePath(base, '/artifacts'), { signal: this.sig(opts) })
+      return res.artifacts
+    })
   }
 
   /** One artifact's bytes; `file` is relative to the report directory, as `artifacts()` lists it. */
   async artifact(file: string, opts: CallOptions = {}): Promise<Buffer> {
     if (typeof file !== 'string' || file === '') throw new TypeError('artifact() takes a path')
-    return this.transport.bytes(`${this.base}/artifacts/${file.split('/').map(encodeURIComponent).join('/')}`, { signal: this.sig(opts) })
+    return this.withDevice(opts, async (base) => {
+      return this.transport.bytes(devicePath(base, `/artifacts/${file.split('/').map(encodeURIComponent).join('/')}`), { signal: this.sig(opts) })
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -449,65 +504,83 @@ export class MaestroDevice {
     }
     const qs = q.toString()
     const query = qs !== '' ? `?${qs}` : ''
-    return this.transport.bytes(`${this.base}/screenshot${query}`, { accept: 'image/png, image/jpeg', signal: this.sig(opts) })
+    return this.withDevice(opts, async (base) => {
+      return this.transport.bytes(devicePath(base, `/screenshot${query}`), { accept: 'image/png, image/jpeg', signal: this.sig(opts) })
+    })
   }
 
   /** View hierarchy as the normalized cross-platform tree (`maestro-runner hierarchy`'s shape). */
   async hierarchy(opts: CallOptions = {}): Promise<HierarchyNode> {
-    const res = await this.transport.json<Envelope & { data: HierarchyNode }>(`${this.base}/hierarchy`, { signal: this.sig(opts) })
-    return res.data
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { data: HierarchyNode }>(devicePath(base, '/hierarchy'), { signal: this.sig(opts) })
+      return res.data
+    })
   }
 
   /** View hierarchy exactly as the driver produced it. */
   async hierarchyRaw(opts: CallOptions = {}): Promise<Buffer> {
-    return this.transport.bytes(`${this.base}/hierarchy?format=raw`, { signal: this.sig(opts) })
+    return this.withDevice(opts, async (base) => {
+      return this.transport.bytes(devicePath(base, '/hierarchy?format=raw'), { signal: this.sig(opts) })
+    })
   }
 
   /** Device state: foreground app, orientation, … */
   async state(opts: CallOptions = {}): Promise<unknown> {
-    const res = await this.transport.json<Envelope & { data: unknown }>(`${this.base}/state`, { signal: this.sig(opts) })
-    return res.data
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { data: unknown }>(devicePath(base, '/state'), { signal: this.sig(opts) })
+      return res.data
+    })
   }
 
   /** Driver platform info: OS version, screen size, … */
   async platformInfo(opts: CallOptions = {}): Promise<PlatformInfo> {
-    const res = await this.transport.json<Envelope & { data: PlatformInfo }>(`${this.base}/info`, { signal: this.sig(opts) })
-    return res.data
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { data: PlatformInfo }>(devicePath(base, '/info'), { signal: this.sig(opts) })
+      return res.data
+    })
   }
 
   /** Session variables (`${NAME}` in later steps). */
   async vars(opts: CallOptions = {}): Promise<Record<string, string>> {
-    const res = await this.transport.json<Envelope & { vars: Record<string, string> }>(`${this.base}/vars`, { signal: this.sig(opts) })
-    return res.vars
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { vars: Record<string, string> }>(devicePath(base, '/vars'), { signal: this.sig(opts) })
+      return res.vars
+    })
   }
 
   /** Set session variables; returns the full set. */
   async setVars(vars: Record<string, string>, opts: CallOptions = {}): Promise<Record<string, string>> {
     if (!isPlainObject(vars)) throw new TypeError('setVars() takes an object of NAME: value')
-    const res = await this.transport.json<Envelope & { vars: Record<string, string> }>(`${this.base}/vars`, {
-      method: 'PUT',
-      body: vars,
-      signal: this.sig(opts),
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { vars: Record<string, string> }>(devicePath(base, '/vars'), {
+        method: 'PUT',
+        body: vars,
+        signal: this.sig(opts),
+      })
+      return res.vars
     })
-    return res.vars
   }
 
   /** Evaluate JavaScript in the session's engine and return its value. */
   async eval(script: string, opts: CallOptions = {}): Promise<unknown> {
     if (typeof script !== 'string') throw new TypeError('eval() takes a script string')
-    const res = await this.transport.json<Envelope & { value: unknown }>(`${this.base}/eval`, {
-      method: 'POST',
-      body: { script },
-      signal: this.sig(opts),
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { value: unknown }>(devicePath(base, '/eval'), {
+        method: 'POST',
+        body: { script },
+        signal: this.sig(opts),
+      })
+      return res.value
     })
-    return res.value
   }
 
   /** Re-read the device record from the daemon. */
   async refresh(opts: CallOptions = {}): Promise<DeviceInfo> {
-    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(this.base, { signal: this.sig(opts) })
-    this.info = res.device
-    return res.device
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.json<Envelope & { device: DeviceInfo }>(devicePath(base), { signal: this.sig(opts) })
+      this.info = res.device
+      return res.device
+    })
   }
 
   /**
@@ -522,24 +595,29 @@ export class MaestroDevice {
       fps: opts.fps === undefined ? undefined : String(opts.fps),
       audio: opts.audio === undefined ? undefined : String(opts.audio),
     })
-    const res = await this.transport.stream(`${this.base}/stream${q}`, { signal: this.sig(opts) })
-    const header = (name: string): string => {
-      const v = res.headers[name]
-      return (Array.isArray(v) ? v[0] : v) ?? ''
-    }
-    const fps = header('x-maestro-fps')
-    return {
-      fps: fps === 'device' ? 'device' : Number(fps),
-      audio: header('x-maestro-audio') === 'true',
-      codecs: header('x-maestro-codecs'),
-      body: res.body,
-    }
+    return this.withDevice(opts, async (base) => {
+      const res = await this.transport.stream(devicePath(base, `/stream${q}`), { signal: this.sig(opts) })
+      const header = (name: string): string => {
+        const v = res.headers[name]
+        return (Array.isArray(v) ? v[0] : v) ?? ''
+      }
+      const fps = header('x-maestro-fps')
+      return {
+        fps: fps === 'device' ? 'device' : Number(fps),
+        audio: header('x-maestro-audio') === 'true',
+        codecs: header('x-maestro-codecs'),
+        body: res.body,
+      }
+    })
   }
 
   /** Step events for this device. Ends when `signal` fires. */
-  events(opts: { after?: number; signal?: AbortSignal } = {}): AsyncIterable<DaemonEvent> {
-    const path = '/v1/events' + query({ device: this.id, after: opts.after ? String(opts.after) : undefined })
-    return this.transport.sse<DaemonEvent>(path, this.sig(opts))
+  async *events(opts: { after?: number; signal?: AbortSignal } = {}): AsyncIterable<DaemonEvent> {
+    const signal = this.sig(opts)
+    const base = this.base
+    const grant = typeof base === 'string' ? undefined : await base(signal)
+    const path = '/v1/events' + query({ device: grant?.device ?? this.id, after: opts.after ? String(opts.after) : undefined })
+    yield* this.transport.sse<DaemonEvent>(path, signal, grant?.id)
   }
 
   // -------------------------------------------------------------------------
@@ -550,7 +628,9 @@ export class MaestroDevice {
    * lease stays held until `release()`.
    */
   async detach(opts: CallOptions = {}): Promise<void> {
-    await this.transport.json<Envelope>(`${this.base}/detach`, { method: 'POST', signal: this.sig(opts) })
+    const signal = this.sig(opts)
+    const base = this.base
+    await this.transport.json<Envelope>(devicePath(base, '/detach'), { method: 'POST', signal })
     this.info = { ...this.info, attached: false }
   }
 
@@ -561,9 +641,17 @@ export class MaestroDevice {
    */
   holdLease(
     lease: Lease,
-    opts: { onRenew?: (lease: Lease) => void; onRelease?: (dev: MaestroDevice, lease: Lease) => void } = {},
+    opts: {
+      onRenew?: (lease: Lease) => void
+      onRelease?: (dev: MaestroDevice, lease: Lease) => void
+      reattach?: (base: DeviceBase, signal?: AbortSignal) => Promise<DeviceInfo>
+      onRebind?: (lease: Lease) => void
+    } = {},
   ): void {
     this.lease = lease
+    this.emulatorGrant = isEmulatorTarget(lease.device) ? lease.id : undefined
+    this.reattach = opts.reattach
+    this.onRebind = opts.onRebind
     if (opts.onRenew) this.onRenew = opts.onRenew
     if (opts.onRelease) this.onRelease = opts.onRelease
     this.transport.leases.set(lease.device, lease.id)
@@ -586,9 +674,11 @@ export class MaestroDevice {
         body,
         signal: this.sig(opts),
       })
-      if (this.lease === lease) this.lease = res.lease
-      this.onRenew?.(res.lease)
-      return res.lease
+      // A restored emulator renewed while absent has no device; it keeps its target.
+      const renewed = res.lease.device ? res.lease : { ...res.lease, device: lease.device }
+      if (this.lease === lease) this.lease = renewed
+      this.onRenew?.(renewed)
+      return renewed
     } catch (err) {
       if (err instanceof MaestroError && err.code === 'LEASE_EXPIRED') this.forgetLease()
       throw err
@@ -626,7 +716,10 @@ export class MaestroDevice {
     const lease = this.lease
     if (!lease) return
     this.lease = undefined
-    if (this.transport.leases.get(lease.device) === lease.id) this.transport.leases.delete(lease.device)
+    // By grant ID: an emulator's serial may have moved since it was recorded.
+    for (const [target, id] of this.transport.leases) {
+      if (id === lease.id) this.transport.leases.delete(target)
+    }
     this.onRelease?.(this, lease)
   }
 
@@ -635,8 +728,10 @@ export class MaestroDevice {
    * refused (DEVICE_EXTERNAL) unless `force`.
    */
   async stop(opts: CallOptions & { force?: boolean } = {}): Promise<void> {
-    await this.transport.json<Envelope>(this.base, { method: 'DELETE', body: { force: opts.force === true }, signal: this.sig(opts) })
-    this.info = { ...this.info, attached: false, state: 'Shutdown' }
+    return this.withDevice(opts, async (base) => {
+      await this.transport.json<Envelope>(devicePath(base), { method: 'DELETE', body: { force: opts.force === true }, signal: this.sig(opts) })
+      this.info = { ...this.info, attached: false, state: 'Shutdown' }
+    })
   }
 }
 

@@ -1,14 +1,20 @@
 package cli
 
 import (
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
+	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
+
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -53,53 +59,6 @@ func TestLeaseFile_RecordFindDropPrune(t *testing.T) {
 	_ = os.WriteFile(leasesPath(), []byte("{"), 0o600)
 	if loadLeases() != nil {
 		t.Fatal("bad JSON")
-	}
-}
-
-func TestHubStart_Helpers(t *testing.T) {
-	o := &daemonOpts{Name: "hub", HTTPAddr: ":7433", TLSCert: "c.pem", TLSKey: "k.pem", PassEnv: []string{"A"},
-		hub: hubOpts{name: "lab-a", share: []string{"x", "y"}, remoteShell: true, peers: []string{"hub-b:7433"}, noMDNS: true,
-			advertise: "10.0.0.1:7433", peerCA: "ca.pem", peerToken: "p3er"}}
-	args := strings.Join(hubChildArgs(o), " ")
-	for _, want := range []string{"hub start --foreground --daemon hub --name lab-a --listen :7433", "--share-device x --share-device y",
-		"--allow-remote-shell", "--pass-env A", "--tls-cert /", "--peer hub-b:7433", "--no-mdns", "--advertise 10.0.0.1:7433", "--peer-ca /"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("child args %q lack %q", args, want)
-		}
-	}
-	if strings.Contains(args, "token") {
-		t.Fatalf("child args carry a token: %s", args)
-	}
-	got := redactArgs([]string{"hub", "start", "--token", "s3cret", "--token=s3cret", "--peer-token", "s3cret", "--peer-token=s3cret", "--listen", ":1"})
-	if strings.Contains(strings.Join(got, " "), "s3cret") {
-		t.Fatalf("redact: %v", got)
-	}
-
-	dir := t.TempDir()
-	f := filepath.Join(dir, "tok")
-	_ = os.WriteFile(f, []byte(" tok\n"), 0o600)
-	o = &daemonOpts{hub: hubOpts{tokenFile: f}, explicit: map[string]bool{}}
-	if tok, err := hubToken(o); err != nil || tok != "tok" {
-		t.Fatalf("token file: %q %v", tok, err)
-	}
-	o.explicit["token"] = true
-	if _, err := hubToken(o); err == nil {
-		t.Fatal("--token and --token-file together")
-	}
-	o = &daemonOpts{hub: hubOpts{tokenFile: filepath.Join(dir, "missing")}}
-	if _, err := hubToken(o); err == nil {
-		t.Fatal("missing token file")
-	}
-	if _, err := hubToken(&daemonOpts{}); err == nil {
-		t.Fatal("no token")
-	}
-	o = &daemonOpts{explicit: map[string]bool{}}
-	hubName(o)
-	if o.Name != DefaultHubDaemon {
-		t.Fatal(o.Name)
-	}
-	if err := runHubStart(context.Background(), &daemonOpts{Token: "t", TLSCert: "c", explicit: map[string]bool{}}, nil); err == nil {
-		t.Fatal("--tls-cert without --tls-key")
 	}
 }
 
@@ -180,7 +139,7 @@ func leaseHubListing(t *testing.T, extra *atomic.Bool) (*daemon.Server, string) 
 			return devs
 		},
 	}
-	s := daemon.New(daemon.Config{Name: "lh", Hub: true, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), ShareDevices: []string{"mock-1", "mock-7"}}, deps)
+	s := daemon.New(daemon.Config{Name: "lh", Hub: &hubd.Server{}, HubName: "lh", Token: "t", HTTPAddr: ":7433", ReportsDir: t.TempDir(), DeviceConfig: daemontest.DeviceConfig(t, "mock-1", "mock-7")}, deps)
 	hs := httptest.NewServer(s.TCPHandler())
 	t.Cleanup(hs.Close)
 	return s, hs.URL
@@ -313,42 +272,26 @@ func TestUploadBlob_LeaseRefusalsOnTheBodylessHEAD(t *testing.T) {
 
 func TestLeaseDurations(t *testing.T) {
 	for in, want := range map[string]time.Duration{"600": 10 * time.Minute, "8h": 8 * time.Hour, " 90m ": 90 * time.Minute, "1h30m": 90 * time.Minute, "1.5s": 2 * time.Second} {
-		if got, err := parseLeaseDuration("ttl", in); err != nil || got != want {
+		if got, err := common.ParseLeaseDuration("ttl", in); err != nil || got != want {
 			t.Errorf("%q: %v %v, want %v", in, got, err, want)
 		}
 	}
 	for _, bad := range []string{"", "0", "-5", "soon", "500ms"} {
-		if _, err := parseLeaseDuration("ttl", bad); err == nil {
+		if _, err := common.ParseLeaseDuration("ttl", bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}
-	hubMax, devs, err := parseLeaseMax([]string{"2h", "emulator-5554=10m", "Pixel 8=1800", "4h"})
-	if err != nil || hubMax != 4*time.Hour || len(devs) != 2 || devs[0] != (daemon.LeaseMax{Device: "emulator-5554", Max: 10 * time.Minute}) ||
-		devs[1] != (daemon.LeaseMax{Device: "Pixel 8", Max: 30 * time.Minute}) {
-		t.Fatalf("lease-max: %v %+v %v", hubMax, devs, err)
-	}
-	for _, bad := range []string{"=10m", "x=", "x=never", "never"} {
-		if _, _, err := parseLeaseMax([]string{bad}); err == nil {
-			t.Errorf("--lease-max %q accepted", bad)
-		}
-	}
 	o := &daemonOpts{}
-	if err := ttlFlag("").apply(o, "2h"); err != nil || o.lease.ttl != 7200 {
+	if err := ttlFlag("").Apply(o, "2h"); err != nil || o.lease.ttl != 7200 {
 		t.Fatalf("--ttl 2h: %d %v", o.lease.ttl, err)
 	}
-	if err := ttlFlag("").apply(o, "x"); err == nil {
+	if err := ttlFlag("").Apply(o, "x"); err == nil {
 		t.Fatal("--ttl x")
 	}
 	if secs(0) != "?" || secs(90) != "1m30s" {
 		t.Fatal("secs")
 	}
-	args := strings.Join(hubChildArgs(&daemonOpts{hub: hubOpts{leaseMax: []string{"1h", "a=5m"}}}), " ")
-	if !strings.Contains(args, "--lease-max 1h --lease-max a=5m") {
-		t.Fatalf("child args: %s", args)
-	}
-	if _, _, err := checkHubFlags(&daemonOpts{Token: "t", hub: hubOpts{peerToken: "p", leaseMax: []string{"x=y"}}, explicit: map[string]bool{}}); err == nil {
-		t.Fatal("a bad --lease-max starts a hub")
-	}
+
 }
 
 // leaseHelperEnv makes the test binary a helper process that records
@@ -357,6 +300,31 @@ const leaseHelperEnv = "MAESTRO_D_TEST_LEASE_WRITER"
 
 // Two processes sharing one home record leases at once: the advisory lock
 // on leases.json.lock keeps every record.
+// A restored emulator renewed while absent comes back without a device. The
+// refresh moves its window and keeps its target, aliases and attach settings.
+func TestLeaseFile_RefreshWithoutDeviceKeepsTarget(t *testing.T) {
+	t.Setenv(daemon.EnvHome, t.TempDir())
+	hub := "http://lab:7433"
+	soon := time.Now().Add(time.Minute).UTC().Format(time.RFC3339)
+	later := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	writeLeaseRecord(hub, daemon.Lease{ID: "g1", Device: "emulator-5554@lab", ExpiresAt: soon, TTLSec: 60}, "avd:pixel", true)
+	rememberAttach(hub, "g1", daemon.AttachConfig{AppID: "real.app"})
+	refreshLease(hub, daemon.Lease{ID: "g1", ExpiresAt: later, TTLSec: 1800})
+	recs := leasesFor(hub)
+	if len(recs) != 1 {
+		t.Fatal(recs)
+	}
+	r := recs[0]
+	if r.Device != "emulator-5554@lab" || r.OriginalDevice != "" || r.RequestedDevice != "avd:pixel" || r.Attach == nil || r.Attach.AppID != "real.app" || r.ExpiresAt != later || r.TTLSec != 1800 {
+		t.Fatalf("%+v", r)
+	}
+	// Without a record there is nothing to refresh, and nothing is written.
+	refreshLease(hub, daemon.Lease{ID: "g2", ExpiresAt: later})
+	if len(leasesFor(hub)) != 1 {
+		t.Fatal(leasesFor(hub))
+	}
+}
+
 func TestLeaseFile_ConcurrentProcesses(t *testing.T) {
 	if who := os.Getenv(leaseHelperEnv); who != "" {
 		future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
@@ -383,5 +351,59 @@ func TestLeaseFile_ConcurrentProcesses(t *testing.T) {
 	}
 	if got := len(leasesFor("http://hub:7433")); got != 120 {
 		t.Fatalf("records kept: %d of 120", got)
+	}
+}
+
+func TestMockDeviceMetadata(t *testing.T) {
+	t.Setenv(envMockDevices, "mock-1,mock-2")
+	t.Setenv("MAESTRO_D_MOCK_DEVICE_PROPS", `{"mock-1":{"name":"Tablet","platform":"ios","kind":"simulator","model":"iPad16,3","osVersion":"26.3","id":"impostor"},"private":{"platform":"ios"}}`)
+	devices := mockDevices()
+	d := devices[0]
+	if len(devices) != 2 || d.ID != "mock-1" || d.Platform != "ios" || d.Model != "iPad16,3" || d.Name != "Tablet" || d.Kind != "simulator" || d.OSVersion != "26.3" {
+		t.Fatal(devices)
+	}
+	if plain := daemonListDevices("mock"); len(plain) != 1 || plain[0].ID != "mock-2" {
+		t.Fatal(plain)
+	}
+	cfg := attachToRunConfig("mock-1", daemon.AttachConfig{Platform: "ios"})
+	if cfg.Platform != "mock" || isMockDevice("impostor") || isMockDevice("private") {
+		t.Fatal(cfg)
+	}
+	t.Setenv("MAESTRO_D_MOCK_DEVICE_PROPS", "{malformed")
+	if m := mockDevices(); len(m) != 2 || m[0].Platform != "mock" || m[0].Name != "mock-1" {
+		t.Fatal(m)
+	}
+}
+
+// device stop --orphans sweeps a crashed hub's registry. A device the hub's
+// lease journal still covers stays booted, on record for its next start.
+func TestE2E_StopOrphansAfterHubCrash(t *testing.T) {
+	e := newE2E(t)
+	t.Setenv(daemon.EnvHome, e.home)
+	dir := daemon.HubRunDir()
+	if err := daemon.WriteInfo(&daemon.Info{Name: "hub", PID: 999999, RunDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	devices := `[{"id":"mock-free","platform":"mock","bootedBy":"daemon","attached":false},` +
+		`{"id":"mock-leased","platform":"mock","bootedBy":"daemon","attached":false}]`
+	if err := os.WriteFile(filepath.Join(dir, "devices.json"), []byte(devices), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	journal := fmt.Sprintf(`{"version":2,"leases":[{"id":"g1","device":"mock-leased","state":"active","expiresAt":%q}]}`, future)
+	if err := os.WriteFile(daemon.HubLeasesPath(), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := e.run("device", "stop", "--orphans", "--json")
+	var out struct {
+		OK      bool     `json:"ok"`
+		Stopped []string `json:"stopped"`
+	}
+	if r.code != 0 || json.Unmarshal([]byte(r.stdout), &out) != nil || !out.OK || !slices.Equal(out.Stopped, []string{"mock-free"}) {
+		t.Fatalf("%+v", r)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "devices.json"))
+	if err != nil || !strings.Contains(string(data), "mock-leased") || strings.Contains(string(data), "mock-free") {
+		t.Fatalf("hub registry: %v %s", err, data)
 	}
 }

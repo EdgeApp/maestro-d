@@ -53,6 +53,14 @@ type FlowRunner struct {
 
 // Run executes the flow and returns the result.
 func (fr *FlowRunner) Run() FlowResult {
+	script := NewScriptEngine()
+	defer script.Close()
+	script.ImportSystemEnv()
+	return fr.runWithScript(script)
+}
+
+// runWithScript accepts the caller's environment and file access policy.
+func (fr *FlowRunner) runWithScript(script *ScriptEngine) FlowResult {
 	flowStart := time.Now()
 
 	logger.Info("=== Starting flow: %s ===", fr.detail.Name)
@@ -62,15 +70,10 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Create flow writer for this flow's updates
 	fr.flowWriter = report.NewFlowWriter(fr.detail, fr.config.OutputDir, fr.indexWriter)
 
-	// Initialize script engine
-	fr.script = NewScriptEngine()
-	defer fr.script.Close()
+	fr.script = script
 
 	// Set parent context on driver so element-finding respects cancellation
 	fr.driver.SetContext(fr.ctx)
-
-	// Import system environment variables
-	fr.script.ImportSystemEnv()
 
 	// Apply CLI environment variables (from -e flags)
 	// These take precedence over system env, but flow-level env takes precedence over these
@@ -86,19 +89,7 @@ func (fr *FlowRunner) Run() FlowResult {
 		fr.script.SetPlatform(info.Platform)
 	}
 
-	// Apply flow config variables (takes precedence over CLI env)
-	// Expand the appId first so that `appId: ${APP_ID}` resolves using CLI -e values
-	if fr.flow.Config.AppID != "" {
-		expanded := fr.script.ExpandVariables(fr.flow.Config.AppID)
-		fr.flow.Config.AppID = expanded
-	}
-	if appID := fr.flow.Config.EffectiveAppID(); appID != "" {
-		fr.script.SetVariable("APP_ID", appID)
-	}
-	// Expand flow config env values to support ${VAR || "default"} syntax
-	for k, v := range fr.flow.Config.Env {
-		fr.script.SetVariable(k, fr.script.ExpandVariables(v))
-	}
+	fr.script.applyFlowVariables(&fr.flow.Config)
 
 	// Apply commandTimeout if specified - overrides driver's default find timeout
 	if fr.flow.Config.CommandTimeout > 0 {
@@ -129,9 +120,7 @@ func (fr *FlowRunner) Run() FlowResult {
 		if fr.flow.Config.TypingFrequency != nil {
 			typingFrequency = *fr.flow.Config.TypingFrequency
 		}
-		if typingFrequency > 0 {
-			_ = configurer.SetTypingFrequency(typingFrequency)
-		}
+		_ = configurer.SetTypingFrequency(typingFrequency)
 	}
 
 	// Ensure a WDA session exists before execution starts.
@@ -258,7 +247,10 @@ func (fr *FlowRunner) Run() FlowResult {
 
 	for i, step := range fr.flow.Steps {
 		if i > 0 && stepDelay > 0 {
-			time.Sleep(time.Duration(stepDelay) * time.Millisecond)
+			select {
+			case <-time.After(time.Duration(stepDelay) * time.Millisecond):
+			case <-fr.ctx.Done():
+			}
 		}
 		// Check context cancellation
 		if fr.ctx.Err() != nil {

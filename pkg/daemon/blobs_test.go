@@ -275,7 +275,7 @@ func TestBlobStore_Materialize(t *testing.T) {
 }
 
 func TestBlobRoutes(t *testing.T) {
-	env := newCallerEnv(t, Config{HTTPAddr: "0.0.0.0:7433", Token: "t"})
+	env := newCallerEnv(t, Config{Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"})
 	ctx := context.Background()
 	data := bytes.Repeat([]byte("blob"), 1000)
 	h := sha(data)
@@ -407,7 +407,7 @@ func TestClient_UploadResumesAfterPeerUnavailable(t *testing.T) {
 		switch i {
 		case 2: // first PUT: the link drops after a prefix
 			_, _ = s.blobs.Put(h, r.Header.Get("Content-Range"), io.LimitReader(r.Body, 10000))
-			writeJSON(w, http.StatusServiceUnavailable, FailureEnvelope(Errorf(CodePeerUnavailable, "hub hub-b: link closed")))
+			WriteJSON(w, http.StatusServiceUnavailable, FailureEnvelope(Errorf(CodePeerUnavailable, "hub hub-b: link closed")))
 			return
 		case 3: // the ask while the link is still down
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -451,7 +451,7 @@ func TestClient_UploadFinalErrorsAreNotRetried(t *testing.T) {
 			return
 		}
 		puts++
-		writeJSON(w, http.StatusBadGateway, FailureEnvelope(Errorf(CodeDeviceError, "disk full")))
+		WriteJSON(w, http.StatusBadGateway, FailureEnvelope(Errorf(CodeDeviceError, "disk full")))
 	}))
 	defer hs.Close()
 	c := NewHTTPClient(hs.URL, "", nil)

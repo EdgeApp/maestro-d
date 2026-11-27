@@ -16,6 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/devicefarm"
 )
@@ -29,6 +30,9 @@ type daemonOpts struct {
 	NoWait  bool
 	NoSpawn bool
 	Verbose bool
+
+	// A top-level test installs its explicitly requested app even on an existing attachment.
+	testInstall bool
 
 	// gc
 	DryRun            bool
@@ -47,13 +51,8 @@ type daemonOpts struct {
 	// CAFile adds a trust root for a self-signed hub (--ca / MAESTRO_D_CA).
 	CAFile string
 
-	// serve: TLS files and the environment names sessions may import.
-	TLSCert, TLSKey string
-	PassEnv         []string
-	// DeviceConfig and NetworkConfig are serve's and hub start's --config
-	// and (older) --network-config.
-	DeviceConfig  string
-	NetworkConfig string
+	// DeviceConfig is the path passed to serve --config.
+	DeviceConfig string
 
 	// explicit records the table flags given on the command line (not
 	// from the environment).
@@ -81,51 +80,22 @@ type daemonOpts struct {
 	manage  deviceManageOpts // device catalog / create
 	// dfCreds are the Device Farm credentials --orphans releases with.
 	dfCreds devicefarm.Options
-	pack    packOpts   // pack --flow, and a targeted run
-	hub     hubOpts    // hub start
-	lease   leaseOpts  // lease, and the lease a targeted command takes
-	stream  streamOpts // stream
+	pack    packOpts // pack --flow, and a targeted run
+
+	lease  leaseOpts  // lease, and the lease a targeted command takes
+	stream streamOpts // stream
 	// installURL: installApp --url, --headers-file, --app-id.
 	installURL installURLOpts
-}
-
-// hubOpts are hub start's switches.
-type hubOpts struct {
-	name      string
-	tokenFile string
-	share     []string
-	shareTV   []string
-	// configShare is the hubDevices of the config the hub starts with.
-	configShare []string
-	// leaseMax holds each --lease-max [DEVICE=]DURATION as given.
-	leaseMax []string
-	// reservationLead is --reservation-lead as given ("": the default).
-	reservationLead string
-	remoteShell     bool
-	foreground      bool
-	advertise       string
-	peers           []string
-	noMDNS          bool
-	peerToken       string
-	peerTokenFile   string
-	peerCA          string
-	// purge: hub service uninstall --purge.
-	purge bool
-	// devicefarm: the hub launches AWS Device Farm devices for leases,
-	// with dfOpts' credentials and project, at most cloudMax at once.
-	devicefarm  bool
-	dfOpts      devicefarm.Options
-	cloudMax    int
-	cloudMaxSet bool
 }
 
 // leaseOpts are lease's switches.
 type leaseOpts struct {
 	// ttl is --ttl in seconds (0: the hub's default window).
-	ttl      int
-	holder   string
-	noAttach bool
-	all      bool
+	ttl         int
+	holder      string
+	description string
+	noAttach    bool
+	all         bool
 	// id is release's and claim's --lease; startAt is reserve's
 	// --start-at as given.
 	id      string
@@ -187,9 +157,11 @@ func (o *daemonOpts) finish() error {
 	return nil
 }
 
+type dflag = common.Flag[daemonOpts]
+
 // envFlag is -e/--env KEY=VALUE, collected into Attach.Env by finish.
-var envFlag = dflag{name: "env", aliases: []string{"e"}, kind: kindSlice, usage: "Session variable KEY=VALUE (repeatable); available to every step as ${KEY}",
-	apply: func(o *daemonOpts, v string) error {
+var envFlag = dflag{Name: "env", Aliases: []string{"e"}, Kind: common.Slice, Usage: "Session variable KEY=VALUE (repeatable); available to every step as ${KEY}",
+	Apply: func(o *daemonOpts, v string) error {
 		if !strings.Contains(v, "=") {
 			return daemon.Errorf(daemon.CodeUsage, "--env expects KEY=VALUE, got %q", v)
 		}
@@ -198,74 +170,19 @@ var envFlag = dflag{name: "env", aliases: []string{"e"}, kind: kindSlice, usage:
 	}}
 
 // includeFlag is --include GLOB, for pack --flow and a targeted run.
-var includeFlag = dflag{name: "include", kind: kindSlice, usage: "Also pack files matching GLOB (relative to the flow's directory) that flows open dynamically (repeatable)",
-	apply: func(o *daemonOpts, v string) error { o.pack.include = append(o.pack.include, v); return nil }}
-
-type flagKind int
-
-const (
-	kindString flagKind = iota
-	kindBool
-	kindInt
-	kindSlice
-	// kindOptionalValue takes a value only when joined with "="
-	// (--target-hub=h); bare, it never takes the next token, so in
-	// `tapOn --target-hub Login` "Login" stays the tapOn text.
-	kindOptionalValue
-)
-
-// dflag is one entry of the shared flag table.
-type dflag struct {
-	name    string
-	aliases []string
-	kind    flagKind
-	env     []string
-	usage   string
-	value   string // default, shown in help; not applied
-	// apply receives the string form ("true"/"false" for bools) once per
-	// occurrence (slices) or once (everything else).
-	apply func(o *daemonOpts, v string) error
-}
-
-func strFlag(name, usage string, env []string, apply func(o *daemonOpts, v string), aliases ...string) dflag {
-	return dflag{name: name, aliases: aliases, kind: kindString, env: env, usage: usage,
-		apply: func(o *daemonOpts, v string) error { apply(o, v); return nil }}
-}
-
-func boolFlag(name, usage string, env []string, apply func(o *daemonOpts, v bool), aliases ...string) dflag {
-	return dflag{name: name, aliases: aliases, kind: kindBool, env: env, usage: usage,
-		apply: func(o *daemonOpts, v string) error {
-			b, err := strconv.ParseBool(v)
-			if err != nil {
-				return daemon.Errorf(daemon.CodeUsage, "--%s expects true or false, got %q", name, v)
-			}
-			apply(o, b)
-			return nil
-		}}
-}
-
-func intFlag(name, usage string, env []string, apply func(o *daemonOpts, v int), aliases ...string) dflag {
-	return dflag{name: name, aliases: aliases, kind: kindInt, env: env, usage: usage,
-		apply: func(o *daemonOpts, v string) error {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return daemon.Errorf(daemon.CodeUsage, "--%s expects an integer, got %q", name, v)
-			}
-			apply(o, n)
-			return nil
-		}}
-}
+var includeFlag = dflag{Name: "include", Kind: common.Slice, Usage: "Also pack files matching GLOB (relative to the flow's directory) that flows open dynamically (repeatable)",
+	Apply: func(o *daemonOpts, v string) error { o.pack.include = append(o.pack.include, v); return nil }}
 
 func attachStr(name, usage string, env []string, set func(a *daemon.AttachConfig, v string), aliases ...string) dflag {
-	return strFlag(name, usage, env, func(o *daemonOpts, v string) { set(&o.Attach, v); o.markAttach(name) }, aliases...)
+	return common.StringFlag(name, usage, env, func(o *daemonOpts, v string) { set(&o.Attach, v); o.markAttach(name) }, aliases...)
 }
 
 func attachBool(name, usage string, env []string, set func(a *daemon.AttachConfig, v bool)) dflag {
-	return boolFlag(name, usage, env, func(o *daemonOpts, v bool) { set(&o.Attach, v); o.markAttach(name) })
+	return common.BoolFlag(name, usage, env, func(o *daemonOpts, v bool) { set(&o.Attach, v); o.markAttach(name) })
 }
 
 func attachInt(name, usage string, env []string, set func(a *daemon.AttachConfig, v int)) dflag {
-	return intFlag(name, usage, env, func(o *daemonOpts, v int) { set(&o.Attach, v); o.markAttach(name) })
+	return common.IntFlag(name, usage, env, func(o *daemonOpts, v int) { set(&o.Attach, v); o.markAttach(name) })
 }
 
 func extra(a *daemon.AttachConfig, k string, v any) {
@@ -277,22 +194,22 @@ func extra(a *daemon.AttachConfig, k string, v any) {
 
 // tokenFlag is the bearer token: required by a TCP listener that has one,
 // and sent by a client that targets one.
-var tokenFlag = strFlag("token", "Bearer token: required on the TCP listener (serve/start), sent to a --target-hub", []string{"MAESTRO_D_TOKEN"},
+var tokenFlag = common.StringFlag("token", "Bearer token: required on the TCP listener (serve/start), sent to a --target-hub", []string{"MAESTRO_D_TOKEN"},
 	func(o *daemonOpts, v string) { o.Token = v })
 
 // targetFlags point a client command at a TCP daemon or hub instead of the
 // local named daemon. A targeted command never spawns a daemon.
 var targetFlags = []dflag{
-	{name: "target-hub", kind: kindOptionalValue, env: []string{"MAESTRO_D_HUB"},
-		usage: "Talk to the daemon or hub at HOST[:PORT] (default port 7433; https:// for TLS) instead of the local one; bare means localhost:7433",
-		apply: func(o *daemonOpts, v string) error {
+	{Name: "target-hub", Kind: common.OptionalValue, Env: []string{"MAESTRO_D_HUB"},
+		Usage: "Talk to the daemon or hub at HOST[:PORT] (default port 7433; https:// for TLS) instead of the local one; bare means localhost:7433",
+		Apply: func(o *daemonOpts, v string) error {
 			if v == "" {
 				v = "localhost"
 			}
 			o.Target = v
 			return nil
 		}},
-	strFlag("ca", "PEM file of a trust root for a --target-hub with a self-signed certificate", []string{"MAESTRO_D_CA"},
+	common.StringFlag("ca", "PEM file of a trust root for a --target-hub with a self-signed certificate", []string{"MAESTRO_D_CA"},
 		func(o *daemonOpts, v string) { o.CAFile = v }),
 	tokenFlag,
 }
@@ -304,16 +221,16 @@ var (
 		// The flag is --daemon, not --name: tapOn, assertVisible, inputText and
 		// friends have a `name` selector field, and a field wins over a table
 		// flag, so `tapOn X --name ci` would silently become a selector.
-		strFlag("daemon", "Daemon name (one daemon per name; each hosts many devices)", []string{daemon.EnvName},
+		common.StringFlag("daemon", "Daemon name (one daemon per name; each hosts many devices)", []string{daemon.EnvName},
 			func(o *daemonOpts, v string) { o.Name = v }, "n"),
-		boolFlag("json", "Print the full JSON result on stdout", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
-		boolFlag("verbose", "Print progress to stderr", []string{"MAESTRO_VERBOSE"}, func(o *daemonOpts, v bool) { o.Verbose = v }),
+		common.BoolFlag("json", "Print the full JSON result on stdout", nil, func(o *daemonOpts, v bool) { o.JSON = v }),
+		common.BoolFlag("verbose", "Print progress to stderr", []string{"MAESTRO_VERBOSE"}, func(o *daemonOpts, v bool) { o.Verbose = v }),
 	}
 	// daemonSpawnFlags control auto-start.
 	daemonSpawnFlags = []dflag{
-		boolFlag("no-spawn", "Fail instead of starting the daemon when it is not running", nil,
+		common.BoolFlag("no-spawn", "Fail instead of starting the daemon when it is not running", nil,
 			func(o *daemonOpts, v bool) { o.NoSpawn = v }),
-		intFlag("idle-timeout", "Seconds of inactivity before the daemon exits (0 = never; default 1800)", []string{"MAESTRO_D_IDLE_TIMEOUT"},
+		common.IntFlag("idle-timeout", "Seconds of inactivity before the daemon exits (0 = never; default 1800)", []string{"MAESTRO_D_IDLE_TIMEOUT"},
 			func(o *daemonOpts, v int) {
 				if v == 0 {
 					o.IdleTimeout = -1
@@ -321,17 +238,17 @@ var (
 					o.IdleTimeout = v
 				}
 			}),
-		strFlag("http", "Also listen on this TCP address (host:port) for the REST API", []string{"MAESTRO_D_HTTP"},
+		common.StringFlag("http", "Also listen on this TCP address (host:port) for the REST API", []string{"MAESTRO_D_HTTP"},
 			func(o *daemonOpts, v string) { o.HTTPAddr = v }),
 		tokenFlag,
-		intFlag("start-timeout", "Seconds to wait for a spawned daemon to become ready (default 20)", nil,
+		common.IntFlag("start-timeout", "Seconds to wait for a spawned daemon to become ready (default 20)", nil,
 			func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	}
 	// deviceFlag selects the device.
-	deviceFlag = strFlag("device", "Device id / UDID (default: $MAESTRO_DEVICE, else the only attached device)", []string{daemon.EnvDevice},
+	deviceFlag = common.StringFlag("device", "Device id / UDID (default: $MAESTRO_DEVICE, else the only attached device)", []string{daemon.EnvDevice},
 		func(o *daemonOpts, v string) { o.Device = v }, "udid")
 	// waitFlag is for step-running commands.
-	waitFlag = boolFlag("no-wait", "Fail with BUSY instead of queueing behind a step already running on the device", nil,
+	waitFlag = common.BoolFlag("no-wait", "Fail with BUSY instead of queueing behind a step already running on the device", nil,
 		func(o *daemonOpts, v bool) { o.NoWait = v })
 	// attachFlags configure the driver; the same set `maestro-runner test` takes.
 	attachFlags = []dflag{
@@ -354,9 +271,9 @@ var (
 		attachStr("caps", "Path to Appium capabilities JSON file", []string{"APPIUM_CAPS"},
 			func(a *daemon.AttachConfig, v string) { extra(a, "capsFile", v) }),
 		envFlag,
-		strFlag("env-file", "File of KEY=VALUE lines to load as session variables", nil,
+		common.StringFlag("env-file", "File of KEY=VALUE lines to load as session variables", nil,
 			func(o *daemonOpts, v string) { o.envFile = v }),
-		strFlag("ai-keys-file", "JSON file {jevKey, anthropicKey} (mode 0600) with the keys assertWithAI spends on a daemon whose config.json has no ai block", nil,
+		common.StringFlag("ai-keys-file", "JSON file {jevKey, anthropicKey} (mode 0600) with the keys assertWithAI spends on a daemon whose config.json has no ai block", nil,
 			func(o *daemonOpts, v string) { o.aiKeysFile = v }),
 		attachStr("artifacts", "Artifact mode: all, none, on-failure (default)", []string{"MAESTRO_ARTIFACTS"},
 			func(a *daemon.AttachConfig, v string) { a.Artifacts = v }),
@@ -382,8 +299,8 @@ var (
 			func(a *daemon.AttachConfig, v int) { a.CommandTimeout = v }),
 		attachInt("new-command-timeout", "appium:newCommandTimeout in seconds (appium driver)", []string{"MAESTRO_NEW_COMMAND_TIMEOUT"},
 			func(a *daemon.AttachConfig, v int) { extra(a, "newCommandTimeout", float64(v)) }),
-		dflag{name: "alert-monitor", kind: kindBool, value: "true", usage: "Auto-dismiss system alerts between steps (default true; --alert-monitor=false to disable)",
-			apply: func(o *daemonOpts, v string) error {
+		dflag{Name: "alert-monitor", Kind: common.Bool, Value: "true", Usage: "Auto-dismiss system alerts between steps (default true; --alert-monitor=false to disable)",
+			Apply: func(o *daemonOpts, v string) error {
 				b, err := strconv.ParseBool(v)
 				if err != nil {
 					return daemon.Errorf(daemon.CodeUsage, "--alert-monitor expects true or false, got %q", v)
@@ -405,212 +322,13 @@ var (
 	}
 )
 
-// flagSet joins groups into one ordered list; a flag in two groups (the
-// token is a spawn flag and a target flag) is listed once.
-func flagSet(groups ...[]dflag) []dflag {
-	var out []dflag
-	seen := map[string]bool{}
-	for _, g := range groups {
-		for _, f := range g {
-			if seen[f.name] {
-				continue
-			}
-			seen[f.name] = true
-			out = append(out, f)
-		}
+// parseDaemonArgs adds the client environment and attach rules to the common flag grammar.
+func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (*daemonOpts, *common.ParsedArgs, error) {
+	o, p, err := common.ParseArgs(args, flags, stepKeys)
+	if err != nil {
+		return nil, nil, err
 	}
-	return out
-}
-
-func one(f dflag) []dflag { return []dflag{f} }
-
-// parsedArgs is the output of parseDaemonArgs for SkipFlagParsing commands.
-type parsedArgs struct {
-	// positional arguments in order.
-	positional []string
-	// step holds flags the table does not know, in order: they become the
-	// command's YAML value (`--id foo` → {id: foo}).
-	step []stepFlag
-	// base holds BaseStep flags (optional, label, timeout) if given.
-	base map[string]any
-	// platformGate is --platform, which doubles as the step's platform gate.
-	platformGate string
-}
-
-type stepFlag struct {
-	key   string // as written, without dashes; may be dotted
-	value string
-	bare  bool // given without a value (→ true)
-}
-
-// isBoolType reports whether a command field's Go type is a bool.
-func isBoolType(goType string) bool {
-	return goType == "bool" || goType == "*bool"
-}
-
-// baseStepFlags are accepted by every one-shot command and merged into the
-// value map; "platform" is shared with the attach flag of the same name.
-var baseStepFlags = map[string]flagKind{"optional": kindBool, "label": kindString, "timeout": kindInt}
-
-// parseDaemonArgs implements the one-shot grammar:
-//
-//	<cmd> [VALUE …] [--flag value | --flag=value | --bool] [-e K=V] [--] [VALUE …]
-//
-// Known flags (from the table) fill opts; unknown flags are collected as
-// step fields. A flag without a following value is a boolean true; the
-// following token is taken as the value unless it starts with "--" (a bare
-// "-" or a negative number is still a value). stepKeys maps the command's
-// field names to their Go types so that a bool field never swallows the
-// token after it (`launchApp --clearState co.example`).
-func parseDaemonArgs(args []string, flags []dflag, stepKeys map[string]string) (*daemonOpts, *parsedArgs, error) {
-	byName := map[string]dflag{}
-	for _, f := range flags {
-		byName[f.name] = f
-		for _, a := range f.aliases {
-			byName[a] = f
-		}
-	}
-	o := &daemonOpts{}
-	p := &parsedArgs{base: map[string]any{}}
-	explicit := map[string]bool{}
-
-	usage := func(format string, a ...any) error { return daemon.Errorf(daemon.CodeUsage, format, a...) }
-	takesValue := func(next []string) (string, bool) {
-		if len(next) == 0 {
-			return "", false
-		}
-		v := next[0]
-		if v == "-" || !strings.HasPrefix(v, "-") || negNumRe.MatchString(v) {
-			return v, true
-		}
-		return "", false
-	}
-
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			p.positional = append(p.positional, args[i+1:]...)
-			break
-		}
-		if !strings.HasPrefix(a, "-") || a == "-" || negNumRe.MatchString(a) {
-			p.positional = append(p.positional, a)
-			continue
-		}
-		name := strings.TrimLeft(a, "-")
-		value, hasValue := "", false
-		if k, v, ok := strings.Cut(name, "="); ok {
-			name, value, hasValue = k, v, true
-		}
-		// --no-<bool> negates a known bool flag.
-		negated := false
-		if f, ok := byName[strings.TrimPrefix(name, "no-")]; !hasValue && strings.HasPrefix(name, "no-") && ok && f.kind == kindBool {
-			if _, direct := byName[name]; !direct {
-				name, negated = strings.TrimPrefix(name, "no-"), true
-			}
-		}
-		// A field of the command wins over a table flag of the same name
-		// (`openBrowser --url`, `getConsoleLogs --output`); --platform is
-		// both, and -e/--env feeds the step's env map when it has one.
-		f, known := byName[name]
-		if known && name != "platform" && (stepKeys[name] != "" || (f.name == "env" && stepKeys["env"] != "")) {
-			known = false
-			if f.name == "env" {
-				name = "env"
-			}
-		}
-		if known {
-			switch {
-			case f.kind == kindBool:
-				if negated {
-					value = "false"
-				} else if !hasValue {
-					value = "true"
-				}
-			case f.kind == kindOptionalValue:
-				// Bare: the flag's own default; never the next token.
-			case !hasValue:
-				if v, ok := takesValue(args[i+1:]); ok {
-					value, i = v, i+1
-				} else {
-					return nil, nil, usage("--%s needs a value", name)
-				}
-			}
-			if err := f.apply(o, value); err != nil {
-				return nil, nil, err
-			}
-			explicit[f.name] = true
-			if f.name == "platform" {
-				p.platformGate = value
-			}
-			continue
-		}
-		if kind, ok := baseStepFlags[name]; ok {
-			switch kind {
-			case kindBool:
-				if !hasValue {
-					value = "true"
-				}
-				b, err := strconv.ParseBool(value)
-				if err != nil {
-					return nil, nil, usage("--%s expects true or false", name)
-				}
-				p.base[name] = b
-			case kindInt:
-				if !hasValue {
-					if v, ok := takesValue(args[i+1:]); ok {
-						value, i = v, i+1
-					} else {
-						return nil, nil, usage("--%s needs a value", name)
-					}
-				}
-				n, err := strconv.Atoi(value)
-				if err != nil {
-					return nil, nil, usage("--%s expects an integer, got %q", name, value)
-				}
-				p.base[name] = n
-			default:
-				if !hasValue {
-					if v, ok := takesValue(args[i+1:]); ok {
-						value, i = v, i+1
-					} else {
-						return nil, nil, usage("--%s needs a value", name)
-					}
-				}
-				p.base[name] = value
-			}
-			continue
-		}
-		// Unknown: a step field. Bool fields never take the next token.
-		if !hasValue && !isBoolType(stepKeys[name]) {
-			if v, ok := takesValue(args[i+1:]); ok {
-				value, i, hasValue = v, i+1, true
-			}
-		}
-		if !hasValue {
-			p.step = append(p.step, stepFlag{key: name, bare: true})
-			continue
-		}
-		p.step = append(p.step, stepFlag{key: name, value: value})
-	}
-
-	// Env-var fallbacks for known flags that were not given.
-	for _, f := range flags {
-		if explicit[f.name] {
-			continue
-		}
-		for _, e := range f.env {
-			if v := os.Getenv(e); v != "" {
-				if f.kind == kindSlice {
-					continue
-				}
-				if err := f.apply(o, v); err != nil {
-					return nil, nil, err
-				}
-				break
-			}
-		}
-	}
-	o.explicit = explicit
+	o.explicit = p.Explicit
 	if err := o.finish(); err != nil {
 		return nil, nil, err
 	}
@@ -654,8 +372,6 @@ func (o *daemonOpts) checkTargeted() error {
 	}
 	return nil
 }
-
-var negNumRe = regexp.MustCompile(`^-[0-9]+(\.[0-9]+)?$`)
 
 // typedScalar converts a flag value string to the Go value the YAML parser
 // would produce for it: true/false, integers, floats, and `{…}`/`[…]`
@@ -714,30 +430,4 @@ func setPath(m map[string]any, path string, v any) error {
 		cur = next
 	}
 	return nil
-}
-
-// flagsUsage renders a table for the Description of SkipFlagParsing
-// commands, whose flags urfave cannot list.
-func flagsUsage(flags []dflag) string {
-	var b strings.Builder
-	for _, f := range flags {
-		names := "--" + f.name
-		for _, a := range f.aliases {
-			if len(a) == 1 {
-				names = "-" + a + ", " + names
-			} else {
-				names += ", --" + a
-			}
-		}
-		switch f.kind {
-		case kindString, kindSlice:
-			names += " value"
-		case kindInt:
-			names += " N"
-		case kindOptionalValue:
-			names += "[=HOST[:PORT]]"
-		}
-		fmt.Fprintf(&b, "   %-32s %s\n", names, f.usage)
-	}
-	return b.String()
 }

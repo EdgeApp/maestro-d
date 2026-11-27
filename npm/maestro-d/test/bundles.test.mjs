@@ -13,7 +13,7 @@ import * as path from 'node:path'
 import { after, before, beforeEach, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { MaestroD, fetchBundleOutputs, isMaestroError, packFlow } from '../dist/esm/index.js'
+import { MaestroD, MaestroDevice, MaestroError, fetchBundleOutputs, isMaestroError, packFlow } from '../dist/esm/index.js'
 import { HubFiles } from '../dist/esm/pack.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -39,7 +39,7 @@ const exists = (rel) => fs.existsSync(path.join(work, rel))
 /** @type {{method: string, url: string, body: string}[]} */ let seen = []
 
 before(async () => {
-  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
   file('flow/main.yaml', 'appId: x\n---\n- launchApp\n- runFlow: sub/open.yaml\n- runScript: scripts/compute.js\n- assertTrue: ${output.ok}\n- addMedia: [photo.png]\n- takeScreenshot: done\n')
   file('flow/sub/open.yaml', '- tapOn: General\n- takeScreenshot: x\n')
   file('flow/scripts/compute.js', 'output.ok = true')
@@ -195,4 +195,28 @@ describe('local daemon', () => {
     await dev.flow({ yaml: 'appId: x\n---\n- tapOn: X\n' })
     await dev.run([{ tapOn: 'Y' }])
   })
+})
+
+test('detached output downloads propagate after a single command, flow or step execution', async () => {
+  let calls = []
+  const transport = {
+    hub: true, leases: new Map(), retryDelays: [],
+    raw: async () => ({ status: 200 }),
+    json: async (url, { body }) => {
+      calls.push(url)
+      return { ok: true, outputs: [url.endsWith('takeScreenshot') ? 'outputs/' + body : 'outputs/done.png'] }
+    },
+    bytes: async () => { throw MaestroError.of('DEVICE_NOT_ATTACHED', 'outputs unavailable') },
+  }
+  const dev = new MaestroDevice(transport, { name: 'fixture' }, { id: 'phone', attached: true })
+  dev.holdLease({ id: 'grant', device: 'phone' }, { reattach: () => assert.fail('output download reopened driver') })
+  for (const [route, run] of [
+    ['commands/takeScreenshot', () => dev.takeScreenshot('done.png', { cwd: work })],
+    ['flows', () => dev.flow({ file: 'flow/main.yaml', cwd: work })],
+    ['steps', () => dev.run(['launchApp'], { cwd: work })],
+  ]) {
+    calls = []
+    await assert.rejects(run(), err => err.code === 'DEVICE_NOT_ATTACHED' && err.reason === 'outputs unavailable')
+    assert.deepEqual(calls, ['/v1/devices/phone/' + route])
+  }
 })

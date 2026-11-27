@@ -21,6 +21,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, '..', '..', '..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'maestro-d-stream-'))
 const bin = process.env.MAESTRO_D_TEST_BIN ?? path.join(tmp, 'maestro-d')
+const hubBin = process.env.MAESTRO_D_TEST_HUB_BIN ?? path.join(path.dirname(bin), 'maestro-d-hub')
 process.env.MAESTRO_D_HOME = path.join(tmp, 'home')
 process.env.MAESTRO_D_BIN = bin
 for (const k of ['MAESTRO_DEVICE', 'MAESTRO_D', 'MAESTRO_D_HUB', 'MAESTRO_D_TOKEN', 'MAESTRO_D_CA']) delete process.env[k]
@@ -29,7 +30,10 @@ for (const k of ['MAESTRO_DEVICE', 'MAESTRO_D', 'MAESTRO_D_HUB', 'MAESTRO_D_TOKE
 let daemon
 
 before(async () => {
-  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, '.'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN) execFileSync('go', ['build', '-o', bin, './cmd/maestro-d'], { cwd: repoRoot, stdio: 'inherit' })
+  if (!process.env.MAESTRO_D_TEST_BIN && !process.env.MAESTRO_D_TEST_HUB_BIN) {
+    execFileSync('go', ['build', '-o', hubBin, './cmd/maestro-d-hub'], { cwd: repoRoot, stdio: 'inherit' })
+  }
   daemon = await MaestroD.connect({ name: 'jsstream', idleTimeout: 120 })
 })
 
@@ -135,13 +139,15 @@ describe('streams on a hub', () => {
   const hubName = 'jsstreamhub'
 
   before(() => {
-    const out = execFileSync(bin, ['hub', 'start', '--daemon', hubName, '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0',
-      '--token', token, '--peer-token', 'stream-peer', '--share-device', 'mock-s1', '--json'], { env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-s1' } })
+    const hubDevices = ['mock-s1'].map(id => ({ id }))
+    fs.writeFileSync(path.join(process.env.MAESTRO_D_HOME, 'config.json'), JSON.stringify({ hubDevices }), { mode: 0o600 })
+    const out = execFileSync(hubBin, ['start', '--web-port', '0', '--name', hubName, '--no-mdns', '--listen', '127.0.0.1:0',
+      '--token', token, '--peer-token', 'stream-peer', '--json'], { env: { ...process.env, MAESTRO_D_MOCK_DEVICES: 'mock-s1' } })
     addr = JSON.parse(out.toString()).daemon.httpAddr
   })
 
   after(() => {
-    execFileSync(bin, ['hub', 'stop', '--daemon', hubName])
+    execFileSync(hubBin, ['stop'])
   })
 
   test('N3: a leased device streams through the hub; without the lease, LEASE_REQUIRED', async () => {

@@ -71,34 +71,34 @@ func (s *Server) devicePlatform(id string) string {
 func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req InstallRequest
-	if e := decodeBody(r, &req); e != nil {
-		writeError(w, e)
+	if e := DecodeBody(r, &req); e != nil {
+		WriteError(w, e)
 		return
 	}
 	var fetched *fetchedApp
 	switch {
 	case req.URL != "" && req.App != "":
-		writeError(w, Errorf(CodeUsage, "install: give app or url, not both").WithDetails("field", "url"))
+		WriteError(w, Errorf(CodeUsage, "install: give app or url, not both").WithDetails("field", "url"))
 		return
 	case req.URL != "":
 		f, e := s.fetchApp(r.Context(), id, req)
 		if e != nil {
 			if e.Code == CodeForbidden {
-				s.logForbidden(r, e)
+				s.LogForbidden(r, e)
 			}
-			writeError(w, e)
+			WriteError(w, e)
 			return
 		}
 		if f.cached {
 			logger.Info("Install of %s on %s skipped: ETag %s is installed", req.AppID, id, f.etag)
-			writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: req.AppID, Cached: true, ETag: f.etag})
+			WriteJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: req.AppID, Cached: true, ETag: f.etag})
 			return
 		}
 		defer os.RemoveAll(f.dir)
 		fetched = f
 		req.App = f.path
 	case req.App == "":
-		writeError(w, Errorf(CodeUsage, "install: app is required (a blob: ref, or a path for local callers), or url"))
+		WriteError(w, Errorf(CodeUsage, "install: app is required (a blob: ref, or a path for local callers), or url"))
 		return
 	}
 	path := req.App
@@ -106,28 +106,28 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		// The daemon's own download: neither a blob nor the caller's path.
 	} else if strings.HasPrefix(path, "blob:") {
 		if _, _, err := executor.ParseBlobRef(path); err != nil {
-			e := forbidden("app %s: %v", path, err).WithDetails("field", "app")
-			s.logForbidden(r, e)
-			writeError(w, e)
+			e := Forbidden("app %s: %v", path, err).WithDetails("field", "app")
+			s.LogForbidden(r, e)
+			WriteError(w, e)
 			return
 		}
 		_ = os.MkdirAll(s.cfg.ReportsDir, 0o755)
 		dir, err := os.MkdirTemp(s.cfg.ReportsDir, ".install-")
 		if err != nil {
-			writeError(w, WrapErr(CodeInternal, err))
+			WriteError(w, WrapErr(CodeInternal, err))
 			return
 		}
 		defer os.RemoveAll(dir)
 		local, err := s.blobs.Materialize(path, dir)
 		if err != nil {
-			writeError(w, Errorf(CodeUsage, "app %s: %v", path, err).WithDetails("field", "app"))
+			WriteError(w, Errorf(CodeUsage, "app %s: %v", path, err).WithDetails("field", "app"))
 			return
 		}
 		path = local
 	} else if CallerFrom(r.Context()).Remote {
-		e := forbidden("app %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", path).WithDetails("field", "app")
-		s.logForbidden(r, e)
-		writeError(w, e)
+		e := Forbidden("app %s is a path on the daemon's host; a remote caller must upload it (a blob: ref)", path).WithDetails("field", "app")
+		s.LogForbidden(r, e)
+		WriteError(w, e)
 		return
 	}
 	if rd := s.remote(id); rd != nil {
@@ -139,7 +139,7 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.deps.InstallApp == nil {
-		writeError(w, Errorf(CodeInternal, "install: no installer configured"))
+		WriteError(w, Errorf(CodeInternal, "install: no installer configured"))
 		return
 	}
 	platform := strings.ToLower(req.Platform)
@@ -160,13 +160,21 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	s.idle.Hold()
 	defer s.idle.Release()
 	if req.Reinstall && appID != "" && s.deps.UninstallApp != nil {
+		if e := s.verifyBinding(r.Context(), id); e != nil {
+			WriteError(w, e)
+			return
+		}
 		if err := s.deps.UninstallApp(r.Context(), id, platform, appID); err != nil {
 			logger.Info("reinstall %s on %s: uninstall first failed (continuing): %v", appID, id, err)
 		}
 	}
-	logger.Info("Installing %s (%s) on %s for %s", filepath.Base(path), appID, id, describeCaller(CallerFrom(r.Context())))
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
+	}
+	logger.Info("Installing %s (%s) on %s for %s", filepath.Base(path), appID, id, DescribeCaller(CallerFrom(r.Context())))
 	if err := s.deps.InstallApp(r.Context(), id, platform, path); err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+		WriteError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	res := InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID}
@@ -176,32 +184,36 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 		res.ETag = fetched.etag
 	}
 	s.events.Publish(Event{Type: "app.installed", Device: id, Message: appID})
-	writeJSON(w, http.StatusOK, res)
+	WriteJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {
 	id, appID := r.PathValue("id"), r.PathValue("appId")
 	if appID == "" {
-		writeError(w, Errorf(CodeUsage, "uninstall: app id is required"))
+		WriteError(w, Errorf(CodeUsage, "uninstall: app id is required"))
 		return
 	}
 	if s.remote(id) != nil {
-		writeError(w, Errorf(CodeUsage, "Device Farm has no uninstall during a session; release the device"))
+		WriteError(w, Errorf(CodeUsage, "Device Farm has no uninstall during a session; release the device"))
 		return
 	}
 	if s.deps.UninstallApp == nil {
-		writeError(w, Errorf(CodeInternal, "uninstall: no uninstaller configured"))
+		WriteError(w, Errorf(CodeInternal, "uninstall: no uninstaller configured"))
 		return
 	}
 	platform := strings.ToLower(r.URL.Query().Get("platform"))
 	if platform == "" {
 		platform = s.devicePlatform(id)
 	}
+	if e := s.verifyBinding(r.Context(), id); e != nil {
+		WriteError(w, e)
+		return
+	}
 	if err := s.deps.UninstallApp(r.Context(), id, platform, appID); err != nil {
-		writeError(w, WrapErr(CodeDeviceError, err))
+		WriteError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
 	s.forgetInstall(id, appID)
 	s.events.Publish(Event{Type: "app.uninstalled", Device: id, Message: appID})
-	writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID})
+	WriteJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID})
 }

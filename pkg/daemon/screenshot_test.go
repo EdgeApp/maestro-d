@@ -143,7 +143,15 @@ func newShotEnv(t *testing.T, idle time.Duration) *shotEnv {
 	}
 	env.server = New(Config{Name: "shot", ReportsDir: filepath.Join(t.TempDir(), "reports")}, deps)
 	env.server.info = Info{Name: "shot", PID: os.Getpid(), APIVersion: APIVersion, Version: "test"}
-	t.Cleanup(env.server.detachAll)
+	t.Cleanup(func() {
+		env.server.detachAll()
+		// An idle or disconnected device may already be closing its report.
+		waitFor(t, func() bool {
+			env.server.mu.Lock()
+			defer env.server.mu.Unlock()
+			return len(env.server.attaching) == 0
+		})
+	})
 	hs := httptest.NewServer(env.server.Handler())
 	t.Cleanup(hs.Close)
 	env.base = hs.URL

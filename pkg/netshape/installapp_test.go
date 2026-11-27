@@ -33,9 +33,6 @@ func TestParseConfig_InstallAppBlock(t *testing.T) {
 	if _, err := ParseConfig([]byte(`{"installApp": {}}`)); err == nil || !strings.HasPrefix(err.Error(), "installApp: ") {
 		t.Fatalf("prefix: %v", err)
 	}
-	if _, err := Parse([]byte(`{"devices": {}, "installApp": {"allowHosts": ["a"]}}`)); err == nil {
-		t.Fatal("network.json took an installApp block")
-	}
 }
 
 func TestInstallApp_Allows(t *testing.T) {

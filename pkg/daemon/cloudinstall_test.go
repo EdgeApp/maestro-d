@@ -12,13 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 )
 
 // installFake is a cloudFake whose uploads can be slow and fail, and whose
 // installs are counted.
 type installFake struct {
-	*cloudFake
+	*daemontest.Cloud
 	uploadDelay time.Duration
 	uploadErr   error
 	installs    atomic.Int32
@@ -42,7 +43,7 @@ func (f *installFake) Install(context.Context, *cloudprov.Allocation, cloudprov.
 func newInstallEnv(t *testing.T) (*remoteEnv, *installFake, *atomic.Int32) {
 	t.Helper()
 	e := newRemoteEnv(t, nil)
-	f := &installFake{cloudFake: e.f}
+	f := &installFake{Cloud: e.f}
 	e.s.deps.Providers["devicefarm"] = func() (cloudprov.RemoteProvider, error) { return f, nil }
 	var uninstalls atomic.Int32
 	e.s.deps.UninstallApp = func(context.Context, string, string, string) error { uninstalls.Add(1); return nil }
@@ -81,8 +82,8 @@ func TestCloudInstall_UploadInstallRestart(t *testing.T) {
 	if err != nil || res.AppID != "org.example" || res.Device != dev.ID {
 		t.Fatalf("install: %+v %v", res, err)
 	}
-	if f.uploads.Load() != 1 || f.installs.Load() != 1 || e.driver(0).restarts.Load() != 1 || uninstalls.Load() != 0 {
-		t.Fatalf("uploads %d installs %d restarts %d uninstalls %d", f.uploads.Load(), f.installs.Load(), e.driver(0).restarts.Load(), uninstalls.Load())
+	if f.uploads.Load() != 1 || f.installs.Load() != 1 || e.driver(0).Restarts.Load() != 1 || uninstalls.Load() != 0 {
+		t.Fatalf("uploads %d installs %d restarts %d uninstalls %d", f.uploads.Load(), f.installs.Load(), e.driver(0).Restarts.Load(), uninstalls.Load())
 	}
 	var installed bool
 	for len(events) > 0 {
@@ -123,17 +124,17 @@ func TestCloudInstall_UploadInstallRestart(t *testing.T) {
 	// A restart refused once (the device settling after the install) is
 	// tried again.
 	d := e.driver(0)
-	before := d.restarts.Load()
-	d.restartFails.Store(1)
-	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: apk}); err != nil || d.restarts.Load() != before+2 {
-		t.Fatalf("a restart refused once: %v (restarts %d)", err, d.restarts.Load()-before)
+	before := d.Restarts.Load()
+	d.RestartFails.Store(1)
+	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: apk}); err != nil || d.Restarts.Load() != before+2 {
+		t.Fatalf("a restart refused once: %v (restarts %d)", err, d.Restarts.Load()-before)
 	}
 	// A restart that keeps failing is DEVICE_ERROR after three attempts.
 	gone := errors.New("session gone")
-	d.restartErr.Store(&gone)
-	before = d.restarts.Load()
-	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: apk}); codeOf(t, err) != CodeDeviceError || d.restarts.Load() != before+3 {
-		t.Fatalf("restart failure: %v (restarts %d)", err, d.restarts.Load()-before)
+	d.RestartErr.Store(&gone)
+	before = d.Restarts.Load()
+	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: apk}); codeOf(t, err) != CodeDeviceError || d.Restarts.Load() != before+3 {
+		t.Fatalf("restart failure: %v (restarts %d)", err, d.Restarts.Load()-before)
 	}
 }
 
@@ -266,40 +267,40 @@ func TestCloudInstall_WaitsForTheAppOnTheDevice(t *testing.T) {
 	}
 	d := e.driver(0)
 	// The provider answers first; the device lists the app on the third check.
-	d.notYet.Store(2)
+	d.NotYet.Store(2)
 	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "a.apk")}); err != nil {
 		t.Fatal(err)
 	}
-	if d.installChecks.Load() != 3 || d.restarts.Load() != 1 {
-		t.Fatalf("checks %d restarts %d", d.installChecks.Load(), d.restarts.Load())
+	if d.InstallChecks.Load() != 3 || d.Restarts.Load() != 1 {
+		t.Fatalf("checks %d restarts %d", d.InstallChecks.Load(), d.Restarts.Load())
 	}
 	// Never there: DEVICE_ERROR after the wait (3 s with the fast seam),
 	// and no restart.
-	d.installChecks.Store(0)
-	d.notYet.Store(-1)
+	d.InstallChecks.Store(0)
+	d.NotYet.Store(-1)
 	start := time.Now()
 	_, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "a.apk")})
 	if codeOf(t, err) != CodeDeviceError || !strings.Contains(err.Error(), "was not on the device after 3s") {
 		t.Fatalf("never installed: %v", err)
 	}
-	if took := time.Since(start); took < 3*time.Second || d.restarts.Load() != 1 || d.installChecks.Load() < 10 {
-		t.Fatalf("took %s, restarts %d, checks %d", took, d.restarts.Load(), d.installChecks.Load())
+	if took := time.Since(start); took < 3*time.Second || d.Restarts.Load() != 1 || d.InstallChecks.Load() < 10 {
+		t.Fatalf("took %s, restarts %d, checks %d", took, d.Restarts.Load(), d.InstallChecks.Load())
 	}
 	// A device that cannot tell: no wait.
-	d.installChecks.Store(0)
+	d.InstallChecks.Store(0)
 	unsupported := errors.New("unknown mobile command")
-	d.checkErr.Store(&unsupported)
-	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "a.apk")}); err != nil || d.installChecks.Load() != 1 {
-		t.Fatalf("unsupported check: %v (checks %d)", err, d.installChecks.Load())
+	d.CheckErr.Store(&unsupported)
+	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "a.apk")}); err != nil || d.InstallChecks.Load() != 1 {
+		t.Fatalf("unsupported check: %v (checks %d)", err, d.InstallChecks.Load())
 	}
 	// An app id that cannot be read: nothing to wait for.
-	d.installChecks.Store(0)
-	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "x.ipa")}); err != nil || d.installChecks.Load() != 0 {
-		t.Fatalf("no app id: %v (checks %d)", err, d.installChecks.Load())
+	d.InstallChecks.Store(0)
+	if _, err := e.c.InstallApp(ctx, dev.ID, InstallRequest{App: writeApp(t, "x.ipa")}); err != nil || d.InstallChecks.Load() != 0 {
+		t.Fatalf("no app id: %v (checks %d)", err, d.InstallChecks.Load())
 	}
 	// A client that gives up ends the wait.
-	d.checkErr.Store(nil)
-	d.notYet.Store(-1)
+	d.CheckErr.Store(nil)
+	d.NotYet.Store(-1)
 	cctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	if _, err := e.c.InstallApp(cctx, dev.ID, InstallRequest{App: writeApp(t, "a.apk")}); err == nil {
@@ -318,7 +319,7 @@ func TestCloudInstall_AttachWaitsForTheInstall(t *testing.T) {
 	ctx := context.Background()
 	dev := e.launch(cloudprov.CloudSpec{})
 	d := e.driver(0)
-	d.restartDelay.Store(int64(1500 * time.Millisecond))
+	d.RestartDelay.Store(int64(1500 * time.Millisecond))
 	installed := make(chan struct{})
 	go func() {
 		defer close(installed)
@@ -326,12 +327,12 @@ func TestCloudInstall_AttachWaitsForTheInstall(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	waitUntil(t, 5*time.Second, "the restart to begin", func() bool { return d.restarts.Load() == 1 })
+	waitUntil(t, 5*time.Second, "the restart to begin", func() bool { return d.Restarts.Load() == 1 })
 	if _, err := e.c.Attach(ctx, dev.ID, AttachConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	attached := time.Now().UnixNano()
-	if done := d.restartedAt.Load(); done == 0 || done > attached {
+	if done := d.RestartedAt.Load(); done == 0 || done > attached {
 		t.Fatalf("the attach returned before the install's restart finished (restart %d, attach %d)", done, attached)
 	}
 	<-installed

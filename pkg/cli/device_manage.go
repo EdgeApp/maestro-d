@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/urfave/cli/v2"
@@ -38,23 +39,23 @@ type deviceManageOpts struct {
 
 // cloudCreateFlags are device create's flags for a cloud device.
 var cloudCreateFlags = []dflag{
-	strFlag("provider", "Launch a cloud device on this provider (devicefarm) instead of creating a simulator or AVD; --name is then the model (exact name, catalog id or regular expression)", nil,
+	common.StringFlag("provider", "Launch a cloud device on this provider (devicefarm) instead of creating a simulator or AVD; --name is then the model (exact name, catalog id or regular expression)", nil,
 		func(o *daemonOpts, v string) { o.manage.cloud.Provider = v }),
-	strFlag("os-version", "Cloud: the exact OS version", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersion = v }),
-	strFlag("os-min", "Cloud: the lowest OS version", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersionMin = v }),
-	strFlag("os-max", "Cloud: the highest OS version, at its own precision (17 admits 17.5)", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersionMax = v }),
-	strFlag("app", "Cloud: an .apk or .ipa to install when the session starts (a path, or an upload ARN)", nil,
+	common.StringFlag("os-version", "Cloud: the exact OS version", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersion = v }),
+	common.StringFlag("os-min", "Cloud: the lowest OS version", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersionMin = v }),
+	common.StringFlag("os-max", "Cloud: the highest OS version, at its own precision (17 admits 17.5)", nil, func(o *daemonOpts, v string) { o.manage.cloud.OSVersionMax = v }),
+	common.StringFlag("app", "Cloud: an .apk or .ipa to install when the session starts (a path, or an upload ARN)", nil,
 		func(o *daemonOpts, v string) { o.manage.cloud.App = v }),
-	{name: "auxiliary-app", kind: kindSlice, usage: "Cloud: another app to install, at most 3; repeatable",
-		apply: func(o *daemonOpts, v string) error {
+	{Name: "auxiliary-app", Kind: common.Slice, Usage: "Cloud: another app to install, at most 3; repeatable",
+		Apply: func(o *daemonOpts, v string) error {
 			o.manage.cloud.AuxiliaryApps = append(o.manage.cloud.AuxiliaryApps, v)
 			return nil
 		}},
-	strFlag("app-id", "Cloud: the app's bundle id or package, the default for attach", nil, func(o *daemonOpts, v string) { o.manage.cloud.AppID = v }),
-	strFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
+	common.StringFlag("app-id", "Cloud: the app's bundle id or package, the default for attach", nil, func(o *daemonOpts, v string) { o.manage.cloud.AppID = v }),
+	common.StringFlag("appium-version", "Cloud: Appium 2 or 3 (default 3 on iOS 27 and later, else 2)", nil,
 		func(o *daemonOpts, v string) { o.manage.cloud.AppiumVersion = v }),
-	strFlag("caps", "Cloud: a JSON file of capabilities merged into the WebDriver session's", nil, func(o *daemonOpts, v string) { o.manage.capsFile = v }),
-	strFlag("idle-release", "Cloud: release the device after this long without a request (Go duration or seconds; default 10m, 60s–150m)", nil,
+	common.StringFlag("caps", "Cloud: a JSON file of capabilities merged into the WebDriver session's", nil, func(o *daemonOpts, v string) { o.manage.capsFile = v }),
+	common.StringFlag("idle-release", "Cloud: release the device after this long without a request (Go duration or seconds; default 10m, 60s–150m)", nil,
 		func(o *daemonOpts, v string) { o.manage.idleRelease = v }),
 }
 
@@ -129,56 +130,56 @@ func minutesNote(m *cloudprov.DeviceMinutes) string {
 // queryFlags are the filters device list and device catalog share.
 func queryFlags(kind bool) []dflag {
 	out := []dflag{
-		strFlag("location", "Only devices in these locations: local, mesh, cloud (comma list)", nil, func(o *daemonOpts, v string) {
+		common.StringFlag("location", "Only devices in these locations: local, mesh, cloud (comma list)", nil, func(o *daemonOpts, v string) {
 			o.manage.query.Location = strings.Split(v, ",")
 		}),
-		strFlag("provider", "Only this cloud provider's devices (devicefarm)", nil, func(o *daemonOpts, v string) { o.manage.query.Provider = v }),
-		strFlag("name", "Only devices whose name or id matches this regular expression (case-insensitive)", nil,
+		common.StringFlag("provider", "Only this cloud provider's devices (devicefarm)", nil, func(o *daemonOpts, v string) { o.manage.query.Provider = v }),
+		common.StringFlag("name", "Only devices whose name or id matches this regular expression (case-insensitive)", nil,
 			func(o *daemonOpts, v string) { o.manage.query.Name = v }),
-		strFlag("os-min", "Only devices whose OS version is at least this (e.g. 16)", nil, func(o *daemonOpts, v string) { o.manage.query.OSVersionMin = v }),
-		strFlag("os-max", "Only devices whose OS version is at most this, at its own precision (17 admits 17.5)", nil,
+		common.StringFlag("os-min", "Only devices whose OS version is at least this (e.g. 16)", nil, func(o *daemonOpts, v string) { o.manage.query.OSVersionMin = v }),
+		common.StringFlag("os-max", "Only devices whose OS version is at most this, at its own precision (17 admits 17.5)", nil,
 			func(o *daemonOpts, v string) { o.manage.query.OSVersionMax = v }),
 	}
 	if kind {
-		out = append(out, strFlag("kind", "Only this kind: device, emulator, simulator, tv, cloud", nil,
+		out = append(out, common.StringFlag("kind", "Only this kind: device, emulator, simulator, tv, cloud", nil,
 			func(o *daemonOpts, v string) { o.manage.query.Kind = v }))
 	}
 	return out
 }
 
 // manageHubFlag is --hub on device catalog, create and start.
-var manageHubFlag = strFlag("hub", "On a hub: the hub whose machine does it (default: the hub you talk to)", nil,
+var manageHubFlag = common.StringFlag("hub", "On a hub: the hub whose machine does it (default: the hub you talk to)", nil,
 	func(o *daemonOpts, v string) { o.manage.hub = v })
 
 func manageStr(name, usage string, set func(s *daemon.CreateSpec, v string)) dflag {
-	return strFlag(name, usage, nil, func(o *daemonOpts, v string) { set(&o.manage.spec, v) })
+	return common.StringFlag(name, usage, nil, func(o *daemonOpts, v string) { set(&o.manage.spec, v) })
 }
 
 var (
-	deviceCatalogFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), queryFlags(false), []dflag{
-		boolFlag("available", "Also list Android system images that sdkmanager can download; with --location cloud, only models available now", nil,
+	deviceCatalogFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, common.One(manageHubFlag), queryFlags(false), []dflag{
+		common.BoolFlag("available", "Also list Android system images that sdkmanager can download; with --location cloud, only models available now", nil,
 			func(o *daemonOpts, v bool) { o.manage.available = v }),
 	})
-	deviceCreateFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, one(manageHubFlag), []dflag{
+	deviceCreateFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], attachFlags[:1], targetFlags, common.One(manageHubFlag), []dflag{
 		manageStr("name", "Name of the new simulator or AVD (required)", func(s *daemon.CreateSpec, v string) { s.Name = v }),
 		manageStr("type", "iOS: device type name or id (default: the newest iPhone the runtime supports)", func(s *daemon.CreateSpec, v string) { s.Type = v }),
 		manageStr("runtime", "iOS: runtime, e.g. iOS-26-5 or 26.5 (default: the newest installed)", func(s *daemon.CreateSpec, v string) { s.Runtime = v }),
 		manageStr("image", "Android: system image package (default: the newest installed google_apis image for this host's ABI)", func(s *daemon.CreateSpec, v string) { s.Image = v }),
 		manageStr("profile", "Android: hardware profile (default pixel_8)", func(s *daemon.CreateSpec, v string) { s.Profile = v }),
 		manageStr("data-size", "Android: data partition size (default 6G, at most 10G)", func(s *daemon.CreateSpec, v string) { s.DataSize = v }),
-		{name: "boot", kind: kindBool, value: "true", usage: "Boot the device once created (default true; --no-boot only creates it)",
-			apply: func(o *daemonOpts, v string) error {
+		{Name: "boot", Kind: common.Bool, Value: "true", Usage: "Boot the device once created (default true; --no-boot only creates it)",
+			Apply: func(o *daemonOpts, v string) error {
 				o.manage.noBoot = v == "false"
 				return nil
 			}},
-		boolFlag("install-image", "Android: download the system image with sdkmanager when it is not installed (needs --accept-licenses)", nil,
+		common.BoolFlag("install-image", "Android: download the system image with sdkmanager when it is not installed (needs --accept-licenses)", nil,
 			func(o *daemonOpts, v bool) { o.manage.spec.InstallImage = v }),
-		boolFlag("accept-licenses", "Android: accept the SDK licenses for an image --install-image downloads", nil,
+		common.BoolFlag("accept-licenses", "Android: accept the SDK licenses for an image --install-image downloads", nil,
 			func(o *daemonOpts, v bool) { o.manage.spec.AcceptLicenses = v }),
-		intFlag("boot-timeout", "Seconds to wait for boot (default 120; a cloud device's session, default 900)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
+		common.IntFlag("boot-timeout", "Seconds to wait for boot (default 120; a cloud device's session, default 900)", nil, func(o *daemonOpts, v int) { o.StartTimeout = v }),
 	}, cloudCreateFlags)
-	deviceDeleteFlags = flagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
-		boolFlag("force", "Delete even if maestro-d did not create it", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	deviceDeleteFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags[:1], targetFlags, []dflag{
+		common.BoolFlag("force", "Delete even if maestro-d did not create it", nil, func(o *daemonOpts, v bool) { o.force = v }),
 	})
 )
 
@@ -197,7 +198,7 @@ var deviceCatalogCommand = &cli.Command{
 	Name:      "catalog",
 	Usage:     "List the iOS runtimes and device types, and the Android images and profiles, that device create can use",
 	ArgsUsage: " ",
-	Description: flagsDoc(`iOS comes from simctl; Android from sdkmanager and avdmanager (found under
+	Description: common.FlagHelp(`iOS comes from simctl; Android from sdkmanager and avdmanager (found under
 ANDROID_HOME / ANDROID_SDK_ROOT, else on PATH). Android images are the
 installed ones unless --available.
 
@@ -211,7 +212,7 @@ var deviceCreateCommand = &cli.Command{
 	Name:      "create",
 	Usage:     "Create an iOS simulator or an Android AVD, and boot it",
 	ArgsUsage: " ",
-	Description: flagsDoc(`Creates the device, records it in <home>/created.json (so device delete
+	Description: common.FlagHelp(`Creates the device, records it in <home>/created.json (so device delete
 accepts it without --force), and boots it unless --no-boot. A new AVD's
 data partition is --data-size (written as disk.dataPartition.size).
 
@@ -225,7 +226,7 @@ var deviceDeleteCommand = &cli.Command{
 	Name:      "delete",
 	Usage:     "Delete a simulator or AVD (stopping it first)",
 	ArgsUsage: "<id-or-name>",
-	Description: flagsDoc(`Takes a UDID, a simulator name, avd:<name>, an AVD name or a running
+	Description: common.FlagHelp(`Takes a UDID, a simulator name, avd:<name>, an AVD name or a running
 emulator's serial. Only devices that device create made are deleted
 without --force; anything else fails with DEVICE_EXTERNAL.`, deviceDeleteFlags),
 	SkipFlagParsing: true,
@@ -243,7 +244,7 @@ func runDeviceCatalog(ctx context.Context, c *daemon.Client, o *daemonOpts, args
 		return err
 	}
 	if o.JSON {
-		printJSON(w, res)
+		common.PrintJSON(w, res)
 		return nil
 	}
 	printCatalog(w, res)
@@ -304,9 +305,9 @@ func runDeviceCreate(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 	boot := !o.manage.noBoot
 	if !o.JSON {
 		if boot {
-			progress("Creating and booting %s …", spec.Name)
+			common.Progress("Creating and booting %s …", spec.Name)
 		} else {
-			progress("Creating %s …", spec.Name)
+			common.Progress("Creating %s …", spec.Name)
 		}
 	}
 	dev, err := c.CreateDevice(ctx, daemon.BootRequest{Platform: o.Attach.Platform, Name: spec.Name, Create: &spec, Hub: o.manage.hub,
@@ -315,7 +316,7 @@ func runDeviceCreate(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 		return err
 	}
 	if o.JSON {
-		printJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
+		common.PrintJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
 		return nil
 	}
 	if dev.Ready {
@@ -330,12 +331,16 @@ func runDeviceDelete(ctx context.Context, c *daemon.Client, o *daemonOpts, args 
 	if len(args) != 1 {
 		return daemon.Errorf(daemon.CodeUsage, "usage: maestro-d device delete <id-or-name> [--force]")
 	}
-	dev, err := c.DeleteDevice(ctx, args[0], o.force)
+	id, err := resolveEmulatorTarget(ctx, c, o, args[0])
+	if err != nil {
+		return err
+	}
+	dev, err := c.DeleteDevice(ctx, id, o.force)
 	if err != nil {
 		return err
 	}
 	if o.JSON {
-		printJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
+		common.PrintJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
 		return nil
 	}
 	fmt.Fprintf(w, "%s deleted: %s (%s)%s\n", dev.ID, dev.Name, dev.Platform, minutesNote(dev.DeviceMinutes))
@@ -349,14 +354,14 @@ func runCloudCreate(ctx context.Context, c *daemon.Client, o *daemonOpts, w io.W
 		return err
 	}
 	if !o.JSON {
-		progress("Launching a cloud device (%s, %s) on %s …", spec.Platform, firstNonEmpty(spec.Name, "any model"), spec.Provider)
+		common.Progress("Launching a cloud device (%s, %s) on %s …", spec.Platform, firstNonEmpty(spec.Name, "any model"), spec.Provider)
 	}
 	dev, err := c.CreateDevice(ctx, daemon.BootRequest{Platform: spec.Platform, Create: &daemon.CreateSpec{Cloud: spec}})
 	if err != nil {
 		return err
 	}
 	if o.JSON {
-		printJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
+		common.PrintJSON(w, daemon.DeviceResult{Envelope: daemon.Envelope{OK: true}, Device: *dev})
 		return nil
 	}
 	fmt.Fprintf(w, "%s launched: %s %s (%s, %s); released after %ds idle, by %s at the latest\n",

@@ -4,7 +4,7 @@
 # Usage: VERSION=2.0.0 ./npm/build-maestro-d-tarballs.sh
 #
 # Run it after npm/build-maestro-d-npm.sh, whose per-platform directories
-# (npm/platforms/maestro-d-<os>-<arch>/: bin/maestro-d, drivers/, LICENSE)
+# (npm/platforms/maestro-d-<os>-<arch>/: both binaries, drivers/, LICENSE)
 # are already the home the binary expects. Each becomes
 #
 #   npm/dist-maestro-d/<VERSION>/maestro-d-<VERSION>-<os>-<arch>.tar.gz
@@ -39,6 +39,7 @@ mkdir -p "$OUT_DIR"
 found=0
 for dir in "$PLATFORMS_DIR"/maestro-d-*/; do
     [ -x "$dir/bin/maestro-d" ] || continue
+    [ -x "$dir/bin/maestro-d-hub" ] || { echo "Missing hub binary in $dir" >&2; exit 1; }
     platform="$(basename "$dir")"
     platform="${platform#maestro-d-}"
     name="maestro-d-$VERSION-$platform"

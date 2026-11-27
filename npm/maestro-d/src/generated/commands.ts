@@ -1162,7 +1162,7 @@ export interface ResetPermissionsParams {
   platform?: string
 }
 
-/** Removes the device's network shape through the call its host's config.json (or older network.json) configures for it. */
+/** Removes the device's network shape through the call its host's config.json configures for it. */
 export interface ResetTrafficShapeParams {
   optional?: boolean
   label?: string
@@ -1428,7 +1428,7 @@ export interface SetStatusBarParams {
   battery?: number
 }
 
-/** Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. */
+/** Sets the device's whole network shape through the call its host's config.json configures for it. */
 export interface SetTrafficShapeParams {
   optional?: boolean
   label?: string
@@ -1873,7 +1873,7 @@ export const COMMANDS = {
   removeMedia: { name: 'removeMedia', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },
-  resetTrafficShape: { name: 'resetTrafficShape', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Removes the device\'s network shape through the call its host\'s config.json (or older network.json) configures for it.' },
+  resetTrafficShape: { name: 'resetTrafficShape', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Removes the device\'s network shape through the call its host\'s config.json configures for it.' },
   retry: { name: 'retry', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Retries steps on failure.', files: { file: { kind: 'flow' } } },
   runBrowserScript: { name: 'runBrowserScript', scalar: 'file', bareField: 'file', valueLess: false, compound: false, doc: 'Loads and executes a JS file in the browser page context.', files: { file: { kind: 'path' } } },
   runFlow: { name: 'runFlow', scalar: 'file', bareField: 'file', valueLess: false, compound: true, doc: 'Runs another flow.', files: { file: { kind: 'flow' }, else: { kind: 'flow' } } },
@@ -1893,7 +1893,7 @@ export const COMMANDS = {
   setOrientation: { name: 'setOrientation', scalar: 'orientation', bareField: 'orientation', valueLess: false, compound: false, doc: 'Sets device orientation.' },
   setPermissions: { name: 'setPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all' },
   setStatusBar: { name: 'setStatusBar', scalar: 'mode', bareField: 'mode', valueLess: false, compound: false, doc: 'Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead.' },
-  setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s config.json (or older network.json) configures for it.' },
+  setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s config.json configures for it.' },
   startRecording: { name: 'startRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Starts recording.' },
   startSampler: { name: 'startSampler', scalar: 'kind', bareField: 'kind', valueLess: false, compound: false, doc: 'Starts sampling the app\'s cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED.' },
   stopApp: { name: 'stopApp', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Stops an app.' },

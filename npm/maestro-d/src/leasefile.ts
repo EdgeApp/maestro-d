@@ -11,25 +11,24 @@
 // (currentLease). `maestro-d lease` or `maestro-d reserve` in a shell
 // records one there, and a script in the same home attaches with it.
 //
-// Locking: the CLI holds an advisory flock on leases.json.lock from its
-// read to its rename, which Node cannot take. This library writes the
-// whole file to a temporary file and renames it over leases.json, so a
-// reader never sees a torn file; but a CLI and a script that update the
-// file at the same instant can lose one of the two updates. Cross-process
-// safety is the CLI's: lease from the shell (or one process) when several
-// processes share a home and lease at once.
+// Writes use the bundled client to hold leases.json.lock from read to rename.
 
+import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { binaryPath } from './binary.js'
 import { home } from './runfiles.js'
-import type { Lease } from './types.js'
+import type { AttachOptions, Lease } from './types.js'
 
 /** One entry of leases.json. */
 export interface LeaseRecord {
   hub: string
   device: string
   id: string
+  requestedDevice?: string
+  originalDevice?: string
+  attach?: AttachOptions
   holder?: string
   /** The window's start: later than now for a reservation. A record without it has started. */
   startsAt?: string
@@ -39,6 +38,11 @@ export interface LeaseRecord {
 
 /** Entries whose recorded expiry is this far past are dropped (as the CLI does). */
 const STALE_AFTER_MS = 7 * 24 * 3600 * 1000
+
+/** Android can assign an emulator's serial to another AVD after shutdown. */
+export function isEmulatorTarget(id: string): boolean {
+  return /^(?:emulator-\d+(?:@|$)|avd:)/i.test(id)
+}
 
 export function leasesPath(): string {
   return path.join(home(), 'leases.json')
@@ -58,19 +62,13 @@ export function loadLeases(): LeaseRecord[] {
   } catch {
     return []
   }
+  if (!Array.isArray(recs)) return []
   const cutoff = Date.now() - STALE_AFTER_MS
   return recs.filter((r) => {
+    if (!r || typeof r.device !== 'string' || typeof r.id !== 'string' || typeof r.hub !== 'string') return false
     const t = r.expiresAt ? Date.parse(r.expiresAt) : NaN
     return Number.isNaN(t) || t >= cutoff
   })
-}
-
-function saveLeases(recs: LeaseRecord[]): void {
-  fs.mkdirSync(home(), { recursive: true, mode: 0o700 })
-  recs.sort((a, b) => (a.hub !== b.hub ? (a.hub < b.hub ? -1 : 1) : a.device < b.device ? -1 : a.device > b.device ? 1 : 0))
-  const tmp = `${leasesPath()}.tmp.${process.pid}`
-  fs.writeFileSync(tmp, JSON.stringify({ leases: recs }, null, 2) + '\n', { mode: 0o600 })
-  fs.renameSync(tmp, leasesPath())
 }
 
 /** Whether r's window has started by `now`, and its start (0 when none is recorded: started, and earliest). */
@@ -85,14 +83,14 @@ function startOf(r: LeaseRecord, now: number): { started: boolean; start: number
  * the ones that have started, the one that started last; with none
  * started, the reservation that starts first. The recorded expiresAt is
  * not weighed: an ended lease is still sent, the hub answers LEASE_EXPIRED
- * and the record is dropped.
+ * and the record is dropped. Omit device for candidates already matched by alias.
  */
-export function currentLease(recs: LeaseRecord[], device: string, now = Date.now()): LeaseRecord | undefined {
+export function currentLease(recs: LeaseRecord[], device?: string, now = Date.now()): LeaseRecord | undefined {
   let best: LeaseRecord | undefined
   let bestStart = 0
   let bestStarted = false
   for (const r of recs) {
-    if (r.device !== device) continue
+    if (device !== undefined && r.device !== device) continue
     const { started, start } = startOf(r, now)
     let take: boolean
     if (best === undefined) take = true
@@ -119,27 +117,23 @@ export function findLease(hub: string, device: string): LeaseRecord | undefined 
 /**
  * Record a lease, replacing the entry of the same lease id on that hub; the
  * device's reservations stay. A lease that has started also replaces the
- * device's other started entries: no two leases on a device overlap, so
- * those have ended.
+ * device's other started entries when the device has a stable ID. An
+ * emulator serial can be reused while its previous grant is still active.
  */
-export function recordLease(hub: string, lease: Lease): void {
-  const now = Date.now()
-  const started = startOf({ hub, device: lease.device, id: lease.id, startsAt: lease.startsAt }, now).started
-  const recs = loadLeases().filter(
-    (r) => !(r.hub === hub && (r.id === lease.id || (started && r.device === lease.device && startOf(r, now).started))),
-  )
-  const rec: LeaseRecord = { hub, device: lease.device, id: lease.id }
-  if (lease.holder) rec.holder = lease.holder
-  if (lease.startsAt) rec.startsAt = lease.startsAt
-  if (lease.expiresAt) rec.expiresAt = lease.expiresAt
-  if (lease.ttlSec) rec.ttlSec = lease.ttlSec
-  recs.push(rec)
-  saveLeases(recs)
+export function recordLease(hub: string, lease: Lease, attach?: AttachOptions, replaceStarted = true, requestedDevice?: string, bin?: string, keepAttach = false): AttachOptions | undefined {
+  return updateLeaseFile({ hub, lease, attach, replaceStarted, requestedDevice, keepAttach }, bin)
 }
 
 /** Remove the entry for lease id on one hub. */
-export function dropLease(hub: string, id: string): void {
-  const recs = loadLeases()
-  const kept = recs.filter((r) => r.hub !== hub || r.id !== id)
-  if (kept.length !== recs.length) saveLeases(kept)
+export function dropLease(hub: string, id: string, bin?: string): void {
+  updateLeaseFile({ hub, drop: id }, bin)
+}
+
+function updateLeaseFile(update: object, bin?: string): AttachOptions | undefined {
+  const saved = execFileSync(binaryPath(bin), ['lease-file-update'], {
+    input: JSON.stringify(update),
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  return (JSON.parse(saved) as AttachOptions | null) ?? undefined
 }

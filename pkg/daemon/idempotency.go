@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,13 +102,20 @@ func (c *idemCache) begin(device, id string) (*idemEntry, bool) {
 	if e := d.entries[id]; e != nil {
 		return e, false
 	}
+	// A running operation still owns its key, including while its grant
+	// is attaching or waiting for disk. Refuse excess work when every
+	// slot is running so a retry can always join the original operation.
+	if len(d.order) >= idemPerDevice {
+		index := slices.IndexFunc(d.order, func(key string) bool { return d.entries[key].finished() })
+		if index < 0 {
+			return nil, false
+		}
+		delete(d.entries, d.order[index])
+		d.order = slices.Delete(d.order, index, index+1)
+	}
 	e := &idemEntry{done: make(chan struct{})}
 	d.entries[id] = e
 	d.order = append(d.order, id)
-	for len(d.order) > idemPerDevice {
-		delete(d.entries, d.order[0])
-		d.order = d.order[1:]
-	}
 	return e, true
 }
 
@@ -166,7 +174,7 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// idempotent wraps a step-running handler with the outcome cache, outside
+// Idempotent wraps a step-running handler with the outcome cache, outside
 // the device's busy lock, so a retry never queues behind the lock its own
 // first attempt holds. On a hub it sits inside the lease guard (dev), not
 // outside it: every attempt, a retry answered from the cache included, is
@@ -175,7 +183,7 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 // context ends with the lease (underLease); this wrapper detaches the
 // request from its client, so it watches the lease itself (leaseFrom) to
 // keep the lease's end cancelling the request at once.
-func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
+func (s *Server) Idempotent(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(HeaderRequestID)
 		if id == "" {
@@ -184,6 +192,10 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 		}
 		device := r.PathValue("id")
 		e, run := s.idem.begin(device, id)
+		if e == nil {
+			WriteError(w, Errorf(CodeBusy, "too many requests are still running"))
+			return
+		}
 		if !run {
 			e.joined.Store(true)
 			if !e.finished() {
@@ -211,7 +223,7 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		caller := CallerFrom(r.Context())
-		logger.Info("request %s %s %s: executing (caller %s)", id, r.Method, r.URL.Path, describeCaller(caller))
+		logger.Info("request %s %s %s: executing (caller %s)", id, r.Method, r.URL.Path, DescribeCaller(caller))
 		tw := &teeWriter{w: w, status: http.StatusOK}
 		if caller.Addr == "" {
 			// The unix socket: a disconnect is the client ending (Ctrl-C),
@@ -222,11 +234,11 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 		defer cancel()
-		if le := leaseFrom(r.Context()); le != nil {
+		if ended := leaseEnded(r.Context()); ended != nil {
 			// Detached from the client, but never from its lease: the end
 			// of the lease cancels the request at once, not after the grace.
 			var stopLease context.CancelFunc
-			ctx, stopLease = untilLeaseEnds(ctx, le)
+			ctx, stopLease = ContextUntilLeaseEnds(ctx, ended)
 			defer stopLease()
 		}
 		grace := s.idemGrace
@@ -249,7 +261,7 @@ func (s *Server) idempotent(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func describeCaller(c Caller) string {
+func DescribeCaller(c Caller) string {
 	switch {
 	case c.Addr == "":
 		return "unix socket"

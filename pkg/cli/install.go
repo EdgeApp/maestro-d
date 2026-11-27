@@ -23,6 +23,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"howett.net/plist"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cli/common"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
 	"github.com/devicelab-dev/maestro-runner/pkg/driver/computer"
@@ -222,16 +223,16 @@ func daemonUninstallApp(ctx context.Context, id, platform, appID string) error {
 // ---------------------------------------------------------------------------
 // Commands
 
-var installFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), targetFlags, []dflag{
-	boolFlag("reinstall", "Uninstall the app first (when its id can be read)", nil, func(o *daemonOpts, v bool) { o.force = v }),
-	strFlag("platform", "Platform of the device, when neither the file nor the device tells", nil, func(o *daemonOpts, v string) { o.Attach.Platform = v }, "p"),
+var installFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), targetFlags, []dflag{
+	common.BoolFlag("reinstall", "Uninstall the app first (when its id can be read)", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	common.StringFlag("platform", "Platform of the device, when neither the file nor the device tells", nil, func(o *daemonOpts, v string) { o.Attach.Platform = v }, "p"),
 })
 
 var installCommand = &cli.Command{
 	Name:      "install",
 	Usage:     "Install an app (.apk, .app, .ipa) on a device",
 	ArgsUsage: "FILE",
-	Description: flagsDoc(`Installs with the same installers as attach --app-file, without attaching.
+	Description: common.FlagHelp(`Installs with the same installers as attach --app-file, without attaching.
 With --target-hub the file is uploaded first (skipped when the daemon
 already has it) and installed on the device's machine.
 
@@ -272,7 +273,7 @@ already has it) and installed on the device's machine.
 			return err
 		}
 		if o.JSON {
-			printJSON(os.Stdout, res)
+			common.PrintJSON(os.Stdout, res)
 			return nil
 		}
 		if res.AppID != "" {
@@ -289,19 +290,19 @@ type installURLOpts struct {
 	url, headersFile, appID string
 }
 
-var installAppFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), targetFlags, []dflag{
-	strFlag("url", "The build to install: a URL the device's own daemon downloads (required)", nil, func(o *daemonOpts, v string) { o.installURL.url = v }),
-	strFlag("headers-file", "A JSON object of headers for that request (a bearer key), readable by its owner only; never sent to a redirect target", nil,
+var installAppFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), targetFlags, []dflag{
+	common.StringFlag("url", "The build to install: a URL the device's own daemon downloads (required)", nil, func(o *daemonOpts, v string) { o.installURL.url = v }),
+	common.StringFlag("headers-file", "A JSON object of headers for that request (a bearer key), readable by its owner only; never sent to a redirect target", nil,
 		func(o *daemonOpts, v string) { o.installURL.headersFile = v }),
-	strFlag("app-id", "The app's bundle id or package name (required): it keys the ETag cache", nil, func(o *daemonOpts, v string) { o.installURL.appID = v }),
-	boolFlag("reinstall", "Uninstall the app first and install even when the build's ETag is the one installed", nil, func(o *daemonOpts, v bool) { o.force = v }),
-	strFlag("platform", "Platform of the device, when neither the file nor the device tells", nil, func(o *daemonOpts, v string) { o.Attach.Platform = v }, "p"),
+	common.StringFlag("app-id", "The app's bundle id or package name (required): it keys the ETag cache", nil, func(o *daemonOpts, v string) { o.installURL.appID = v }),
+	common.BoolFlag("reinstall", "Uninstall the app first and install even when the build's ETag is the one installed", nil, func(o *daemonOpts, v bool) { o.force = v }),
+	common.StringFlag("platform", "Platform of the device, when neither the file nor the device tells", nil, func(o *daemonOpts, v string) { o.Attach.Platform = v }, "p"),
 })
 
 // readHeadersFile reads --headers-file: a JSON object of strings, which
 // must not be readable by others since it carries a key.
 func readHeadersFile(path string) (map[string]string, error) {
-	data, err := readSecretFile("headers-file", path)
+	data, err := common.ReadSecretFile("headers-file", path)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +318,7 @@ var installAppCommand = &cli.Command{
 	Name:      "installApp",
 	Usage:     "Install an app build from a URL, downloaded by the device's own daemon",
 	ArgsUsage: " ",
-	Description: flagsDoc(`The daemon that owns the device downloads the build, with --headers-file's
+	Description: common.FlagHelp(`The daemon that owns the device downloads the build, with --headers-file's
 headers on that request only (a redirect, such as Mason's to its Space,
 is followed without them), and installs it. It remembers the build's
 ETag per device and app id: the same build again answers cached and
@@ -354,7 +355,7 @@ installs nothing.
 			return err
 		}
 		if o.JSON {
-			printJSON(os.Stdout, res)
+			common.PrintJSON(os.Stdout, res)
 			return nil
 		}
 		if res.Cached {
@@ -366,13 +367,13 @@ installs nothing.
 	}),
 }
 
-var uninstallFlags = flagSet(daemonSelectFlags, daemonSpawnFlags, one(deviceFlag), targetFlags)
+var uninstallFlags = common.FlagSet(daemonSelectFlags, daemonSpawnFlags, common.One(deviceFlag), targetFlags)
 
 var uninstallCommand = &cli.Command{
 	Name:            "uninstall",
 	Usage:           "Uninstall an app from a device by bundle id or package name",
 	ArgsUsage:       "APP_ID",
-	Description:     flagsDoc("  maestro-d uninstall io.appium.settings --device emulator-5554", uninstallFlags),
+	Description:     common.FlagHelp("  maestro-d uninstall io.appium.settings --device emulator-5554", uninstallFlags),
 	SkipFlagParsing: true,
 	Action: withArgs(uninstallFlags, func(ctx context.Context, o *daemonOpts, args []string) error {
 		if len(args) != 1 {
@@ -393,7 +394,7 @@ var uninstallCommand = &cli.Command{
 			return err
 		}
 		if o.JSON {
-			printJSON(os.Stdout, daemon.InstallResult{Envelope: daemon.Envelope{OK: true}, Device: id, AppID: args[0]})
+			common.PrintJSON(os.Stdout, daemon.InstallResult{Envelope: daemon.Envelope{OK: true}, Device: id, AppID: args[0]})
 			return nil
 		}
 		fmt.Printf("Uninstalled %s from %s\n", args[0], id)

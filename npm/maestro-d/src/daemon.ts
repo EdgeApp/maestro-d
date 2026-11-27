@@ -10,11 +10,11 @@ import { randomUUID } from 'node:crypto'
 
 import { MaestroError } from './errors.js'
 import { MaestroDevice, anySignal } from './device.js'
-import { currentLease, dropLease, findLease, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
+import { currentLease, dropLease, isEmulatorTarget, loadLeases, recordLease, type LeaseRecord } from './leasefile.js'
 import { uploadPath } from './pack.js'
-import { ENV_DEVICE, resolveName } from './runfiles.js'
+import { ENV_DEVICE, readHubInfo, pidAlive, resolveName } from './runfiles.js'
 import { ensureDaemon, waitForExit, type SpawnOptions } from './spawn.js'
-import { Transport } from './transport.js'
+import { devicePath, type DeviceBase, Transport } from './transport.js'
 import type {
   AttachOptions,
   BootOptions,
@@ -32,6 +32,8 @@ import type {
   DeviceMinutes,
   DeviceQuery,
   Envelope,
+  HubConfigDevice,
+  HubDevicesResult,
   HubStatus,
   Lease,
   LeaseSelector,
@@ -60,6 +62,8 @@ export interface ConnectOptions extends SpawnOptions {
    * hub is another machine. Default `$MAESTRO_D_HUB`.
    */
   hub?: string | true
+  /** Connect through this home’s local hub socket. Never starts a process. */
+  hubSocket?: boolean
   /**
    * Connect to a daemon's TCP listener (`http://host:7788`) instead of the
    * local unix socket. Nothing is spawned in this mode. Unlike `hub`, calls
@@ -102,6 +106,8 @@ export interface LeaseOptions {
   ttlSec?: number
   /** Who holds the lease, as listings show it (default user@host). */
   holder?: string
+  /** What the window is for, up to 200 characters in listings. */
+  description?: string
   /**
    * How to attach the leased device (default `{}`: attach it with the hub's
    * defaults). `false` only reserves it.
@@ -125,6 +131,8 @@ export interface ReserveOptions {
   ttlSec?: number
   /** Who holds it, as listings show it (default user@host). */
   holder?: string
+  /** What the window is for, up to 200 characters in listings. */
+  description?: string
   signal?: AbortSignal
 }
 
@@ -154,8 +162,11 @@ export class MaestroD {
    * `unix:<name>` over the unix socket (as the CLI keys it).
    */
   readonly leaseKey: string
-  /** The handles holding the leases this process took, by device id; `close()` releases them. */
+  /** The handles holding the leases this process took, by lease id; `close()` releases them. */
   private readonly leased = new Map<string, MaestroDevice>()
+  // A serial previously returned by this client can still be held by a caller.
+  // Keep those aliases even when leases.json cannot be written.
+  private readonly emulatorAliases = new Map<string, Set<string>>()
   /**
    * AWS Device Farm itself, without a device: the account, the uploaded
    * apps, an upload from the daemon's machine (a local caller only) and the
@@ -171,6 +182,7 @@ export class MaestroD {
     leaseKey: string,
     info?: DaemonInfo,
     signal?: AbortSignal,
+    private readonly bin?: string,
   ) {
     this.name = name
     this.transport = transport
@@ -184,6 +196,7 @@ export class MaestroD {
     // and the next one's start, a refused request goes once more with the
     // other one on file.
     transport.otherLease = (device, failed) => {
+      if (isEmulatorTarget(device)) return undefined
       try {
         return currentLease(
           loadLeases().filter((r) => r.hub === leaseKey && r.id !== failed),
@@ -195,11 +208,7 @@ export class MaestroD {
     }
     // A lease the hub reports expired leaves leases.json too.
     transport.onLeaseExpired = (_device, lease) => {
-      try {
-        dropLease(leaseKey, lease)
-      } catch {
-        // leases.json is a convenience; the hub is the authority
-      }
+      this.forgetLease({ id: lease })
     }
   }
 
@@ -208,6 +217,14 @@ export class MaestroD {
    * background when it is not running (pass `spawn: false` to refuse).
    */
   static async connect(opts: ConnectOptions = {}): Promise<MaestroD> {
+    if (opts.hubSocket) {
+      const info = readHubInfo()
+      if (!info || !pidAlive(info.pid)) throw MaestroError.of('DAEMON_UNAVAILABLE', 'the local hub is not running')
+      const transport = new Transport({ socketPath: info.socketPath, hub: true })
+      const local = new MaestroD(info.name, transport, false, 'unix:hub/run', info, opts.signal, opts.bin)
+      await local.hubStatus()
+      return local
+    }
     const name = resolveName(opts.name)
     const hub = opts.hub ?? (opts.url ? undefined : process.env[ENV_HUB] || undefined)
     if (hub !== undefined || opts.url) {
@@ -215,19 +232,22 @@ export class MaestroD {
       const token = opts.token ?? (process.env[ENV_TOKEN] || undefined)
       const ca = readCA(opts.ca ?? (process.env[ENV_CA] || undefined))
       const t = new Transport({ url, token, ca, hub: hub !== undefined })
-      const d = new MaestroD(hub !== undefined ? t.describe : name, t, false, baseURL(url), undefined, opts.signal)
+      const d = new MaestroD(hub !== undefined ? t.describe : name, t, false, baseURL(url), undefined, opts.signal, opts.bin)
       const st = await d.status()
       d.info = st.daemon
       return d
     }
     const { info, transport, started } = await ensureDaemon(name, { ...opts, signal: opts.signal })
-    return new MaestroD(name, transport, started, `unix:${name}`, info, opts.signal)
+    return new MaestroD(name, transport, started, `unix:${name}`, info, opts.signal, opts.bin)
   }
 
   /** `connect()` and `attach()` in one call. */
   static async attach(opts: ConnectOptions & DeviceAttachOptions): Promise<MaestroDevice> {
-    const d = await MaestroD.connect(opts)
-    return d.attach(opts)
+    const { name, hub, hubSocket, url, ca, signal, spawn, idleTimeout, http, token, startTimeout, extraArgs, bin, log, ...attach } = opts
+    const d = await MaestroD.connect({ name, hub, hubSocket, url, ca, signal, spawn, idleTimeout, http, token, startTimeout, extraArgs, bin, log })
+    // With an explicit hub, url can name the page for a web driver.
+    if ((hub !== undefined || hubSocket) && url !== undefined) return d.attach({ ...attach, url, signal })
+    return d.attach({ ...attach, signal })
   }
 
   private sig(signal?: AbortSignal): AbortSignal | undefined {
@@ -250,10 +270,12 @@ export class MaestroD {
   /**
    * Stop the daemon: detaches every device, shuts down the simulators and
    * emulators it booted, and exits. A hub is stopped only from its own
-   * machine: over TCP this rejects with FORBIDDEN.
+   * machine: over TCP this rejects with FORBIDDEN. A hub keeps its active
+   * leases and reservations, and the devices it booted for a live lease stay
+   * booted; its next start restores them. To end them as well, run
+   * `maestro-d-hub stop --end-leases`.
    */
   async shutdown(opts: ShutdownOptions = {}): Promise<void> {
-    await Promise.allSettled([...this.leased.values()].map((dev) => dev.release()))
     await this.transport.json<Envelope>('/v1/shutdown', { method: 'POST', signal: this.sig(opts.signal) })
     this.transport.close()
     const wait = opts.wait ?? 15_000
@@ -299,11 +321,11 @@ export class MaestroD {
       throw MaestroError.of('USAGE', `daemon ${this.name} is not a hub and has no leases (start one with \`maestro-d hub start\`)`)
     }
     const signal = this.sig(opts.signal)
-    const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
+    const body: Record<string, unknown> = { ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder(), description: opts.description }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
     if (opts.cloud) body.cloud = opts.cloud
-    const cfg = opts.attach === false ? undefined : { ...(opts.attach ?? {}) }
+    const cfg = opts.attach === false ? undefined : savedAttach(opts.attach ?? {})
     // Files to upload need the lease first (a hub's blob routes do), so
     // such an attach follows the lease; any other goes in the same call.
     const later = cfg !== undefined && this.transport.hub && hasLocalFiles(cfg)
@@ -318,23 +340,13 @@ export class MaestroD {
     this.transport.leases.set(lease.device, lease.id)
     let info: DeviceInfo = res.device ?? { id: lease.device, platform: '', ready: true, attached: false }
     try {
-      if (later) info = await this.openAttach(lease.device, cfg as AttachOptions, signal)
+      if (later) info = await this.openAttach(this.attachBase(lease.device, lease), cfg as AttachOptions, signal)
     } catch (err) {
       await this.transport.json<Envelope>(`/v1/leases/${encodeURIComponent(lease.id)}`, { method: 'DELETE' }).catch(() => undefined)
-      this.transport.leases.delete(lease.device)
+      if (this.transport.leases.get(lease.device) === lease.id) this.transport.leases.delete(lease.device)
       throw err
     }
-    this.recordLease(lease)
-    const dev = new MaestroDevice(this.transport, this, info, signal)
-    dev.holdLease(lease, {
-      onRenew: (l) => this.recordLease(l),
-      onRelease: (d, l) => {
-        if (this.leased.get(d.id) === d) this.leased.delete(d.id)
-        this.forgetLease(l)
-      },
-    })
-    this.leased.set(lease.device, dev)
-    return dev
+    return this.bindDevice(info, lease, cfg, signal, true, opts.device)
   }
 
   /**
@@ -359,7 +371,7 @@ export class MaestroD {
     }
     const signal = this.sig(opts.signal)
     const startAt = opts.startAt instanceof Date ? rfc3339(opts.startAt) : opts.startAt
-    const body: Record<string, unknown> = { startAt, ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder() }
+    const body: Record<string, unknown> = { startAt, ttlSec: opts.ttlSec, holder: opts.holder ?? defaultHolder(), description: opts.description }
     if (opts.device !== undefined) body.device = await this.normalize(opts.device, signal)
     else body.select = opts.select
     body.clientTime = rfc3339(new Date())
@@ -394,52 +406,82 @@ export class MaestroD {
   async claim(leaseId: string, opts: ClaimOptions = {}): Promise<MaestroDevice> {
     if (!leaseId) throw new TypeError('claim() needs a lease id')
     const signal = this.sig(opts.signal)
-    const { lease } = await this.transport.json<Envelope & { lease: Lease }>(`/v1/leases/${encodeURIComponent(leaseId)}`, { signal })
+    const lease = await this.lookupGrant(leaseId, signal)
     if (lease.state === 'scheduled') {
       throw MaestroError.of('LEASE_NOT_STARTED', `lease ${lease.id} on ${lease.device} starts at ${lease.startsAt}; claim it then`, {
         details: { lease: lease.id, startsAt: lease.startsAt },
       })
     }
+    if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
     // A failed attach puts back the lease the device had in this process
     // (an earlier lease() or claim() handle keeps sending it).
     const previous = this.transport.leases.get(lease.device)
     this.transport.leases.set(lease.device, lease.id)
+    const base = this.attachBase(lease.device, lease)
     let info: DeviceInfo
     try {
       info =
         opts.attach === false
-          ? await this.device(lease.device, { signal })
-          : await this.openAttach(lease.device, { ...(opts.attach ?? {}) }, signal)
+          ? (await this.transport.json<Envelope & { device: DeviceInfo }>(devicePath(base), { signal })).device
+          : await this.openAttach(base, { ...(opts.attach ?? {}) }, signal)
     } catch (err) {
-      if (previous === undefined) this.transport.leases.delete(lease.device)
-      else this.transport.leases.set(lease.device, previous)
+      if (this.transport.leases.get(lease.device) === lease.id) {
+        if (previous === undefined) this.transport.leases.delete(lease.device)
+        else this.transport.leases.set(lease.device, previous)
+      }
       throw err
     }
-    this.recordLease(lease)
+    return this.bindDevice(info, lease, opts.attach === false ? undefined : savedAttach(opts.attach ?? {}), signal, true)
+  }
+
+  private bindDevice(info: DeviceInfo, lease: Lease, cfg: AttachOptions | undefined, signal: AbortSignal | undefined, owned: boolean, requestedDevice?: string): MaestroDevice {
+    if (isEmulatorTarget(lease.device) && info.id !== lease.device) {
+      if (this.transport.leases.get(lease.device) === lease.id) this.transport.leases.delete(lease.device)
+      requestedDevice ??= lease.device
+      lease = { ...lease, device: info.id }
+    }
+    // A reused driver ignored this call's options. Keep its caller-side
+    // file references so either client can reopen it after a hub restart.
+    // Older hubs omit attachReused on a redundant plain attach.
+    const keepAttach = cfg !== undefined && (info.attachReused ?? Object.keys(cfg).length === 0)
+    cfg = this.recordLease(lease, cfg, owned, requestedDevice, keepAttach) ?? cfg
     const dev = new MaestroDevice(this.transport, this, info, signal)
     dev.holdLease(lease, {
-      onRenew: (l) => this.recordLease(l),
-      onRelease: (d, l) => {
-        if (this.leased.get(d.id) === d) this.leased.delete(d.id)
+      onRenew: (l) => this.recordLease(l, undefined, false),
+      onRebind: (l) => this.recordLease(l, undefined, false),
+      reattach: cfg && ((base, sig) => this.openAttach(base, cfg, sig)),
+      onRelease: (_d, l) => {
+        this.leased.delete(l.id)
         this.forgetLease(l)
       },
     })
-    this.leased.set(lease.device, dev)
+    if (owned) this.leased.set(lease.id, dev)
     return dev
   }
 
   /** Record a lease in leases.json (best effort: the hub is the authority). */
-  private recordLease(lease: Lease): void {
+  private recordLease(lease: Lease, attach?: AttachOptions, replaceStarted = true, requestedDevice?: string, keepAttach = false): AttachOptions | undefined {
+    if (isEmulatorTarget(lease.device)) {
+      const aliases = this.emulatorAliases.get(lease.id) ?? new Set<string>()
+      aliases.add(lease.device)
+      if (requestedDevice) aliases.add(requestedDevice)
+      this.emulatorAliases.set(lease.id, aliases)
+    }
     try {
-      recordLease(this.leaseKey, lease)
+      return recordLease(this.leaseKey, lease, attach, replaceStarted, requestedDevice, this.bin, keepAttach)
     } catch {
-      // an unwritable home only loses the shell's view of the lease
+      // The live grant remains usable when its local record cannot be saved.
+      return undefined
     }
   }
 
-  private forgetLease(lease: Lease): void {
+  private forgetLease(lease: Pick<Lease, 'id'>): void {
+    this.emulatorAliases.delete(lease.id)
+    for (const [device, credential] of this.transport.leases) {
+      if (credential === lease.id) this.transport.leases.delete(device)
+    }
     try {
-      dropLease(this.leaseKey, lease.id)
+      dropLease(this.leaseKey, lease.id, this.bin)
     } catch {
       // see recordLease
     }
@@ -452,15 +494,13 @@ export class MaestroD {
    * it holds none.
    */
   private heldLease(id: string): LeaseRecord | undefined {
-    const inProcess = this.transport.leases.get(id)
-    if (inProcess) return undefined
-    let rec: LeaseRecord | undefined
-    try {
-      rec = findLease(this.leaseKey, id)
-    } catch {
-      return undefined
-    }
-    if (rec) this.transport.leases.set(id, rec.id)
+    const records = loadLeases().filter(r => r.hub === this.leaseKey)
+    const matches = records.filter(r => r.device === id || (!isEmulatorTarget(id) && r.device.split('@')[0] === id))
+    if (new Set(matches.map(r => r.device)).size !== 1) return undefined
+    const device = matches[0]!.device
+    const inProcess = this.transport.leases.get(device)
+    const rec = inProcess ? matches.find(r => r.id === inProcess) : currentLease(matches)
+    if (rec) this.transport.leases.set(device, rec.id)
     return rec
   }
 
@@ -496,10 +536,24 @@ export class MaestroD {
    */
   async devices(opts: DeviceQuery & { signal?: AbortSignal } = {}): Promise<DeviceInfo[]> {
     const { signal, ...q } = opts
-    const res = await this.transport.json<Envelope & { devices: DeviceInfo[] }>(withQuery('/v1/devices', q), {
-      signal: this.sig(signal),
-    })
-    return res.devices
+    const path = withQuery('/v1/devices', q)
+    const list = async (collectionLease?: string) =>
+      (await this.transport.json<Envelope & { devices: DeviceInfo[] }>(path, {
+        signal: this.sig(signal), lease: collectionLease,
+      })).devices
+    if (!this.leasing) return list()
+    const leases = new Set(this.transport.leases.values())
+    for (const record of loadLeases()) {
+      if (record.hub === this.leaseKey && record.id) leases.add(record.id)
+    }
+    if (leases.size === 0) return list()
+    const devices = new Map<string, DeviceInfo>()
+    for (const lease of leases) {
+      for (const d of await list(lease)) {
+        if (!devices.has(d.id)) devices.set(d.id, d)
+      }
+    }
+    return [...devices.values()]
   }
 
   /** One device by id. */
@@ -518,6 +572,28 @@ export class MaestroD {
   async hubStatus(opts: { signal?: AbortSignal } = {}): Promise<HubStatus> {
     const res = await this.transport.json<Envelope & { hub: HubStatus }>('/v1/hub', { signal: this.sig(opts.signal) })
     return res.hub
+  }
+
+  /** Read the device config over the local hub socket. */
+  async hubDevices(opts: { signal?: AbortSignal } = {}): Promise<HubDevicesResult> {
+    return this.transport.json<HubDevicesResult>('/v1/config/devices', { signal: this.sig(opts.signal) })
+  }
+
+  /** Share a device or update its description. Omit description to keep it, or pass an empty string to clear it. */
+  async setHubDevice(id: string, opts: { description?: string; signal?: AbortSignal } = {}): Promise<HubConfigDevice> {
+    const res = await this.transport.json<Envelope & { device: HubConfigDevice }>(
+      `/v1/config/devices/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: { description: opts.description }, signal: this.sig(opts.signal) },
+    )
+    return res.device
+  }
+
+  /** Remove a configured device. endLeases also ends its lease and cancels its reservations. */
+  async removeHubDevice(id: string, opts: { endLeases?: boolean; signal?: AbortSignal } = {}): Promise<Envelope> {
+    return this.transport.json<Envelope>(
+      withQuery(`/v1/config/devices/${encodeURIComponent(id)}`, { endLeases: opts.endLeases }),
+      { method: 'DELETE', signal: this.sig(opts.signal) },
+    )
   }
 
   /**
@@ -573,16 +649,75 @@ export class MaestroD {
     return res.device
   }
 
+  private async lookupGrant(id: string, signal?: AbortSignal): Promise<Lease> {
+    let lease: Lease
+    try {
+      lease = (await this.transport.json<Envelope & { lease: Lease }>(
+        `/v1/leases/${encodeURIComponent(id)}`, { signal },
+      )).lease
+    } catch (err) {
+      if (err instanceof MaestroError && err.code === 'LEASE_EXPIRED') this.forgetLease({ id })
+      throw err
+    }
+    if (lease.id !== id) throw MaestroError.of('LEASE_EXPIRED', 'the hub returned a different grant')
+    return lease
+  }
+
+  private async activeGrant(grant: string, signal?: AbortSignal): Promise<Lease> {
+    const lease = await this.lookupGrant(grant, signal)
+    if (lease.state === 'scheduled') throw MaestroError.of('LEASE_NOT_STARTED', 'the lease has not started')
+    if (lease.state !== 'active') throw MaestroError.of('LEASE_EXPIRED', 'the lease is no longer active')
+    if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
+    return lease
+  }
+
+  // A string may be both a stale handle's serial and a sibling's current
+  // serial. Only a grant ID can disambiguate those two callers.
+  private emulatorGrant(id: string): string | undefined {
+    const matches = (alias?: string) => alias !== undefined && (alias === id || alias.split('@')[0] === id)
+    const grants = new Set<string>()
+    for (const [key, aliases] of this.emulatorAliases) {
+      if ([...aliases].some(matches)) grants.add(key)
+    }
+    for (const r of loadLeases()) {
+      if (r.hub === this.leaseKey && [r.device, r.originalDevice, r.requestedDevice].some(matches)) grants.add(r.id)
+    }
+    for (const [device, key] of this.transport.leases) {
+      if (matches(device)) grants.add(key)
+    }
+    if (grants.size > 1) throw MaestroError.of('USAGE', 'multiple grants match this emulator target; pass its leased device handle')
+    return grants.values().next().value
+  }
+
+  private async lifecycleTarget(target: string | MaestroDevice, signal?: AbortSignal): Promise<{ id: string; lease?: string | null }> {
+    let grant: string | undefined
+    if (typeof target !== 'string') {
+      if (target.daemon !== this) throw MaestroError.of('USAGE', 'the device belongs to another daemon connection')
+      grant = target.lease?.id
+      if (this.leasing && !grant) throw MaestroError.of('USAGE', 'the device handle has no grant')
+      target = target.id
+    }
+    const id = target
+    if (!this.leasing || !isEmulatorTarget(id)) return { id, lease: grant }
+    grant ??= this.emulatorGrant(id)
+    if (!grant) return { id, lease: null }
+    const lease = await this.activeGrant(grant, signal)
+    this.recordLease(lease, undefined, false)
+    return { id: lease.device, lease: lease.id }
+  }
+
   /**
-   * Delete a simulator or AVD by id, name or `avd:<name>`, detaching and
+   * Delete a simulator or AVD by handle, id, name or `avd:<name>`, detaching and
    * stopping it first. Devices maestro-d did not create are refused with
    * DEVICE_EXTERNAL unless `force`.
    */
-  async deleteDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<DeviceInfo> {
-    if (!id) throw new TypeError('deleteDevice() needs an id')
+  async deleteDevice(target: string | MaestroDevice, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<DeviceInfo> {
+    if (!target) throw new TypeError('deleteDevice() needs an id')
+    const signal = this.sig(opts.signal)
+    const { id, lease } = await this.lifecycleTarget(target, signal)
     const res = await this.transport.json<Envelope & { device: DeviceInfo }>(
       `/v1/devices/${encodeURIComponent(id)}?delete=true` + (opts.force ? '&force=true' : ''),
-      { method: 'DELETE', signal: this.sig(opts.signal) },
+      { method: 'DELETE', signal, lease },
     )
     return res.device
   }
@@ -608,11 +743,13 @@ export class MaestroD {
    * not boot are refused with DEVICE_EXTERNAL unless `force`. A cloud
    * device's session is released, and its device minutes returned.
    */
-  async stopDevice(id: string, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<{ deviceMinutes?: DeviceMinutes }> {
+  async stopDevice(target: string | MaestroDevice, opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<{ deviceMinutes?: DeviceMinutes }> {
+    const signal = this.sig(opts.signal)
+    const { id, lease } = await this.lifecycleTarget(target, signal)
     const res = await this.transport.json<Envelope & { device?: DeviceInfo }>(`/v1/devices/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       body: { force: opts.force === true },
-      signal: this.sig(opts.signal),
+      signal, lease,
     })
     // A cloud device's answer is the released device, with its minutes.
     return res.device?.deviceMinutes ? { deviceMinutes: res.device.deviceMinutes } : {}
@@ -625,39 +762,60 @@ export class MaestroD {
   async attach(opts: DeviceAttachOptions = {}): Promise<MaestroDevice> {
     const { device, signal, ...cfg } = opts
     let id = await this.resolveDevice(device, signal)
+    const sig = this.sig(signal)
+    let lease: Lease | undefined
     if (this.info?.hub) {
-      // A hub lends each device to one client, under a lease the client
-      // took explicitly: md.lease() in this process, or `maestro-d lease`
-      // in the same home (leases.json). This never takes one: without it
-      // the attach goes without a lease, and the hub answers
-      // LEASE_REQUIRED, naming md.lease() and `maestro-d lease`.
-      id = await this.normalize(id, this.sig(signal))
+      if (isEmulatorTarget(id)) {
+        // Match the saved target before discovery: the serial may now belong to another AVD.
+        const matches = (v?: string) => v !== undefined && (v === id || v.split('@')[0] === id)
+        const candidates = loadLeases().filter(r => r.hub === this.leaseKey &&
+          [r.device, r.originalDevice, r.requestedDevice].some(matches))
+        if (new Set(candidates.map(r => r.device.split('@')[1])).size > 1) throw MaestroError.of('USAGE', 'qualify the emulator target with its hub name')
+        const original = candidates.filter(r => matches(r.originalDevice ?? r.device) || matches(r.requestedDevice))
+        const grants = original.length ? original : candidates
+        const rec = currentLease(grants)
+        if (rec) {
+          lease = await this.lookupGrant(rec.id, sig)
+          if (this.transport.leases.get(rec.device) === rec.id) this.transport.leases.delete(rec.device)
+          if (!lease.device) throw MaestroError.of('DEVICE_NOT_FOUND', 'the leased emulator is unavailable')
+          id = lease.device
+          this.transport.leases.set(id, lease.id)
+        }
+      }
+      if (!lease) {
+        // An unshared device is visible only with its credential, even for discovery.
+        let held = this.heldLease(id)
+        if (held) {
+          id = held.device
+        } else {
+          id = await this.normalize(id, sig)
+          held = this.heldLease(id)
+        }
+        const key = this.transport.leases.get(id)
+        lease = key ? this.leased.get(key)?.lease : undefined
+        if (!lease && held) lease = { ...held, expiresAt: held.expiresAt ?? '', ttlSec: held.ttlSec ?? 0 }
+      }
     }
-    const held = this.info?.hub ? this.heldLease(id) : undefined
-    const info = await this.openAttach(id, cfg, this.sig(signal))
-    const dev = new MaestroDevice(this.transport, this, info, anySignal(signal, this.signal))
-    const own = this.leased.get(id)
-    if (own?.lease) {
-      dev.holdLease(own.lease, { onRenew: (l) => this.recordLease(l), onRelease: (_d, l) => this.forgetLease(l) })
-    } else if (held) {
-      // A lease from leases.json: this handle may renew or release it, but
-      // close() leaves it to the shell that took it.
-      const lease: Lease = { id: held.id, device: id, expiresAt: held.expiresAt ?? '', ttlSec: held.ttlSec ?? 0 }
-      if (held.holder) lease.holder = held.holder
-      dev.holdLease(lease, { onRenew: (l) => this.recordLease(l), onRelease: (_d, l) => this.forgetLease(l) })
-    }
-    return dev
+    const attach = savedAttach(cfg)
+    const info = await this.openAttach(this.attachBase(id, lease), attach, sig)
+    return lease ? this.bindDevice(info, lease, attach, sig, false) : new MaestroDevice(this.transport, this, info, sig)
+  }
+
+  private attachBase(id: string, lease?: Lease): DeviceBase {
+    return lease && isEmulatorTarget(id)
+      ? (signal) => this.activeGrant(lease.id, signal)
+      : `/v1/devices/${encodeURIComponent(id)}`
   }
 
   /** POST …/attach, uploading the app file first on a hub. */
-  private async openAttach(id: string, cfg: AttachOptions, signal?: AbortSignal): Promise<DeviceInfo> {
-    const base = `/v1/devices/${encodeURIComponent(id)}`
+  private async openAttach(base: DeviceBase, cfg: AttachOptions, signal?: AbortSignal): Promise<DeviceInfo> {
+    cfg = { ...cfg }
     if (this.transport.hub && cfg.appFile && !cfg.appFile.startsWith('blob:')) {
       // The app file is on this machine: upload it and send a blob ref (a
       // hub refuses its own host paths, and any Appium extra.capsFile).
       cfg.appFile = (await uploadPath(this.transport, base, path.resolve(cfg.appFile), this.sig(signal))).ref
     }
-    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(`${base}/attach`, {
+    const res = await this.transport.json<Envelope & { device: DeviceInfo }>(devicePath(base, '/attach'), {
       method: 'POST',
       body: cfg,
       signal: this.sig(signal),
@@ -671,10 +829,12 @@ export class MaestroD {
   }
 
   /** Close the driver on a device by id. */
-  async detach(id: string, opts: { signal?: AbortSignal } = {}): Promise<void> {
+  async detach(target: string | MaestroDevice, opts: { signal?: AbortSignal } = {}): Promise<void> {
+    const signal = this.sig(opts.signal)
+    const { id, lease } = await this.lifecycleTarget(target, signal)
     await this.transport.json<Envelope>(`/v1/devices/${encodeURIComponent(id)}/detach`, {
       method: 'POST',
-      signal: this.sig(opts.signal),
+      signal, lease,
     })
   }
 
@@ -799,6 +959,12 @@ function readCA(ca: string | Buffer | undefined): string | Buffer | undefined {
 function baseURL(url: string): string {
   const u = url.replace(/\/+$/, '')
   return u.includes('://') ? u : `http://${u}`
+}
+
+function savedAttach(config: AttachOptions): AttachOptions {
+  const copy = structuredClone(config)
+  if (copy.appFile && !copy.appFile.startsWith('blob:')) copy.appFile = path.resolve(copy.appFile)
+  return copy
 }
 
 /** True when an attach would upload a file of this machine (a hub refuses host paths). */

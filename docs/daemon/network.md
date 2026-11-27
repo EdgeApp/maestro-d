@@ -64,27 +64,6 @@ number — is written into that device's calls; maestro-d never looks
 anything up. Where the file is read, and its other keys, are in
 [config.md](config.md).
 
-### The older network.json
-
-A host with no `config.json` reads `<home>/network.json`, or the file
-`--network-config` (deprecated; `MAESTRO_D_NETWORK_CONFIG`) names. It holds
-only the calls, keyed by device id, and shares no device:
-
-```json
-{
-  "devices": {
-    "EXAMPLEPIXEL01": {
-      "setTrafficShape": { "method": "PUT", "url": "http://other-shaper.example/devices/7?mbit=${mbit}" },
-      "resetTrafficShape": { "method": "DELETE", "url": "http://other-shaper.example/devices/7" }
-    }
-  }
-}
-```
-
-Each device needs both calls. To move to `config.json`, list each device in
-`hubDevices` with its two calls under `trafficShaping`; once `config.json`
-exists, `network.json` is no longer read.
-
 ### A call
 
 | Key | | Meaning |

@@ -42,7 +42,7 @@ func TestClient_Stream(t *testing.T) {
 			return
 		case "expired":
 			w.Header().Set(HeaderErrorCode, string(CodeLeaseExpired))
-			writeError(w, Errorf(CodeLeaseExpired, "lease L1 ended"))
+			WriteError(w, Errorf(CodeLeaseExpired, "lease L1 ended"))
 			return
 		case "slow":
 			select {
@@ -160,6 +160,61 @@ func TestClient_Stream(t *testing.T) {
 	dead := NewHTTPClient("127.0.0.1:1", "", nil)
 	if _, err = dead.Stream(ctx, "dev-1", StreamOptions{}, io.Discard); codeOf(t, err) != CodeDaemonUnavailable {
 		t.Fatalf("unreachable: %v", err)
+	}
+}
+
+func TestClient_StreamReattach(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		reject bool
+	}{
+		{name: "verified target"},
+		{name: "second rejection", reject: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame := box("ftyp", 16)
+			var requests atomic.Int32
+			hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempt := requests.Add(1)
+				wantID := "old@hub"
+				if attempt == 2 {
+					wantID = "current@hub"
+				}
+				if r.URL.Path != "/v1/devices/"+wantID+"/stream" || r.Header.Get(HeaderLease) != "held" ||
+					r.URL.Query().Get("fps") != "30" || r.Header.Get("Accept") != "video/mp4" {
+					t.Errorf("stream attempt %d: %s, headers %v", attempt, r.URL, r.Header)
+				}
+				if attempt == 1 || test.reject {
+					WriteError(w, Errorf(CodeDeviceNotAttached, "attach first"))
+					return
+				}
+				_, _ = w.Write(frame)
+			}))
+			defer hs.Close()
+			c := NewHTTPClient(hs.URL, "", nil)
+			c.SetLease("old@hub", "held")
+			var out bytes.Buffer
+			starts, attachments := 0, 0
+			c.SetReattach(func(_ context.Context, id, lease string) (string, error) {
+				attachments++
+				if id != "old@hub" || lease != "held" || starts != 0 || out.Len() != 0 {
+					t.Fatalf("reattach %s, lease %s, %d starts, %d bytes", id, lease, starts, out.Len())
+				}
+				return "current@hub", nil
+			})
+			opts := StreamOptions{FPS: 30, OnStart: func(StreamInfo) { starts++ }}
+			_, err := c.Stream(context.Background(), "old@hub", opts, &out)
+			if attachments != 1 || requests.Load() != 2 {
+				t.Fatalf("got %d reattachments and %d requests: %v", attachments, requests.Load(), err)
+			}
+			if test.reject {
+				if codeOf(t, err) != CodeDeviceNotAttached || starts != 0 || out.Len() != 0 {
+					t.Fatalf("second rejection: %v, %d starts, %d bytes", err, starts, out.Len())
+				}
+			} else if err != nil || starts != 1 || !bytes.Equal(out.Bytes(), frame) {
+				t.Fatalf("recovered stream: %v, %d starts, %x", err, starts, out.Bytes())
+			}
+		})
 	}
 }
 

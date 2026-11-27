@@ -14,6 +14,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
+	"github.com/devicelab-dev/maestro-runner/pkg/core"
+	"github.com/devicelab-dev/maestro-runner/pkg/driver/mock"
 )
 
 func TestIdemCache_WaitReplayExpireBound(t *testing.T) {
@@ -67,7 +71,7 @@ func slowCommandEnv(t *testing.T, delay, grace time.Duration) (*Server, string) 
 	t.Helper()
 	t.Setenv(EnvHome, t.TempDir())
 	var n int32
-	s := New(Config{Name: "idem", ReportsDir: t.TempDir(), HTTPAddr: "0.0.0.0:7433", Token: "t"}, testDeps(&n, delay))
+	s := New(Config{Name: "idem", ReportsDir: t.TempDir(), Hub: handlerTestHub{NewTestHub()}, HTTPAddr: "127.0.0.1:7433", Token: "t"}, testDeps(&n, delay))
 	if grace > 0 {
 		s.idemGrace = grace
 	}
@@ -215,12 +219,12 @@ func TestClient_RetriesWithTheSameID(t *testing.T) {
 			conn, _, _ := hj.Hijack()
 			_ = conn.Close()
 		case 2: // the owner's hub is unreachable
-			writeError(w, Errorf(CodePeerUnavailable, "hub hub-a is unreachable").WithDetails("hub", "hub-a"))
+			WriteError(w, Errorf(CodePeerUnavailable, "hub hub-a is unreachable").WithDetails("hub", "hub-a"))
 		case 3: // a gateway's error page
 			w.WriteHeader(http.StatusGatewayTimeout)
 			_, _ = w.Write([]byte("<html>gateway timeout</html>"))
 		default:
-			writeJSON(w, 200, StepResult{Envelope: Envelope{OK: true}, Step: "tapOn", Type: "tapOn"})
+			WriteJSON(w, 200, StepResult{Envelope: Envelope{OK: true}, Step: "tapOn", Type: "tapOn"})
 		}
 	}))
 	defer hs.Close()
@@ -260,7 +264,7 @@ func TestClient_NoRetryForFinalAnswers(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		writeError(w, Errorf(CodeDeviceError, "the driver died"))
+		WriteError(w, Errorf(CodeDeviceError, "the driver died"))
 	}))
 	defer hs.Close()
 	c := NewHTTPClient(hs.URL, "", nil)
@@ -355,5 +359,101 @@ func TestRetryClassification(t *testing.T) {
 	cancel()
 	if err := sleepCtx(ctx, time.Hour); err == nil {
 		t.Fatal("sleepCtx ignores cancellation")
+	}
+}
+
+// A retry joined to a running attempt runs under the lease too, so the
+// lease ending cancels its context. Its client is still connected: it gets
+// the running attempt's outcome, never an empty 200.
+func TestLeases_JoinedRetryAnsweredWhenTheLeaseEnds(t *testing.T) {
+	env := newCallerEnv(t, Config{Hub: NewTestHub(), Token: "t", DeviceConfig: daemontest.DeviceConfig(t, "mock-1")})
+	var cleanups int32
+	driver := testDeps(&cleanups, 0).NewDriver
+	env.s.deps.NewDriver = func(ctx context.Context, id string, cfg AttachConfig) (core.Driver, DriverInfo, func(), error) {
+		d, info, cleanup, err := driver(ctx, id, cfg)
+		if err != nil {
+			return nil, info, cleanup, err
+		}
+		return &daemontest.SlowDriver{Driver: d.(*mock.Driver), Delay: 5 * time.Second}, info, cleanup, nil
+	}
+	lr, err := env.remote.AcquireLease(context.Background(), LeaseRequest{Device: "mock-1", Attach: &AttachConfig{Platform: "mock"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := lr.Lease
+	hs := httptest.NewServer(fromAddr("192.0.2.20:40000", env.s.TCPHandler()))
+	t.Cleanup(hs.Close)
+	type answer struct {
+		status   int
+		replayed string
+		body     string
+		err      error
+	}
+	post := func() chan answer {
+		out := make(chan answer, 1)
+		go func() {
+			req, _ := http.NewRequest(http.MethodPost, hs.URL+"/v1/devices/mock-1/commands/runFlow", strings.NewReader(slowCount("n")))
+			req.Header.Set("Authorization", "Bearer t")
+			req.Header.Set(HeaderRequestID, "lost-answer")
+			req.Header.Set(HeaderLease, l.ID)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				out <- answer{err: err}
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			out <- answer{status: resp.StatusCode, replayed: resp.Header.Get(HeaderReplayed), body: string(b)}
+		}()
+		return out
+	}
+	entry := func() *idemEntry {
+		env.s.idem.mu.Lock()
+		defer env.s.idem.mu.Unlock()
+		if d := env.s.idem.devices["mock-1"]; d != nil {
+			return d.entries["lost-answer"]
+		}
+		return nil
+	}
+	first := post()
+	waitFor(t, func() bool { return entry() != nil })
+	retry := post()
+	waitFor(t, func() bool { return entry().joined.Load() })
+	if _, err := env.remote.ReleaseLease(context.Background(), l.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := <-retry
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.body == "" || got.replayed != "true" {
+		t.Fatalf("the joined retry: status %d, replayed %q, body %q", got.status, got.replayed, got.body)
+	}
+	if want := <-first; want.err != nil || want.status != got.status || want.body != got.body {
+		t.Fatalf("the retry's answer differs from the attempt's: %+v vs %+v", got, want)
+	}
+	// The teardown writes the session's report as it detaches: wait for
+	// it before the report directory is removed.
+	waitFor(t, func() bool {
+		d, err := env.local.Device(context.Background(), "mock-1")
+		return err == nil && d.Available
+	})
+}
+
+func TestIdemCacheKeepsRunningKeysAtCapacity(t *testing.T) {
+	c := newIdemCache()
+	first, _ := c.begin("", "0")
+	for i := 1; i < idemPerDevice; i++ {
+		c.begin("", fmt.Sprint(i))
+	}
+	if e, run := c.begin("", "excess"); e != nil || run {
+		t.Fatal("unresolved request evicted")
+	}
+	if e, run := c.begin("", "0"); e != first || run {
+		t.Fatal("lost original running request")
+	}
+	c.finish(first, 200, nil, nil)
+	if _, run := c.begin("", "excess"); !run {
+		t.Fatal("completed request still occupies the last slot")
 	}
 }

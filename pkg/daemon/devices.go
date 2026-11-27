@@ -36,6 +36,7 @@ const (
 type Registry struct {
 	mu      sync.Mutex
 	name    string
+	runDir  string
 	records map[string]*DeviceInfo
 	sim     *simulator.Manager
 	emu     *emulator.Manager
@@ -56,6 +57,7 @@ type Registry struct {
 func NewRegistry(name string, list func(platform string) []DeviceInfo) *Registry {
 	r := &Registry{
 		name:    name,
+		runDir:  RunDir(name),
 		records: map[string]*DeviceInfo{},
 		sim:     simulator.NewManager(),
 		emu:     emulator.NewManager(),
@@ -91,7 +93,12 @@ func (r *Registry) Live(platform string) []DeviceInfo {
 // tagged with bootedBy/attached from the records; records for devices that
 // vanished are dropped.
 func (r *Registry) List(platform string) []DeviceInfo {
-	live := r.Live(platform)
+	return r.ListDiscovered(platform, r.Live(platform))
+}
+
+// ListDiscovered applies the current registry records to a discovery result.
+// The dashboard can reflect a lease or attachment while the next scan runs.
+func (r *Registry) ListDiscovered(platform string, live []DeviceInfo) []DeviceInfo {
 	created := loadCreated()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -108,6 +115,8 @@ func (r *Registry) List(platform string) []DeviceInfo {
 			d.Attached = rec.Attached
 			d.AttachedAt = rec.AttachedAt
 			d.AppID = rec.AppID
+			d.AppVersion = rec.AppVersion
+			d.AppBuild = rec.AppBuild
 			d.Driver = rec.Driver
 			d.ReportDir = rec.ReportDir
 			d.Busy = rec.Busy
@@ -193,11 +202,11 @@ func (r *Registry) persistLocked() {
 	if r.name == "" {
 		return
 	}
-	if err := os.MkdirAll(RunDir(r.name), 0o700); err != nil {
+	if err := os.MkdirAll(r.runDir, 0o700); err != nil {
 		logger.Warn("devices.json: %v", err)
 		return
 	}
-	if err := atomicWriteJSON(DevicesPath(r.name), r.snapshotLocked()); err != nil {
+	if err := atomicWriteJSON(filepath.Join(r.runDir, devicesFile), r.snapshotLocked()); err != nil {
 		logger.Warn("devices.json: %v", err)
 	}
 }
@@ -223,6 +232,8 @@ func (r *Registry) MarkAttached(info DeviceInfo) {
 	rec.Attached = true
 	rec.AttachedAt = nowRFC3339()
 	rec.AppID = info.AppID
+	rec.AppVersion = info.AppVersion
+	rec.AppBuild = info.AppBuild
 	rec.Driver = info.Driver
 	rec.ReportDir = info.ReportDir
 	rec.Busy = false
@@ -241,6 +252,8 @@ func (r *Registry) MarkDetached(id string) {
 	rec.Attached = false
 	rec.AttachedAt = ""
 	rec.AppID = ""
+	rec.AppVersion = ""
+	rec.AppBuild = ""
 	rec.Driver = ""
 	rec.Busy = false
 	if rec.BootedBy != BootedByDaemon {
@@ -301,7 +314,7 @@ func (r *Registry) Boot(ctx context.Context, req BootRequest) (DeviceInfo, error
 	}
 	platform := strings.ToLower(req.Platform)
 	if platform == "" {
-		p, e := r.inferBootPlatform(req.Name)
+		p, e := r.InferBootPlatform(req.Name)
 		if e != nil {
 			return DeviceInfo{}, e
 		}
@@ -392,11 +405,11 @@ func (r *Registry) findLive(platform, id string) (DeviceInfo, bool) {
 	return DeviceInfo{}, false
 }
 
-// inferBootPlatform picks the platform of a device start without
+// InferBootPlatform picks the platform of a device start without
 // --platform: avd:<name> is android, and otherwise the id or name must match
 // a listed device (a simulator by name or UDID, an AVD by name, a running
 // emulator or device by serial).
-func (r *Registry) inferBootPlatform(name string) (string, *Error) {
+func (r *Registry) InferBootPlatform(name string) (string, *Error) {
 	if strings.HasPrefix(name, AVDPrefix) {
 		return "android", nil
 	}
@@ -425,6 +438,11 @@ func (r *Registry) Stop(id string, force bool) error {
 	if !ok {
 		return Errorf(CodeDeviceNotFound, "device %s not found", id)
 	}
+	return r.stopDevice(info, force)
+}
+
+func (r *Registry) stopDevice(info DeviceInfo, force bool) error {
+	id := info.ID
 	if strings.HasPrefix(info.ID, AVDPrefix) {
 		return nil // a shut-down AVD: nothing to stop
 	}
@@ -445,6 +463,11 @@ func (r *Registry) Stop(id string, force bool) error {
 	return nil
 }
 
+// StopLeaseBoot discharges a durable boot duty using the identified device.
+func (r *Registry) StopLeaseBoot(d DeviceInfo) error {
+	return r.stopDevice(d, true)
+}
+
 // shutdownDevice shuts a simulator or emulator down regardless of who
 // booted it.
 func shutdownDevice(info DeviceInfo) error {
@@ -463,6 +486,16 @@ func shutdownDevice(info DeviceInfo) error {
 		return Errorf(CodeUsage, "device %s is a physical device and cannot be stopped", info.ID)
 	}
 	return nil
+}
+
+// PreserveBoot transfers shutdown ownership from this process to a durable lease.
+func (r *Registry) PreserveBoot(id, avdName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rec := r.records[id]; rec != nil && rec.BootedBy == BootedByDaemon && (avdName == "" || strings.EqualFold(avdName, rec.Name)) {
+		rec.BootedBy = BootedByExternal
+		r.persistLocked()
+	}
 }
 
 // ShutdownOwned stops every device this daemon booted that is still
@@ -501,6 +534,10 @@ type OrphanOptions struct {
 	// ReleaseCloud releases a dead daemon's cloud session. Nil leaves every
 	// cloud ledger entry in place, reported as unreleased.
 	ReleaseCloud func(ctx context.Context, e CloudEntry) (*cloudprov.DeviceMinutes, error)
+	// HubProtected reports a device the stopped hub's leases or boot duties
+	// still cover; its next start restores them. Nil leaves the hub's
+	// registry alone.
+	HubProtected func(DeviceInfo) bool
 }
 
 // OrphanResult is what StopOrphans did.
@@ -530,6 +567,89 @@ type UnreleasedCloud struct {
 	Error       string `json:"error"`
 }
 
+// BootKey names a shut-down device in the booting reservations so that
+// the ready device it becomes matches too: a simulator keeps its UDID,
+// and an AVD becomes an emulator serial listed under the AVD's name.
+func BootKey(d DeviceInfo) string {
+	if name, ok := strings.CutPrefix(d.ID, AVDPrefix); ok {
+		return "android:" + strings.ToLower(name)
+	}
+	return d.ID
+}
+
+// AVDKey is the BootKey of the AVD that Android device d is listed under
+// (a running emulator's name is its AVD's, and a shut-down AVD is listed
+// as avd:<name>), or "" for any other device. A phone has none: phones are
+// named too, and two of one model share a name.
+func AVDKey(d DeviceInfo) string {
+	if strings.HasPrefix(d.ID, AVDPrefix) {
+		return BootKey(d)
+	}
+	if d.Platform != "android" || d.Name == "" {
+		return ""
+	}
+	if d.Kind != "emulator" && !strings.HasPrefix(d.ID, "emulator-") {
+		return ""
+	}
+	return "android:" + strings.ToLower(d.Name)
+}
+
+// HubLeasesPath is the singleton hub's lease journal.
+func HubLeasesPath() string { return filepath.Join(Home(), "hub", "leases.json") }
+
+// HubOrphanGuard reports the devices a stopped hub's lease journal still
+// covers: the device or AVD of every unfinished window, and every boot duty.
+// device stop --orphans leaves them for the hub's next start. An unreadable
+// journal protects every device. The client reads the journal itself, since
+// it never links the hub.
+func HubOrphanGuard() func(DeviceInfo) bool {
+	var journal struct {
+		Version int `json:"version"`
+		Leases  []struct {
+			Device    string `json:"device"`
+			AVD       string `json:"avd"`
+			ExpiresAt string `json:"expiresAt"`
+		} `json:"leases"`
+		BootDuties []struct {
+			Device string `json:"device"`
+			AVD    string `json:"avd"`
+		} `json:"bootDuties"`
+	}
+	data, err := os.ReadFile(HubLeasesPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return func(DeviceInfo) bool { return false }
+	}
+	if err == nil {
+		if err = json.Unmarshal(data, &journal); err == nil && journal.Version != 2 {
+			err = fmt.Errorf("unsupported leases version %d", journal.Version)
+		}
+	}
+	if err != nil {
+		logger.Warn("hub leases: %v; device stop --orphans keeps the hub's devices", err)
+		return func(DeviceInfo) bool { return true }
+	}
+	now := time.Now()
+	ids, avds := make(map[string]bool), make(map[string]bool)
+	add := func(device, avd string) {
+		ids[device] = true
+		if avd != "" {
+			avds[avd] = true
+		}
+	}
+	for _, r := range journal.Leases {
+		if end, err := time.Parse(time.RFC3339, r.ExpiresAt); err != nil || now.Before(end) {
+			add(r.Device, r.AVD)
+		}
+	}
+	for _, d := range journal.BootDuties {
+		add(d.Device, d.AVD)
+	}
+	return func(d DeviceInfo) bool {
+		key := AVDKey(d)
+		return ids[d.ID] || (key != "" && avds[key])
+	}
+}
+
 // StopOrphans shuts down devices recorded as daemon-booted by daemons that
 // are no longer alive and removes their run files, and releases the cloud
 // sessions the cloud ledger holds for dead daemons. Used by `device stop
@@ -541,22 +661,46 @@ func StopOrphans(ctx context.Context, opts OrphanOptions) (*OrphanResult, error)
 	}
 	res := &OrphanResult{}
 	var errs []error
-	for _, d := range daemons {
-		if d.Alive {
-			continue
-		}
-		for _, dev := range d.Devices {
+	// stop shuts down the devices a dead process booted and returns the ones
+	// it must keep on record.
+	stop := func(name string, devices []DeviceInfo, protected func(DeviceInfo) bool) []DeviceInfo {
+		var kept []DeviceInfo
+		for _, dev := range devices {
 			// The ledger pass below owns cloud devices.
-			if dev.BootedBy != BootedByDaemon || dev.Provider != "" {
+			if dev.BootedBy != BootedByDaemon || dev.Provider != "" || FindDeviceOwner(dev.ID, name) != nil {
+				continue
+			}
+			if protected != nil && protected(dev) {
+				kept = append(kept, dev)
 				continue
 			}
 			if err := shutdownDevice(dev); err != nil {
-				errs = append(errs, fmt.Errorf("%s (%s): %w", dev.ID, d.Name, err))
+				errs = append(errs, fmt.Errorf("%s (%s): %w", dev.ID, name, err))
+				kept = append(kept, dev)
 				continue
 			}
 			res.Stopped = append(res.Stopped, dev.ID)
 		}
+		return kept
+	}
+	for _, d := range daemons {
+		if d.Alive {
+			continue
+		}
+		stop(d.Name, d.Devices, nil)
 		RemoveRunFiles(d.Name)
+	}
+	// The singleton hub records the devices it booted under its own run dir.
+	if dir := HubRunDir(); opts.HubProtected != nil && !pidLive(dir) {
+		if devices := readDevicesAt(dir); len(devices) > 0 {
+			path := filepath.Join(dir, devicesFile)
+			kept := stop("hub", devices, opts.HubProtected)
+			if len(kept) == 0 {
+				_ = os.Remove(path)
+			} else if err := atomicWriteJSON(path, kept); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
 	releaseOrphanedCloud(ctx, opts, res)
 	return res, errors.Join(errs...)

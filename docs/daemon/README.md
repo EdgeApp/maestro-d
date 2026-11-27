@@ -79,7 +79,8 @@ curl http://127.0.0.1:7788 ──┘   (or TCP)         (one process per --daemo
   Simulators/emulators booted through the daemon (`device start`,
   `POST /v1/devices`) are recorded in `devices.json` and shut down at exit;
   `device stop --force` overrides the rule for one device and
-  `device stop --orphans` cleans up after a daemon that died.
+  `device stop --orphans` cleans up after a daemon that died. For a stopped
+  hub it skips the devices its unfinished leases and boot duties still cover.
 
 ## Files
 

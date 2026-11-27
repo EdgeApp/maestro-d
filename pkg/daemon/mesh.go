@@ -40,8 +40,9 @@ type HubStatus struct {
 	// Addr is the --advertise address ("" when peers use the link's).
 	Addr string `json:"addr,omitempty"`
 	// Listen is the bound client and peer listener.
-	Listen string `json:"listen,omitempty"`
-	TLS    bool   `json:"tls,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+	WebAddr string `json:"webAddr,omitempty"`
+	TLS     bool   `json:"tls,omitempty"`
 	// MDNS is false with --no-mdns.
 	MDNS  bool      `json:"mdns"`
 	Peers []HubPeer `json:"peers"`
@@ -95,11 +96,48 @@ func (c *Client) DeviceList(ctx context.Context, platform string) (*DevicesResul
 
 // DeviceListQuery is DeviceList filtered by q.
 func (c *Client) DeviceListQuery(ctx context.Context, q DeviceQuery) (*DevicesResult, error) {
-	var out DevicesResult
-	if e := c.call(ctx, http.MethodGet, withQuery("/v1/devices", q.Values()), nil, &out); e != nil {
-		return nil, e
+	var leases []string
+	c.leaseMu.Lock()
+	for _, lease := range c.leases {
+		leases = append(leases, lease)
 	}
-	return &out, nil
+	c.leaseMu.Unlock()
+	if c.StoredLeases != nil {
+		leases = append(leases, c.StoredLeases()...)
+	}
+	slices.Sort(leases)
+	leases = slices.Compact(leases)
+	leases = slices.DeleteFunc(leases, func(s string) bool { return s == "" })
+	if len(leases) == 0 {
+		leases = []string{""}
+	}
+	path := withQuery("/v1/devices", q.Values())
+	seenDevices := map[string]bool{}
+	seenHubs := map[string]bool{}
+	merged := DevicesResult{Devices: []DeviceInfo{}}
+	for _, lease := range leases {
+		var page DevicesResult
+		if e := c.callWithLease(ctx, http.MethodGet, path, nil, &page, lease); e != nil {
+			return nil, e
+		}
+		if len(leases) == 1 {
+			return &page, nil
+		}
+		merged.Envelope = page.Envelope
+		for _, d := range page.Devices {
+			if !seenDevices[d.ID] {
+				seenDevices[d.ID] = true
+				merged.Devices = append(merged.Devices, d)
+			}
+		}
+		for _, peer := range page.Unreachable {
+			if !seenHubs[peer.Hub] {
+				seenHubs[peer.Hub] = true
+				merged.Unreachable = append(merged.Unreachable, peer)
+			}
+		}
+	}
+	return &merged, nil
 }
 
 // asError is err as an *Error (DAEMON_UNAVAILABLE when it is not one).
@@ -111,10 +149,10 @@ func asError(err error) *Error {
 	return WrapErr(CodeDaemonUnavailable, err)
 }
 
-// hostIdentity is what a hub's device entries carry to name the machine
+// HostIdentity is what a hub's device entries carry to name the machine
 // they are attached to: the machine name (MachineName), and the hub's
 // --advertise address followed by the host's non-loopback IPs.
-func (s *Server) hostIdentity() (machine string, addrs []string) {
+func (s *Server) HostIdentity() (machine string, addrs []string) {
 	machine = MachineName()
 	if s.cfg.Advertise != "" {
 		addrs = append(addrs, s.cfg.Advertise)

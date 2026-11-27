@@ -21,6 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/internal/daemontest"
+	"github.com/devicelab-dev/maestro-runner/pkg/hubd"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/cloudprov"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
@@ -188,8 +191,8 @@ func withCloud(max int) hubOpt {
 	return func(c *Config, d *daemon.Config) { c.Cloud, d.CloudMaxDevices = []string{"devicefarm"}, max }
 }
 
-func withShare(ids ...string) hubOpt {
-	return func(_ *Config, d *daemon.Config) { d.ShareDevices = ids }
+func withShare(t *testing.T, ids ...string) hubOpt {
+	return func(_ *Config, d *daemon.Config) { d.DeviceConfig = daemontest.DeviceConfig(t, ids...) }
 }
 
 func testDevices(prefix string) []daemon.DeviceInfo {
@@ -225,16 +228,18 @@ func launchHub(t *testing.T, name string, devs []daemon.DeviceInfo, opts ...hubO
 		setupHome(t)
 	}
 	mcfg := fastConfig(name)
-	dcfg := daemon.Config{Name: name, HTTPAddr: "127.0.0.1:0", Token: testToken, Hub: true, HubName: name}
+	dcfg := daemon.Config{Name: name, HTTPAddr: "127.0.0.1:0", Token: testToken, Hub: &hubd.Server{}, HubName: name}
 	for _, o := range opts {
 		o(&mcfg, &dcfg)
 	}
-	if dcfg.ShareDevices == nil && dcfg.ShareConfig == nil {
+	if dcfg.DeviceConfig == "" {
 		// A hub shares only what it names: by default a test hub shares
 		// the devices it was started with.
+		var ids []string
 		for _, d := range devs {
-			dcfg.ShareDevices = append(dcfg.ShareDevices, d.ID)
+			ids = append(ids, d.ID)
 		}
+		dcfg.DeviceConfig = daemontest.DeviceConfig(t, ids...)
 	}
 	h := &testHub{t: t, name: name, done: make(chan error, 1)}
 	mcfg.Logf = func(format string, args ...any) {

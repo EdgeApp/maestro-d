@@ -16,10 +16,6 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/daemon"
 )
 
-func withNetworkConfig(path string) hubOpt {
-	return func(_ *Config, d *daemon.Config) { d.NetworkConfig = path }
-}
-
 func withDeviceConfig(path string) hubOpt {
 	return func(_ *Config, d *daemon.Config) { d.DeviceConfig = path }
 }
@@ -40,15 +36,15 @@ func TestMesh_TrafficShapingRunsOnTheOwner(t *testing.T) {
 
 	dir := t.TempDir()
 	aConfig := filepath.Join(dir, "a.json")
-	data, _ := json.Marshal(map[string]any{"devices": map[string]any{"a1": map[string]any{
+	data, _ := json.Marshal(map[string]any{"hubDevices": []any{map[string]any{"id": "a1", "trafficShaping": map[string]any{
 		"setTrafficShape":   map[string]any{"method": "PUT", "url": shaper.URL + "/a1", "body": map[string]any{"loss": "${lossPct}"}},
 		"resetTrafficShape": map[string]any{"method": "DELETE", "url": shaper.URL + "/a1"},
-	}}})
+	}}}})
 	if err := os.WriteFile(aConfig, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := startHub(t, "hub-a", testDevices("a"), withNetworkConfig(aConfig))
-	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withNetworkConfig(filepath.Join(dir, "none.json")))
+	a := startHub(t, "hub-a", testDevices("a"), withDeviceConfig(aConfig))
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withShare(t, "b1", "b2"))
 	waitLinked(t, a, "hub-b")
 	waitLinked(t, b, "hub-a")
 	c := b.client()
@@ -112,7 +108,7 @@ func TestMesh_DeviceDescriptionFromTheOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := startHub(t, "hub-a", testDevices("a"), withDeviceConfig(aConfig))
-	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withDeviceConfig(filepath.Join(dir, "none.json")))
+	b := startHub(t, "hub-b", testDevices("b"), withPeers(a.addr), withShare(t, "b1", "b2"))
 	waitLinked(t, a, "hub-b")
 	waitLinked(t, b, "hub-a")
 	ctx := context.Background()

@@ -22,7 +22,7 @@
 //
 // In direct mode the AWS credentials are this script's own daemon's. In hub
 // mode (MAESTRO_D_DF_MODE=hub MAESTRO_D_HUB=<host:port> MAESTRO_D_TOKEN=<client
-// token>) the script gets no AWS variables: a hub started with --devicefarm
+// token>) the script gets no AWS variables: maestro-d-hub start --devicefarm
 // holds them, the device is leased (lease({select: {location: 'cloud'}}))
 // rather than created, and the app is installed after the lease, uploaded
 // under it. The

@@ -94,9 +94,30 @@ adds files a flow opens dynamically; a path that cannot be packed rejects
 with `USAGE` naming the step, before anything is sent. `packFlow()`,
 `uploadBundle()` and `fetchBundleOutputs()` are exported for REST callers.
 
-On a hub (`info.hub`, from `maestro-d hub start`) devices are
+To edit this machine's device pool, connect through its hub socket:
+
+```js
+const hub = await MaestroD.connect({ hubSocket: true })
+try {
+  const { path, devices, configError } = await hub.hubDevices()
+  console.log(path, configError ?? devices)
+  const device = await hub.setHubDevice('avd:ci-pixel', { description: 'CI phone' })
+  await hub.removeHubDevice(device.id)
+} finally {
+  await hub.close()
+}
+```
+
+`hubDevices()` lists configured devices in file order and includes offline
+entries with `listed: false`. `setHubDevice(id)` adds a device, keeping any
+existing description. Pass `{description: ''}` to clear it.
+`removeHubDevice(id, {endLeases: true})` ends that device's lease and
+reservations before removal. Over a TCP connection these methods reject
+with a `MaestroError` whose code is `FORBIDDEN` and HTTP status is 403.
+
+On a hub (`info.hub`, from `maestro-d-hub start`) devices are
 [leased](rest.md#leases-hubs), and leasing is always explicit: the library
-never takes a lease on its own. `md.lease({device | select, ttlSec, attach})`
+never takes a lease on its own. `md.lease({device | select, ttlSec, description, attach})`
 normalizes the id through `GET /v1/devices/{id}` (keeping an unlisted one,
 which the hub then refuses with `DEVICE_NOT_FOUND`), takes the lease and
 returns the device's handle, attached unless `attach: false`; the handle
@@ -115,7 +136,14 @@ hub unchanged once `maestro-d lease --device <id>` has run in the same home.
 process took (a shell's lease from `leases.json` stays); against a daemon
 that is not a hub, `release()` does nothing.
 
-**Reservations.** `md.reserve({device | select, startAt, ttlSec, holder})`
+`md.shutdown()` asks the hub to stop and keeps this client’s lease records.
+Use its local Unix socket for shutdown. A TCP refusal leaves the connection
+and its leased devices usable. After restart, a leased device can re-attach
+with its original options and retry a command once. Keep any local app
+file available at the path used for attach. Emulator handles resolve their
+grant by ID before addressing the device, including after a serial change.
+
+**Reservations.** `md.reserve({device | select, startAt, ttlSec, holder, description})`
 reserves a device for a window that starts later
 ([`POST /v1/reservations`](rest.md#post-v1reservations)) and resolves with
 the lease, in `state: 'scheduled'`; `startAt` is a `Date` or an RFC 3339
@@ -136,13 +164,10 @@ reservation that starts first. Every `Lease` carries `startsAt` and
 `state`, each `DeviceInfo` on a hub its `reservations`, and `hubStatus()`
 the hub's `reservationLeadSec`.
 
-`leases.json` locking: the CLI holds an advisory `flock` on
-`leases.json.lock` while it updates the file; Node cannot take one, so the
-library writes the whole file to a temporary file and renames it into
-place. A reader never sees a torn file, but a script and a CLI updating it
-at the same instant can lose one update. Cross-process safety is the
-CLI's: when several processes share a home and lease at once, lease from
-the shell.
+The library uses the local `maestro-d` binary to update `leases.json`.
+It holds the same `leases.json.lock` as the CLI from the read through the
+atomic rename, so concurrent scripts and CLI commands retain each other's
+lease records.
 
 On a hub each `DeviceInfo` also carries `maxSec`, and `machine` and
 `addresses`: the owning machine's host name, and its hub's advertised

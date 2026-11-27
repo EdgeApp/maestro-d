@@ -7,13 +7,8 @@ import (
 	"runtime"
 
 	"github.com/urfave/cli/v2"
-)
 
-// Build info — set at build time via -ldflags.
-var (
-	Version   = "3.4.0"
-	Commit    = "unknown"
-	BuildDate = "unknown"
+	"github.com/devicelab-dev/maestro-runner/pkg/version"
 )
 
 // GlobalFlags are available to all commands.
@@ -134,8 +129,8 @@ func Execute() {
 
 	cli.VersionPrinter = func(c *cli.Context) {
 		fmt.Printf("maestro-d %s (maestro-runner %s)\n", c.App.Version, UpstreamVersion)
-		fmt.Printf("  Commit:  %s\n", Commit)
-		fmt.Printf("  Built:   %s\n", BuildDate)
+		fmt.Printf("  Commit:  %s\n", version.Commit)
+		fmt.Printf("  Built:   %s\n", version.BuildDate)
 		fmt.Printf("  Go:      %s\n", runtime.Version())
 		fmt.Printf("  OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	}
@@ -143,7 +138,7 @@ func Execute() {
 	app := &cli.App{
 		Name:      "maestro-d",
 		Usage:     "Maestro test runner for mobile and web apps, plus a daemon for one-shot commands",
-		Version:   Version,
+		Version:   version.Version,
 		ArgsUsage: "<flow-file-or-folder>...",
 		Description: `MaestroD is maestro-runner plus a persistent daemon: every YAML
 command is also a CLI command, a REST route and a JavaScript method.
@@ -185,7 +180,7 @@ Examples:
 	}
 	app.Commands = append(app.Commands, daemonCommands()...) // maestro-d
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.Run(hubTestArgs(os.Args, allFlags)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
