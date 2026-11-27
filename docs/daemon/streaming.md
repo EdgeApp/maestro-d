@@ -8,7 +8,7 @@ samples (and its audio) are re-wrapped by a pure-Go muxer.
 
 - [The stream API](#the-stream-api): REST, CLI, JavaScript
 - [The viewer](#the-viewer): a page that plays a stream in Chrome
-- [Recording](#recording): `startRecording` / `stopRecording`, `--record`
+- [Recording](#recording): `startRecording` / `stopRecording`, `--record`, and [the browser's](#recording-the-browser)
 - [Errors](#errors): `CAPTURE_UNAVAILABLE` and its reasons
 - [Platforms](#platforms)
 - [Android](#android): scrcpy-server, audio, limits
@@ -167,7 +167,38 @@ capture session, and the file lands with the report:
   written with its real duration (the recorder holds it until its
   track's next sample), so a still screen is one long frame.
 
-Drivers without screen capture keep their own handling of these steps.
+Drivers without screen capture keep their own handling of these steps,
+except the browser, below.
+
+### Recording the browser
+
+The browser (`cdp`, `--platform web`) has no capture session, so it
+cannot stream, but it records: `startRecording` and `stopRecording` take
+the same `path`, follow the same name rules and write the same
+`recordings/<name>.mp4`, served by the same artifacts route.
+
+- `startRecording` starts the page's DevTools screencast
+  (`Page.startScreencast`) at the viewport's size, JPEG at quality 80,
+  and writes each frame with the time the browser drew it to
+  `$TMPDIR/maestro-d-web-recording-<id>/`. Chrome sends a frame only
+  when the page changes, so a still page is one long frame.
+- `stopRecording` stops the screencast and has FFmpeg encode the frames
+  into an H.264 MP4 (FFmpeg's default MP4 encoder; MPEG-4 Part 2 in a
+  build without libx264) of the viewport's size, rounded down to even,
+  each frame shown until the next was drawn and the last until the stop.
+  Its `data` adds the video's length and frame count:
+  `{"path": "recordings/<name>.mp4", "durationMs": 5004, "frames": 287}`.
+  The message reads `Saved recording <path> (5.0 s, 287 frames)`.
+- FFmpeg is the one on the daemon's `PATH`, else `/opt/homebrew/bin/ffmpeg`,
+  `/usr/local/bin/ffmpeg` or `/usr/bin/ffmpeg` (a daemon launchd starts has
+  a short `PATH`). With none, `startRecording` fails before recording:
+  "startRecording: recording the browser needs FFmpeg, which was not found
+  on PATH or in …".
+- The screencast is of the tab that was current at `startRecording`; a
+  `switchTab` or `openTab` during a recording does not follow it.
+- A recording left running is encoded when the flow or session ends;
+  closing the web session without one discards its frames.
+- `--record` does not record the browser.
 
 ## Errors
 
@@ -219,7 +250,8 @@ on-demand capture stopping because nobody watches is not published.
 | `mock` | an embedded 640×360 H.264 clip with AAC audio, looped at the requested `fps` (`FPS` is a ceiling); used by the tests and the viewer's checks |
 | `wda`, a physical iPhone or iPad on a macOS host, over USB | Apple's QuickTime screen-capture channel through the capture helper ([below](#iphones-and-ipads)): the device's own H.264 at about 60 fps (`X-Maestro-Fps: device`; `fps` is advisory) and LPCM audio as the device delivers it (48 kHz, 2 channels, 16-bit integer as `ipcm` or 32-bit float as `fpcm`). Always on while the device is attached |
 | `wda`, an iOS simulator | `CAPTURE_UNAVAILABLE` `simulator`; `--record` still records through `simctl io recordVideo`, and the recording steps stay unsupported |
-| `wda` on tvOS; `devicelab` (iOS simulators), `appium`, `cdp` (web) | `CAPTURE_UNAVAILABLE` `unsupported-platform` |
+| `wda` on tvOS; `devicelab` (iOS simulators), `appium` | `CAPTURE_UNAVAILABLE` `unsupported-platform` |
+| `cdp` (web) | `CAPTURE_UNAVAILABLE` `unsupported-platform`; the recording steps record its screencast through FFmpeg ([Recording the browser](#recording-the-browser)) |
 | `computer` (the Mac, [macos.md](../macos.md)) | `CAPTURE_UNAVAILABLE` `unsupported-platform`: Screen Sharing sends VNC clients pixels, never video |
 | every other driver | `CAPTURE_UNAVAILABLE` `unsupported-platform` for now |
 

@@ -4,8 +4,10 @@ package executor
 // The startRecording and stopRecording steps on a driver with screen
 // capture (core.Capturer): the executor records the device's capture
 // session into the report itself, so every such driver records the same
-// way and the file lands where the report's other artifacts are. Drivers
-// without capture keep upstream's behaviour (the step reaches the driver).
+// way and the file lands where the report's other artifacts are. A driver
+// that records its own frames (core.FrameRecorder: the browser) records
+// into the same files. Other drivers without capture keep upstream's
+// behaviour (the step reaches the driver).
 // flow_runner.go reaches this through one case in each step dispatcher and
 // a deferred finishRecording; see docs/daemon/UPSTREAM.md.
 
@@ -34,10 +36,11 @@ type stepRecording struct {
 	// daemon session) instead of the flow's assets directory.
 	inReport bool
 	active   *capture.Recorder
-	used     map[string]bool // the file names this runner's recordings took
-	name     string          // the running recording's file name
-	dest     string          // its absolute path
-	rel      string          // its path relative to the report directory
+	frames   core.FrameRecorder // the running recording, on a FrameRecorder
+	used     map[string]bool    // the file names this runner's recordings took
+	name     string             // the running recording's file name
+	dest     string             // its absolute path
+	rel      string             // its path relative to the report directory
 }
 
 // captureSession returns the session of a driver with screen capture. It
@@ -113,7 +116,8 @@ func (fr *FlowRunner) recordingBase() (abs, rel string) {
 }
 
 // executeRecordingStep runs startRecording or stopRecording: through the
-// driver's capture session when it has one, else on the driver. A
+// driver's capture session when it has one, else through the driver's
+// core.FrameRecorder when it is one, else on the driver. A
 // stopRecording while a recording runs always stops it, even when the
 // capture has since been lost (the file is saved with the
 // capture.ErrEndedEarly warning). A driver whose capture failed (not a
@@ -128,12 +132,20 @@ func (fr *FlowRunner) executeRecordingStep(step flow.Step) *core.CommandResult {
 	s, err := captureSession(fr.driver)
 	var res *core.CommandResult
 	switch {
-	case !isStart && fr.rec.active != nil:
+	case !isStart && fr.rec.running():
 		res = fr.stopRecording()
 	case err != nil:
 		res = &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("%s needs screen capture: %v", name, err)}
 	case s == nil:
-		return fr.driver.Execute(step)
+		fr2, ok := core.Unwrap(fr.driver).(core.FrameRecorder)
+		switch {
+		case !ok:
+			return fr.driver.Execute(step)
+		case isStart:
+			res = fr.startFrameRecording(fr2, st.Path)
+		default:
+			res = fr.stopRecording()
+		}
 	case isStart:
 		res = fr.startRecording(s, st.Path)
 	default:
@@ -143,8 +155,35 @@ func (fr *FlowRunner) executeRecordingStep(step flow.Step) *core.CommandResult {
 	return res
 }
 
+// running reports whether a recording runs, on either path.
+func (r *stepRecording) running() bool { return r.active != nil || r.frames != nil }
+
 func (fr *FlowRunner) startRecording(s *capture.Session, path string) *core.CommandResult {
-	if fr.rec.active != nil {
+	return fr.beginRecording(path, func(dir string) error {
+		r, err := capture.NewRecorder(s, dir, capture.Options{FPS: capture.DefaultFPS, Audio: true})
+		if err == nil {
+			fr.rec.active = r
+		}
+		return err
+	})
+}
+
+// startFrameRecording starts a FrameRecorder's recording, named and placed
+// as a capture session's recording is.
+func (fr *FlowRunner) startFrameRecording(d core.FrameRecorder, path string) *core.CommandResult {
+	return fr.beginRecording(path, func(string) error {
+		if err := d.StartFrameRecording(); err != nil {
+			return err
+		}
+		fr.rec.frames = d
+		return nil
+	})
+}
+
+// beginRecording names a new recording from path, makes its directory and
+// calls start with it; start sets the running recorder.
+func (fr *FlowRunner) beginRecording(path string, start func(dir string) error) *core.CommandResult {
+	if fr.rec.running() {
 		err := fmt.Errorf("a recording is already running (%s)", fr.rec.name)
 		return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
 	}
@@ -154,26 +193,43 @@ func (fr *FlowRunner) startRecording(s *capture.Session, path string) *core.Comm
 		return &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("startRecording: %v", err)}
 	}
 	name := uniqueRecordingName(dir, recordingName(path), fr.rec.used)
-	r, err := capture.NewRecorder(s, dir, capture.Options{FPS: capture.DefaultFPS, Audio: true})
-	if err != nil {
+	if err := start(dir); err != nil {
 		return &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("startRecording: %v", err)}
 	}
 	if fr.rec.used == nil {
 		fr.rec.used = map[string]bool{}
 	}
 	fr.rec.used[strings.ToLower(name)] = true
-	fr.rec.active, fr.rec.name = r, name
+	fr.rec.name = name
 	fr.rec.dest = filepath.Join(dir, name)
 	fr.rec.rel = filepath.ToSlash(filepath.Join(rel, recordingsDir, name))
 	return &core.CommandResult{Success: true, Message: "Recording to " + fr.rec.rel, Data: fr.rec.rel}
 }
 
+// FrameRecordingData is stopRecording's data on a core.FrameRecorder (the
+// browser): the file, as the other drivers' data names it, with the
+// video's length and the frames it holds.
+type FrameRecordingData struct {
+	Path       string `json:"path"`
+	DurationMs int64  `json:"durationMs"`
+	Frames     int    `json:"frames"`
+}
+
 func (fr *FlowRunner) stopRecording() *core.CommandResult {
-	if fr.rec.active == nil {
+	if !fr.rec.running() {
 		err := fmt.Errorf("no recording is running")
 		return &core.CommandResult{Success: false, Error: err, Message: err.Error()}
 	}
 	rel := fr.rec.rel
+	if fr.rec.frames != nil {
+		stats, err := fr.finishFrameRecording()
+		if err != nil {
+			return &core.CommandResult{Success: false, Error: err, Message: fmt.Sprintf("stopRecording: %v", err), Data: rel}
+		}
+		data := FrameRecordingData{Path: rel, DurationMs: stats.Duration.Milliseconds(), Frames: stats.Frames}
+		msg := fmt.Sprintf("Saved recording %s (%.1f s, %d frames)", rel, stats.Duration.Seconds(), stats.Frames)
+		return &core.CommandResult{Success: true, Message: msg, Data: data}
+	}
 	err := fr.finishRecording()
 	if errors.Is(err, capture.ErrEndedEarly) {
 		return &core.CommandResult{Success: true, Message: fmt.Sprintf("Saved recording %s (warning: %v)", rel, err), Data: rel}
@@ -189,6 +245,10 @@ func (fr *FlowRunner) stopRecording() *core.CommandResult {
 // capture.ErrEndedEarly means the recording was saved but ended before
 // the step or the flow did.
 func (fr *FlowRunner) finishRecording() error {
+	if fr.rec.frames != nil {
+		_, err := fr.finishFrameRecording()
+		return err
+	}
 	r, dest, rel := fr.rec.active, fr.rec.dest, fr.rec.rel
 	if r == nil {
 		return nil
@@ -200,6 +260,19 @@ func (fr *FlowRunner) finishRecording() error {
 		logger.Info("Saved recording %s", dest)
 	}
 	return err
+}
+
+// finishFrameRecording ends a FrameRecorder's running recording and
+// encodes it at its destination.
+func (fr *FlowRunner) finishFrameRecording() (core.RecordingStats, error) {
+	d, dest, rel := fr.rec.frames, fr.rec.dest, fr.rec.rel
+	fr.rec.frames = nil
+	stats, err := d.StopFrameRecording(dest)
+	recordingSaved("recording "+rel, err)
+	if err == nil {
+		logger.Info("Saved recording %s (%d frames, %s)", dest, stats.Frames, stats.Duration.Round(time.Millisecond))
+	}
+	return stats, err
 }
 
 // recordingSaved reports whether a recording's Stop error still means the

@@ -297,6 +297,27 @@ type Capturer interface {
 	Capture() (*capture.Session, error)
 }
 
+// maestro-d: FrameRecorder is an optional interface for a driver that
+// records its own screen into an MP4 without a capture session: the
+// browser, from its screencast frames. The executor runs the
+// startRecording and stopRecording steps through it, into the same files
+// a Capturer's recordings go to. Reach it through Unwrap.
+type FrameRecorder interface {
+	// StartFrameRecording begins collecting frames. An error means the
+	// driver cannot record now (one already runs, or no encoder).
+	StartFrameRecording() error
+	// StopFrameRecording ends the recording and encodes the frames into
+	// an MP4 at hostPath, with each frame shown for as long as it was on
+	// screen. Called only after a successful StartFrameRecording.
+	StopFrameRecording(hostPath string) (RecordingStats, error)
+}
+
+// maestro-d: RecordingStats describes a finished FrameRecorder recording.
+type RecordingStats struct {
+	Duration time.Duration // the video's length
+	Frames   int           // the frames the driver collected
+}
+
 // FlowAware is an optional interface drivers can implement to inspect the
 // upcoming flow before session creation. The WDA driver uses this to decide
 // whether to register XCTest's alert monitor at session creation — only flows

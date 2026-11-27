@@ -90,6 +90,12 @@ type Driver struct {
 	// Selector validation dedup
 	warnedFields map[string]bool
 
+	// maestro-d: screen recording (recording.go). frames replaces the
+	// page's screencast in tests.
+	recMu  sync.Mutex
+	rec    *webRecording
+	frames frameSource
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -374,6 +380,7 @@ func needsDownload(browserDir string) bool {
 func (d *Driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.stopCh)
+		d.discardRecording() // maestro-d
 		if d.browser != nil {
 			d.closeErr = d.browser.Close()
 		}
@@ -669,10 +676,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = unsupportedResult("travel is not supported on web platform")
 	case *flow.AddMediaStep:
 		result = unsupportedResult("addMedia is not supported on web platform")
-	case *flow.StartRecordingStep:
-		result = unsupportedResult("startRecording is not supported on web platform")
-	case *flow.StopRecordingStep:
-		result = unsupportedResult("stopRecording is not supported on web platform")
+	case *flow.StartRecordingStep, *flow.StopRecordingStep: // maestro-d: through the executor (recording.go)
+		result = recordingStep(step)
 	case *flow.ClearKeychainStep:
 		result = unsupportedResult("clearKeychain is not supported on web platform")
 	case *flow.SetPermissionsStep:

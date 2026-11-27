@@ -117,6 +117,7 @@ runners prune their build caches when they start.
 | `run/<name>/reports/…/blobs/`, `bundles/` | while a session in that directory is attached | at detach of the last session using the directory |
 | `run/<name>/` | while its daemon runs | 7 days after its last write, once the daemon is gone |
 | `$TMPDIR/rod/user-data/<id>/` | while the web session runs | when the session closes; an orphan a day idle (a week where `ps` is unavailable) |
+| `$TMPDIR/maestro-d-web-recording-<id>/` | a browser recording's frames while it runs ([streaming.md](streaming.md#recording-the-browser)) | at `stopRecording`, or when the web session closes |
 | `cache/wda-builds/<config>/` | the WebDriverAgent build | unused for 30 days; a real-device build only once this host has compiled a build for its team since |
 | `cache/wda-builds/<config>/results/` | the running test's result bundle | when the runner stops |
 | `cache/devicelab-ios-runner-builds/`, `cache/embedded-runner-src/` | the runner build and source in use | unused for 30 days |

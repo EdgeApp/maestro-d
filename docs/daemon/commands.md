@@ -92,10 +92,10 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`setPermissions`](#setpermissions) | — | Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all |
 | [`setStatusBar`](#setstatusbar) | `mode` | Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead. |
 | [`setTrafficShape`](#settrafficshape) | — | Sets the device's whole network shape through the call its host's config.json (or older network.json) configures for it. |
-| [`startRecording`](#startrecording) | `path` | Starts recording. |
+| [`startRecording`](#startrecording) | `path` | Starts recording the screen into the session's recordings/<name>.mp4 on the device's host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file's path relative to the report. |
 | [`startSampler`](#startsampler) | `kind` | Starts sampling the app's cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED. |
 | [`stopApp`](#stopapp) | `appId` | Stops an app. |
-| [`stopRecording`](#stoprecording) | `path` | Stops recording. |
+| [`stopRecording`](#stoprecording) | `path` | Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}. |
 | [`stopSampler`](#stopsampler) | `kind` | Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform. |
 | [`swipe`](#swipe) | `direction` |  |
 | [`switchTab`](#switchtab) | `tabLabel` | Switches to another browser tab. |
@@ -2092,7 +2092,7 @@ await m.setTrafficShape({ … })
 
 ## `startRecording`
 
-Starts recording.
+Starts recording the screen into the session's recordings/<name>.mp4 on the device's host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file's path relative to the report.
 
 ```sh
 maestro-d startRecording <path>
@@ -2157,7 +2157,7 @@ await m.stopApp({ appId: '<appId>', … })
 
 ## `stopRecording`
 
-Stops recording.
+Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}.
 
 ```sh
 maestro-d stopRecording <path>

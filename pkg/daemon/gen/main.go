@@ -68,6 +68,13 @@ var commandOverrides = map[string]func(*Command){
 	"assertNoDefectsWithAI": func(c *Command) {
 		c.Doc = "assertWithAI with the built-in assertion that the screen shows no visual defect (nothing blank, clipped, overlapping, garbled or showing an error); the same options and result."
 	},
+	// maestro-d: the executor records on the device's host (executor/recording.go).
+	"startRecording": func(c *Command) {
+		c.Doc = "Starts recording the screen into the session's recordings/<name>.mp4 on the device's host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file's path relative to the report."
+	},
+	"stopRecording": func(c *Command) {
+		c.Doc = "Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}."
+	},
 	// Decoded by a helper (flow/trafficshape.go), which the AST walk does
 	// not follow: it takes a map of its fields, each optional.
 	"setTrafficShape": func(c *Command) { c.ValueLess = false },

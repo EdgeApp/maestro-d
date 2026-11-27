@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 3.4.1 (2026-11-27)
+
+- added: The browser (`cdp`, `--platform web`) records its screen. `startRecording` starts the page's DevTools screencast at the viewport's size and keeps each frame with the time it was drawn; `stopRecording` has FFmpeg (on `PATH`, else `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`) encode them into an MP4 with that timing, at the same `recordings/<name>.mp4` as Android's and iOS's recordings, with `{path, durationMs, frames}` as its data. Without FFmpeg `startRecording` fails naming it. Both steps used to answer "not supported on web platform". See `docs/daemon/streaming.md#recording-the-browser`.
+
 ## 3.4.0 (2026-11-27)
 
 - added: `assertWithAI` and `assertNoDefectsWithAI` run for every driver (Android, iOS, tvOS, the browser, the computer device, Appium and cloud devices), in the executor on the daemon that owns the device, on a screenshot from the driver's own `Screenshot()`. A waterfall judges it: TypeSafe Jev (`jev-1.14.0`, the screenshot scaled into 280–1568 px, one noul question, passing at 0.7 or more and failing at 0.3 or less), then Claude Haiku, Sonnet and Opus 5.5 (pass or fail with confidence 0.7 or more stops it), else `unsure`. `budgetUsd` and `thresholds` (`jevPass`, `jevFail`, `haiku`, `sonnet`, `opus`) are new options on both. Every verdict is a successful step with `{verdict, confidence, model, escalations, observed, costUsd}` as its data, so the JS client resolves `fail` and `unsure` too; only a missing screenshot fails. `assertNoDefectsWithAI` asks the built-in assertion that the screen shows no visual defect. The cdp driver no longer answers them "not supported". See `docs/daemon/rest.md`.
