@@ -172,6 +172,7 @@ func (s *Server) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	res := InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID}
 	if fetched != nil {
 		s.noteInstalled(id, req.AppID, fetched.etag)
+		keepBuild(id, req.AppID, fetched.path)
 		res.ETag = fetched.etag
 	}
 	s.events.Publish(Event{Type: "app.installed", Device: id, Message: appID})
@@ -200,6 +201,7 @@ func (s *Server) handleUninstallApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, WrapErr(CodeDeviceError, err))
 		return
 	}
+	s.forgetInstall(id, appID)
 	s.events.Publish(Event{Type: "app.uninstalled", Device: id, Message: appID})
 	writeJSON(w, http.StatusOK, InstallResult{Envelope: Envelope{OK: true}, Device: id, AppID: appID})
 }

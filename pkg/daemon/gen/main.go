@@ -53,6 +53,10 @@ var commandOverrides = map[string]func(*Command){
 	"toggleAirplaneMode": func(c *Command) {
 		c.Doc = "Toggles airplane mode on Android. iOS answers UNSUPPORTED: simulate a lost network with setTrafficShape (lossPct: 100)."
 	},
+	// maestro-d: a physical iPhone's clearState reinstalls installApp's kept build (daemon/appbuild.go).
+	"clearState": func(c *Command) {
+		c.Doc = "Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp."
+	},
 	// maestro-d: the executor runs both AI checks for every driver (pkg/aicheck).
 	"assertWithAI": func(c *Command) {
 		c.Doc = "Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data."

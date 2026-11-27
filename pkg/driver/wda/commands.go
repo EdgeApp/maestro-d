@@ -1218,19 +1218,30 @@ func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
 //     container, which would be deleted by the uninstall step). Matches
 //     Maestro CLI's auto-stage behavior so flows like `- clearState` work
 //     without any extra flags.
-//   - Real device: --app-file is still required (Apple seals the .app on
-//     device, no public API to extract it back to the host).
+//   - Real device: Apple seals the .app on device, with no public API to
+//     extract it back to the host, so the reinstall needs the build: the
+//     --app-file, else (maestro-d) the build the daemon's installApp last
+//     installed for this app on this device.
 func (d *Driver) clearAppState(bundleID string) *core.CommandResult {
 	if d.info.IsSimulator {
 		return d.clearAppStateSimulator(bundleID)
 	}
-	if d.appFile == "" {
+	appFile := d.appFile
+	if appFile == "" && d.buildSource != nil {
+		appFile = d.buildSource(bundleID)
+	}
+	if appFile == "" && d.buildSource != nil {
+		return errorResult(fmt.Errorf("clearState on a physical iOS device needs the build of %s: install it on this device with installApp (url and appId) first", bundleID),
+			"clearState on a physical iOS device reinstalls the app from the build installApp last installed on it, "+
+				"and this device's hub keeps none for "+bundleID+": run installApp with its url and appId first")
+	}
+	if appFile == "" {
 		return errorResult(fmt.Errorf("clearState on real iOS devices requires --app-file"),
 			"clearState on real iOS devices requires --app-file — the installed bundle "+
 				"isn't reachable from the host. On simulators no flag is needed.\n"+
 				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
 	}
-	return d.clearAppStateDevice(bundleID)
+	return d.clearAppStateDevice(bundleID, appFile)
 }
 
 func (d *Driver) clearAppStateSimulator(bundleID string) *core.CommandResult {
@@ -1360,9 +1371,9 @@ func (d *Driver) resetKeychain() *core.CommandResult {
 	return successResult("Simulator keychain reset", nil)
 }
 
-func (d *Driver) clearAppStateDevice(bundleID string) *core.CommandResult {
+func (d *Driver) clearAppStateDevice(bundleID, appFile string) *core.CommandResult {
 	// Uninstall via xcrun devicectl (uses remoted, doesn't disrupt usbmuxd port forwarding)
-	cmd := exec.Command("xcrun", "devicectl", "device", "uninstall", "app",
+	cmd := execCommand("xcrun", "devicectl", "device", "uninstall", "app",
 		"--device", d.udid, bundleID)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return errorResult(fmt.Errorf("devicectl uninstall failed: %w: %s", err, string(output)),
@@ -1370,8 +1381,8 @@ func (d *Driver) clearAppStateDevice(bundleID string) *core.CommandResult {
 	}
 
 	// Reinstall via xcrun devicectl
-	cmd = exec.Command("xcrun", "devicectl", "device", "install", "app",
-		"--device", d.udid, d.appFile)
+	cmd = execCommand("xcrun", "devicectl", "device", "install", "app",
+		"--device", d.udid, appFile)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return errorResult(fmt.Errorf("devicectl install failed: %w: %s", err, string(output)),
 			"Failed to reinstall app on device")

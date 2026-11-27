@@ -151,6 +151,7 @@ func (s *Server) attachDevice(ctx context.Context, id string, cfg AttachConfig) 
 	if cleanup == nil {
 		cleanup = func() {}
 	}
+	giveBuildSource(id, driver) // clearState on a physical iPhone reinstalls installApp's build (appbuild.go)
 	if leaseFrom(ctx) != nil && ctx.Err() != nil {
 		// The lease (or its client) ended while a driver start that cannot
 		// be cancelled ran: the driver is discarded, never attached.

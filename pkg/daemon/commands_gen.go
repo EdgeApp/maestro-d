@@ -240,7 +240,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"clearState": {Name: "clearState", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Clears app state.", Fields: []FieldSpec{
+	"clearState": {Name: "clearState", Scalar: "appId", BareField: "appId", ValueLess: false, Compound: false, FreeForm: false, Doc: "Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},

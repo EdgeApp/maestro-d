@@ -1250,11 +1250,15 @@ followed, but `headers` (and any `Authorization`) go on the first request
 only, never to a redirect's target, so a build server that redirects to
 signed storage does not leak its key there. The file is named from
 `Content-Disposition`, else the final URL's path, else `app.apk` or
-`app.ipa` by the device's platform, and deleted after the install. The
-daemon remembers, per device and `appId`, the `ETag` it last installed
-(`<home>/installs.json`): it sends it as `If-None-Match`, and a `304` or the
-same `ETag` skips the download and the install and answers
-`"cached": true`. `reinstall: true` installs anyway. The answer carries the
+`app.ipa` by the device's platform. After the install the daemon keeps it
+as that device's build of `appId`, in `<home>/builds/<device>/<appId>/`, in
+place of the one kept before, so `clearState` on a physical iPhone or iPad
+can reinstall it ([`clearState`](commands.md#clearstate)). The daemon also
+remembers, per device and `appId`, the `ETag` it last installed
+(`<home>/installs.json`): while that build is kept it sends the `ETag` as
+`If-None-Match`, and a `304` or the same `ETag` skips the download and the
+install and answers `"cached": true`. An uninstall
+(`DELETE …/apps/{appId}`) forgets both, so the next install runs. `reinstall: true` installs anyway. The answer carries the
 `etag` when the server sent one:
 
 ```json

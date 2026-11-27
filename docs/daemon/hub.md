@@ -212,7 +212,8 @@ steps by bare id does not repeat the lookup for every step.
   with that hub's own `ai` keys ([config.md](config.md#ai)). A hub strips
   the `ai` keys from an attach it forwards, so a client's keys never reach
   another hub. An install from a URL (`installApp --url`) is downloaded by
-  the owner too, which caches it by `ETag`.
+  the owner too, which caches it by `ETag` and keeps the build, so
+  `clearState` on a physical iPhone or iPad reinstalls it there.
 - **Device config across the mesh.** A device's `description` and
   `capabilities` come from the hub it is plugged into and reach every hub's
   `device list`, `GET /v1/devices/{id}` and lease answers unchanged:

@@ -28,7 +28,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`clearConsoleLogs`](#clearconsolelogs) | _none_ | Clears captured browser console logs. |
 | [`clearKeychain`](#clearkeychain) | _none_ | Clears keychain. |
 | [`clearNetworkMocks`](#clearnetworkmocks) | _none_ | Clears all network mocks and blocks. |
-| [`clearState`](#clearstate) | `appId` | Clears app state. |
+| [`clearState`](#clearstate) | `appId` | Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp. |
 | [`clickOn`](#clickon) | `point` | Clicks a mouse button on the computer, optionally after moving to a point. |
 | [`closeTab`](#closetab) | _none_ | Closes the current tab and switches to the previous one. |
 | [`copyTextFrom`](#copytextfrom) | `text` | Copies text from element. |
@@ -517,7 +517,7 @@ await m.clearNetworkMocks()
 
 ## `clearState`
 
-Clears app state.
+Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp.
 
 ```sh
 maestro-d clearState <appId>

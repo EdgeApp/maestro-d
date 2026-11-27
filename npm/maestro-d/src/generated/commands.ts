@@ -305,7 +305,7 @@ export interface ClearNetworkMocksParams {
   platform?: string
 }
 
-/** Clears app state. */
+/** Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp. */
 export interface ClearStateParams {
   optional?: boolean
   label?: string
@@ -1667,7 +1667,7 @@ export const COMMANDS = {
   clearConsoleLogs: { name: 'clearConsoleLogs', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears captured browser console logs.' },
   clearKeychain: { name: 'clearKeychain', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears keychain.' },
   clearNetworkMocks: { name: 'clearNetworkMocks', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears all network mocks and blocks.' },
-  clearState: { name: 'clearState', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Clears app state.' },
+  clearState: { name: 'clearState', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Clears the app\'s data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach\'s app file, else the build installApp (url and appId) last installed on it, which the device\'s own hub keeps. With neither it fails, naming installApp.' },
   clickOn: { name: 'clickOn', scalar: 'point', bareField: 'point', valueLess: false, compound: false, doc: 'Clicks a mouse button on the computer, optionally after moving to a point.' },
   closeTab: { name: 'closeTab', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Closes the current tab and switches to the previous one.' },
   copyTextFrom: { name: 'copyTextFrom', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Copies text from element.' },

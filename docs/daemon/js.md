@@ -192,7 +192,8 @@ own daemon downloads (a hub routes it to the hub the device is plugged
 into, which fetches it), with `headers` such as a bearer key sent to `url`
 only, never to a redirect's target; it resolves `{appId, cached, etag}`,
 `cached` when the server's `ETag` matches the build installed last
-([`POST …/apps`](rest.md#post-v1devicesidapps)). `md.attach({…, ai:
+([`POST …/apps`](rest.md#post-v1devicesidapps)). The device's daemon keeps
+that build, and `clearState` on a physical iPhone or iPad reinstalls it. `md.attach({…, ai:
 {jevKey, anthropicKey}})` (and `lease({attach: {ai}})`) gives the
 session the keys its AI checks spend when the daemon has no `ai` block of
 its own ([config.md](config.md#ai)); the keys are sent, never kept on the

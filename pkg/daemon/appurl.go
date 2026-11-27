@@ -4,8 +4,9 @@ package daemon
 // downloads the build itself, with the caller's headers on that request
 // only: a redirect (Mason's to its Space) is followed without them. The
 // ETag of the build last installed on each device, per app id, is kept in
-// <home>/installs.json, so a second install of the same build is answered
-// cached without a download.
+// <home>/installs.json and the build itself in <home>/builds (appbuild.go),
+// so a second install of the same build is answered cached without a
+// download, and clearState can reinstall it.
 //
 // The hosts a build may come from are config.json's installApp.allowHosts:
 // with that block, the first request and every redirect must go to one of
@@ -75,8 +76,10 @@ func (s *Server) fetchApp(ctx context.Context, id string, req InstallRequest) (*
 	if e != nil {
 		return nil, e
 	}
+	// A build counts as installed only while it is kept, so clearState
+	// can reinstall it.
 	known := ""
-	if !req.Reinstall {
+	if !req.Reinstall && keptBuild(id, req.AppID) != "" {
 		known = s.installedETag(id, req.AppID)
 	}
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.URL, nil)

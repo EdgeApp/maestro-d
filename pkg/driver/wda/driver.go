@@ -45,6 +45,10 @@ type Driver struct {
 	// App file path for clearState (uninstall+reinstall)
 	appFile string
 
+	// maestro-d: the daemon's kept builds, for clearState on a physical
+	// device when there is no appFile (core.AppBuildUser)
+	buildSource core.AppBuildSource
+
 	// wdaBuildDir is the cached WebDriverAgent build this device runs, named
 	// in the error for a build that predates /wda/addMedia.
 	wdaBuildDir string
@@ -260,6 +264,12 @@ func (d *Driver) SetWDABuildDir(dir string) {
 // SetAppFile sets the app file path used for clearState (uninstall+reinstall).
 func (d *Driver) SetAppFile(path string) {
 	d.appFile = path
+}
+
+// SetAppBuildSource gives clearState on a physical device the builds the
+// daemon's installApp keeps, used when there is no app file.
+func (d *Driver) SetAppBuildSource(src core.AppBuildSource) {
+	d.buildSource = src
 }
 
 // SetWaitForIdleTimeout sets the wait for idle timeout.
