@@ -1292,7 +1292,7 @@ func (rt *router) forward(w http.ResponseWriter, r *http.Request, h string) {
 			writeError(w, 0, daemon.WrapErr(daemon.CodeUsage, err))
 			return
 		case len(head) <= maxInlineBody:
-			req.Body = head
+			req.Body = dropAIKeys(r.Method, r.URL.Path, head)
 		default:
 			// The owner may answer while the body still streams (a lease
 			// that ended under a stalled upload): in full duplex that
@@ -1422,4 +1422,38 @@ func (u *upload) stop(rc *http.ResponseController) {
 	case <-done:
 	case <-t.C:
 	}
+}
+
+// dropAIKeys removes a client's AI keys from an attach (the body's ai) or a
+// lease that attaches (attach.ai) before the hub forwards it: the hub that
+// owns the device answers AI checks with its own keys, and a client's keys
+// never travel past the hub they were sent to.
+func dropAIKeys(method, path string, body []byte) []byte {
+	if method != http.MethodPost || !(strings.HasSuffix(path, "/attach") || path == "/v1/leases") {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body
+	}
+	changed := false
+	if _, ok := top["ai"]; ok {
+		delete(top, "ai")
+		changed = true
+	}
+	if raw, ok := top["attach"]; ok {
+		var attach map[string]json.RawMessage
+		if json.Unmarshal(raw, &attach) == nil {
+			if _, ok := attach["ai"]; ok {
+				delete(attach, "ai")
+				top["attach"], _ = json.Marshal(attach)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, _ := json.Marshal(top)
+	return out
 }

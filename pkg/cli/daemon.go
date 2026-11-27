@@ -500,7 +500,7 @@ func daemonCommands() []*cli.Command {
 		daemonStartCommand, daemonServeCommand, daemonStopCommand, daemonStatusCommand, daemonPsCommand,
 		daemonDeviceCommand, devicefarmCommand, daemonAttachCommand, daemonDetachCommand,
 		daemonRunCommand, daemonGetCommand, daemonStreamCommand, daemonSetCommand, daemonEvalCommand, daemonCommandsCommand,
-		installCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, reserveCommand, claimCommand, renewCommand, releaseCommand,
+		installCommand, installAppCommand, uninstallCommand, packCommand, hubCommand, leaseCommand, reserveCommand, claimCommand, renewCommand, releaseCommand,
 		gcCommand,
 	}, oneShotCommands()...)
 }
@@ -622,7 +622,7 @@ var serveFlags = flagSet(daemonSelectFlags[:1], daemonSpawnFlags[1:4], []dflag{
 		func(o *daemonOpts, v string) { o.TLSCert = v }),
 	strFlag("tls-key", "PEM private key for --tls-cert", []string{"MAESTRO_D_TLS_KEY"},
 		func(o *daemonOpts, v string) { o.TLSKey = v }),
-	strFlag("config", "The device config: config.json's hubDevices, each with an id, an optional description and optional trafficShaping calls (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
+	strFlag("config", "The device config: config.json's hubDevices, each with an id and an optional description, capabilities and trafficShaping calls, and its optional ai block (default <home>/config.json, else <home>/network.json)", []string{"MAESTRO_D_CONFIG"},
 		func(o *daemonOpts, v string) { o.DeviceConfig = v }),
 	strFlag("network-config", "Deprecated (use --config): an older network.json, each device's setTrafficShape and resetTrafficShape calls", []string{"MAESTRO_D_NETWORK_CONFIG"},
 		func(o *daemonOpts, v string) { o.NetworkConfig = v }),

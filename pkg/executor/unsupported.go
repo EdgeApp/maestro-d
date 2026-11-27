@@ -30,13 +30,14 @@ const (
 // for an ordinary failure.
 func outcomeCode(err error) string {
 	var unsupported *UnsupportedError
+	var driverUnsupported *core.UnsupportedError // maestro-d: a driver's own refusal
 	var config *netshape.ConfigError
 	var usage *UsageError
 	var value *netshape.ValueError
 	switch {
 	case err == nil:
 		return ""
-	case errors.As(err, &unsupported):
+	case errors.As(err, &unsupported), errors.As(err, &driverUnsupported):
 		return codeUnsupported
 	case errors.As(err, &config), errors.As(err, &usage), errors.As(err, &value):
 		return codeUsage

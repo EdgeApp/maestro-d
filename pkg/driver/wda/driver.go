@@ -45,6 +45,10 @@ type Driver struct {
 	// App file path for clearState (uninstall+reinstall)
 	appFile string
 
+	// maestro-d: the daemon's kept builds, for clearState on a physical
+	// device when there is no appFile (core.AppBuildUser)
+	buildSource core.AppBuildSource
+
 	// wdaBuildDir is the cached WebDriverAgent build this device runs, named
 	// in the error for a build that predates /wda/addMedia.
 	wdaBuildDir string
@@ -262,6 +266,12 @@ func (d *Driver) SetAppFile(path string) {
 	d.appFile = path
 }
 
+// SetAppBuildSource gives clearState on a physical device the builds the
+// daemon's installApp keeps, used when there is no app file.
+func (d *Driver) SetAppBuildSource(src core.AppBuildSource) {
+	d.buildSource = src
+}
+
 // SetWaitForIdleTimeout sets the wait for idle timeout.
 // Quiescence is disabled by default on iOS because it can cause XCTest crashes
 // on apps with continuous animations. It is only enabled when the user explicitly
@@ -404,6 +414,10 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 
 	// Airplane mode
+	case *flow.SetStatusBarStep: // maestro-d (devicesteps.go)
+		result = d.setStatusBar(s)
+	case *flow.KeyboardVisibleStep: // maestro-d (devicesteps.go)
+		result = d.keyboardVisibleResult()
 	case *flow.SetDarkModeStep:
 		result = d.setDarkMode(s)
 	case *flow.ToggleDarkModeStep:
