@@ -968,7 +968,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "jitterMs", Type: "float64", Doc: "Latency jitter in milliseconds"},
 		{Key: "direction", Type: "string", Doc: "download, upload or both (default both); ${VAR} allowed"},
 	}},
-	"startRecording": {Name: "startRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts recording.", Fields: []FieldSpec{
+	"startRecording": {Name: "startRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Starts recording the screen into the session's recordings/<name>.mp4 on the device's host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file's path relative to the report.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
@@ -991,7 +991,7 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "appId", Type: "string", Doc: ""},
 	}},
-	"stopRecording": {Name: "stopRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops recording.", Fields: []FieldSpec{
+	"stopRecording": {Name: "stopRecording", Scalar: "path", BareField: "path", ValueLess: false, Compound: false, FreeForm: false, Doc: "Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},

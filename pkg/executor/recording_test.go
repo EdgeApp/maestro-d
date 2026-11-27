@@ -419,3 +419,106 @@ func TestRecordingSaved(t *testing.T) {
 		t.Error("recordingSaved: want nil and ErrEndedEarly saved, any other error not")
 	}
 }
+
+// frameDriver is a driver without capture that records its own frames
+// (core.FrameRecorder), as the browser does.
+type frameDriver struct {
+	core.Driver
+	starts, stops     int
+	dests             []string
+	startErr, stopErr error
+	got               []flow.StepType
+}
+
+func (d *frameDriver) Execute(step flow.Step) *core.CommandResult {
+	d.got = append(d.got, step.Type())
+	return d.Driver.Execute(step)
+}
+
+func (d *frameDriver) StartFrameRecording() error {
+	d.starts++
+	return d.startErr
+}
+
+func (d *frameDriver) StopFrameRecording(dest string) (core.RecordingStats, error) {
+	d.stops++
+	d.dests = append(d.dests, dest)
+	if d.stopErr != nil {
+		return core.RecordingStats{}, d.stopErr
+	}
+	return core.RecordingStats{Duration: 5012 * time.Millisecond, Frames: 150}, os.WriteFile(dest, []byte("mp4"), 0o600)
+}
+
+func newFrameSession(t *testing.T, d *frameDriver) (*Session, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := NewSession(context.Background(), d, RunnerConfig{OutputDir: dir}, SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s, dir
+}
+
+// A FrameRecorder (the browser) records into the session's recordings/
+// like a capture session, and stopRecording's data adds the video's
+// length and frame count.
+func TestRecording_FrameRecorder(t *testing.T) {
+	d := &frameDriver{Driver: mock.New(mock.Config{})}
+	s, dir := newFrameSession(t, d)
+	ctx := context.Background()
+	out := s.Execute(ctx, mustStep(t, "startRecording: web/clip"))
+	if !out.Success || out.Data != "recordings/clip.mp4" {
+		t.Fatalf("start: %+v %v", out.Error, out.Data)
+	}
+	if out = s.Execute(ctx, mustStep(t, "startRecording: again")); out.Success || out.Error.Message != "a recording is already running (clip.mp4)" {
+		t.Fatalf("second start: %+v", out.Error)
+	}
+	out = s.Execute(ctx, mustStep(t, "stopRecording"))
+	want := FrameRecordingData{Path: "recordings/clip.mp4", DurationMs: 5012, Frames: 150}
+	if !out.Success || out.Data != any(want) || !strings.Contains(out.Message, "5.0 s, 150 frames") {
+		t.Fatalf("stop: %+v %#v %q", out.Error, out.Data, out.Message)
+	}
+	if b, _ := json.Marshal(out.Data); string(b) != `{"path":"recordings/clip.mp4","durationMs":5012,"frames":150}` {
+		t.Fatalf("data JSON %s", b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "recordings", "clip.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if out = s.Execute(ctx, mustStep(t, "stopRecording")); out.Success || !strings.Contains(out.Error.Message, "no recording is running") {
+		t.Fatalf("stop again: %+v", out.Error)
+	}
+	// A recording left running ends with the session.
+	if out = s.Execute(ctx, mustStep(t, "startRecording: clip")); !out.Success || out.Data != "recordings/clip-2.mp4" {
+		t.Fatalf("start 2: %+v %v", out.Error, out.Data)
+	}
+	s.Close()
+	if d.starts != 2 || d.stops != 2 || len(d.got) != 0 {
+		t.Fatalf("starts %d, stops %d, steps on the driver %v", d.starts, d.stops, d.got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "recordings", "clip-2.mp4")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecording_FrameRecorderFailures(t *testing.T) {
+	d := &frameDriver{Driver: mock.New(mock.Config{}), startErr: errors.New("recording the browser needs FFmpeg")}
+	s, _ := newFrameSession(t, d)
+	ctx := context.Background()
+	out := s.Execute(ctx, mustStep(t, "startRecording: x"))
+	if out.Success || !strings.Contains(out.Error.Message, "startRecording: recording the browser needs FFmpeg") {
+		t.Fatalf("start: %+v", out.Error)
+	}
+	d.startErr, d.stopErr = nil, errors.New("ffmpeg: exit status 1")
+	// The failed start did not take the name.
+	if out = s.Execute(ctx, mustStep(t, "startRecording: x")); !out.Success || out.Data != "recordings/x.mp4" {
+		t.Fatalf("start: %+v %v", out.Error, out.Data)
+	}
+	out = s.Execute(ctx, mustStep(t, "stopRecording"))
+	if out.Success || out.Data != "recordings/x.mp4" || !strings.Contains(out.Error.Message, "stopRecording: ffmpeg: exit status 1") {
+		t.Fatalf("stop: %+v %v", out.Error, out.Data)
+	}
+	if out = s.Execute(ctx, mustStep(t, "stopRecording")); out.Success {
+		t.Fatal("a failed stop left the recording running")
+	}
+}

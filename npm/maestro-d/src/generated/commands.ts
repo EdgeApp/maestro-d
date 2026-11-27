@@ -1447,7 +1447,7 @@ export interface SetTrafficShapeParams {
   direction?: string
 }
 
-/** Starts recording. */
+/** Starts recording the screen into the session's recordings/<name>.mp4 on the device's host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file's path relative to the report. */
 export interface StartRecordingParams {
   optional?: boolean
   label?: string
@@ -1482,7 +1482,7 @@ export interface StopAppParams {
   appId?: string
 }
 
-/** Stops recording. */
+/** Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}. */
 export interface StopRecordingParams {
   optional?: boolean
   label?: string
@@ -1894,10 +1894,10 @@ export const COMMANDS = {
   setPermissions: { name: 'setPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets app permissions. Permission values: "allow", "deny", "unset" Permission shortcuts: location, camera, contacts, phone, microphone, bluetooth, storage, notifications, medialibrary, calendar, sms, all' },
   setStatusBar: { name: 'setStatusBar', scalar: 'mode', bareField: 'mode', valueLess: false, compound: false, doc: 'Puts the status bar into demo mode (a fixed clock, a full battery, full signal, no notifications) or back to live: simctl status_bar on an iOS simulator, System UI demo mode on Android. A physical iPhone, iPad or Apple TV has no override and answers UNSUPPORTED, as do the browser and the computer device; supportsStatusBar(device) in the JavaScript client tells ahead.' },
   setTrafficShape: { name: 'setTrafficShape', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Sets the device\'s whole network shape through the call its host\'s config.json (or older network.json) configures for it.' },
-  startRecording: { name: 'startRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Starts recording.' },
+  startRecording: { name: 'startRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Starts recording the screen into the session\'s recordings/<name>.mp4 on the device\'s host, path naming the file (its directory is dropped). Android and physical iPhones record their screen capture; the browser records its screencast, encoded with FFmpeg. Its data is the file\'s path relative to the report.' },
   startSampler: { name: 'startSampler', scalar: 'kind', bareField: 'kind', valueLess: false, compound: false, doc: 'Starts sampling the app\'s cpu (percent), memory (bytes) or frames (fps) in the background until stopSampler, answering {kind, appId, intervalMs}: all three on Android, cpu and memory on an iOS simulator; anything else answers UNSUPPORTED.' },
   stopApp: { name: 'stopApp', scalar: 'appId', bareField: 'appId', valueLess: false, compound: false, doc: 'Stops an app.' },
-  stopRecording: { name: 'stopRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Stops recording.' },
+  stopRecording: { name: 'stopRecording', scalar: 'path', bareField: 'path', valueLess: false, compound: false, doc: 'Stops the running recording and saves it; path is ignored. Its data is the file\'s path relative to the report; on the browser it is {path, durationMs, frames}.' },
   stopSampler: { name: 'stopSampler', scalar: 'kind', bareField: 'kind', valueLess: false, compound: false, doc: 'Stops a sampler startSampler started and answers {kind, unit, appId, intervalMs, durationMs, count, min, max, mean, samples: [{atMs, value}]}, the same fields on every platform.' },
   swipe: { name: 'swipe', scalar: 'direction', bareField: 'direction', valueLess: false, compound: false, doc: '' },
   switchTab: { name: 'switchTab', scalar: 'tabLabel', bareField: 'tabLabel', valueLess: false, compound: false, doc: 'Switches to another browser tab.' },

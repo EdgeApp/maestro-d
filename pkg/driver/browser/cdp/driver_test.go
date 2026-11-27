@@ -85,6 +85,13 @@ func newTestServer() *httptest.Server {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, selectorTestPage())
 	})
+	mux.HandleFunc("/moving", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!DOCTYPE html><html><body style="margin:0;background:#003">
+			<div id="box" style="position:absolute;top:100px;width:60px;height:60px;background:#fff"></div>
+			<script>const b=document.getElementById('box');(function f(t){b.style.left=(t/5%900)+'px';requestAnimationFrame(f)})(0)</script>
+		</body></html>`)
+	})
 	mux.HandleFunc("/alert", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<!DOCTYPE html><html><body>
@@ -917,8 +924,6 @@ func TestUnsupportedCommands(t *testing.T) {
 		{"toggleAirplane", &flow.ToggleAirplaneModeStep{}},
 		{"travel", &flow.TravelStep{}},
 		{"addMedia", &flow.AddMediaStep{}},
-		{"startRecording", &flow.StartRecordingStep{}},
-		{"stopRecording", &flow.StopRecordingStep{}},
 		{"clearKeychain", &flow.ClearKeychainStep{}},
 		{"setPermissions", &flow.SetPermissionsStep{}},
 		{"extractTextWithAI", &flow.ExtractTextWithAIStep{}},

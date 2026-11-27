@@ -1004,7 +1004,7 @@ The response is a **step result**:
 | `skipped` | the step's `platform` did not match the device |
 | `optional`, `error` | the step failed but was optional: `ok` stays true |
 | `element` | the element a selector resolved to, when there was one |
-| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`), `{visible}` for `keyboardVisible`, the sampler for `startSampler` and `stopSampler`, and the verdict for the [AI checks](#ai-checks) |
+| `data` | command output where there is one: the copied text for `copyTextFrom`, the typed text for `inputRandom*`, the script's value for `evalWebViewScript`, the recording's path relative to the report directory for `startRecording` and `stopRecording` (`recordings/<name>.mp4`; on the browser `stopRecording` gives `{path, durationMs, frames}`), `{visible}` for `keyboardVisible`, the sampler for `startSampler` and `stopSampler`, and the verdict for the [AI checks](#ai-checks) |
 | `artifacts` | screenshot / hierarchy paths relative to `reportDir` |
 | `outputs` | for a remote or client-named call, the files its output fields wrote (`outputs/<path>`, relative to `reportDir`); see [outputs](#outputs) |
 | `subSteps` | nested results for `repeat`, `retry`, `runFlow` |
