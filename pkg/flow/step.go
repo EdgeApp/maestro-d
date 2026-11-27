@@ -999,9 +999,14 @@ type RemoveMediaStep struct {
 
 // PressKeyStep presses a key. Native iOS supports LOCK and UNLOCK to set and verify
 // screen lock state; UNLOCK does not bypass a passcode.
+//
+// maestro-d: on iOS (WebDriverAgent) up, down, left, right (or dpad_up, …)
+// and escape (or esc) are hardware keys sent with XCUITest's typeKey, which
+// needs iOS or iPadOS 17; an older device answers UNSUPPORTED for them. tab,
+// enter, delete and space are typed into the focused field.
 type PressKeyStep struct {
 	BaseStep `yaml:",inline"`
-	Key      string `yaml:"key"` // The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device
+	Key      string `yaml:"key"` // The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later)
 }
 
 // WaitForAnimationToEndStep waits for animations.

@@ -904,8 +904,15 @@ func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
 			return errorResult(err, "Press volume down failed")
 		}
 	default:
-		// Try keyboard key
-		if keyChar := iosKeyboardKey(step.Key); keyChar != "" {
+		// maestro-d: arrows and escape are hardware keys, sent with typeKey.
+		if name := iosHardwareKey(step.Key); name != "" {
+			if err := d.client.KeyboardInput(name); err != nil {
+				if typeKeyUnsupported(err) {
+					return core.UnsupportedResult(fmt.Sprintf("pressKey %s: this device cannot send hardware keys (XCUITest's typeKey needs iOS or iPadOS 17 and a WebDriverAgent built with Xcode 15 or later): %v", step.Key, err))
+				}
+				return errorResult(err, fmt.Sprintf("Press %s failed", step.Key))
+			}
+		} else if keyChar := iosKeyboardKey(step.Key); keyChar != "" {
 			if err := d.client.SendKeys(keyChar, 0); err != nil {
 				return errorResult(err, fmt.Sprintf("Press %s failed", step.Key))
 			}
@@ -915,6 +922,31 @@ func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Pressed %s", step.Key), nil)
+}
+
+// iosHardwareKey maps the arrow keys and escape to the XCUIKeyboardKey
+// names typeKey takes, or "" for any other key. (maestro-d)
+func iosHardwareKey(name string) string {
+	switch strings.ToLower(name) {
+	case "up", "dpad_up", "arrowup", "arrow_up":
+		return "XCUIKeyboardKeyUpArrow"
+	case "down", "dpad_down", "arrowdown", "arrow_down":
+		return "XCUIKeyboardKeyDownArrow"
+	case "left", "dpad_left", "arrowleft", "arrow_left":
+		return "XCUIKeyboardKeyLeftArrow"
+	case "right", "dpad_right", "arrowright", "arrow_right":
+		return "XCUIKeyboardKeyRightArrow"
+	case "escape", "esc":
+		return "XCUIKeyboardKeyEscape"
+	}
+	return ""
+}
+
+// typeKeyUnsupported reports whether WebDriverAgent refused typeKey itself:
+// the device's iOS predates it, or the build has no keyboardInput route.
+func typeKeyUnsupported(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "typeKey API is only supported") || strings.Contains(msg, "Unhandled endpoint")
 }
 
 // iosKeyboardKey maps keyboard key names to the character to send via WDA SendKeys.

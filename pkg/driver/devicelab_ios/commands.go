@@ -486,10 +486,7 @@ func (d *Driver) handlePressKey(s *flow.PressKeyStep) *core.CommandResult {
 		// Type a newline through the focused element.
 		cmd = Command{Command: CmdType, AppBundleID: d.appID, Text: "\n"}
 	default:
-		return core.ErrorResult(
-			fmt.Errorf("pressKey %q not supported in devicelab_ios driver", s.Key),
-			"pressKey unsupported",
-		)
+		return core.UnsupportedResult(fmt.Sprintf("pressKey %q is not supported by the devicelab_ios driver (back, home, enter and return are); WebDriverAgent also sends the arrows, escape and tab", s.Key))
 	}
 	if _, err := d.client.Call(ctx, cmd); err != nil {
 		return core.ErrorResult(err, "pressKey failed: "+err.Error())

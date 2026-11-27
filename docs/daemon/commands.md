@@ -64,7 +64,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`openNotifications`](#opennotifications) | _none_ | Pulls down the Android notification shade. Android-only (no-op on iOS). |
 | [`openTab`](#opentab) | `url` | Opens a new browser tab. |
 | [`pasteText`](#pastetext) | _none_ | Pastes text. |
-| [`pressKey`](#presskey) | `key` | Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. |
+| [`pressKey`](#presskey) | `key` | Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field. |
 | [`removeMedia`](#removemedia) | _none_ | Clears media added by addMedia (Android: MediaStore index). |
 | [`repeat`](#repeat) | — | Repeats steps. |
 | [`resetPermissions`](#resetpermissions) | _none_ | Resets all browser permissions. |
@@ -1404,7 +1404,7 @@ await m.pasteText()
 
 ## `pressKey`
 
-Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.
+Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field.
 
 ```sh
 maestro-d pressKey <key>
@@ -1421,7 +1421,7 @@ await m.pressKey({ key: '<key>', … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `key` | `string` | The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device |
+| `key` | `string` | The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later) |
 
 ## `removeMedia`
 

@@ -1,6 +1,8 @@
 package devicelab_ios
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -22,5 +24,15 @@ func TestSetStatusBar(t *testing.T) {
 	}
 	if _, err := d.SampleProbe(core.SampleFrames, "com.x"); err == nil {
 		t.Fatal("frames on iOS")
+	}
+}
+
+// A key the driver cannot send answers UNSUPPORTED, naming the driver that
+// can.
+func TestHandlePressKey_UnknownKeyUnsupported(t *testing.T) {
+	res := (&Driver{}).handlePressKey(&flow.PressKeyStep{Key: "up"})
+	var unsupported *core.UnsupportedError
+	if res.Success || !errors.As(res.Error, &unsupported) || !strings.Contains(res.Message, "WebDriverAgent") {
+		t.Fatalf("got %+v", res)
 	}
 }

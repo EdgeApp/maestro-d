@@ -57,6 +57,10 @@ var commandOverrides = map[string]func(*Command){
 	"clearState": func(c *Command) {
 		c.Doc = "Clears the app's data: pm clear on Android, an uninstall and reinstall on iOS. A simulator reinstalls the app it has installed; a physical iPhone or iPad reinstalls the attach's app file, else the build installApp (url and appId) last installed on it, which the device's own hub keeps. With neither it fails, naming installApp."
 	},
+	// maestro-d: iOS sends the arrows and escape with typeKey (wda/commands.go).
+	"pressKey": func(c *Command) {
+		c.Doc = "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field."
+	},
 	// maestro-d: the executor runs both AI checks for every driver (pkg/aicheck).
 	"assertWithAI": func(c *Command) {
 		c.Doc = "Judges the screenshot against a plain-words assertion: Jev, then Claude Haiku, Sonnet and Opus, until one answers with confidence. pass, fail and unsure are all a successful step, with {verdict, confidence, model, escalations, observed, costUsd} as its data."

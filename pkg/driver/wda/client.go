@@ -236,6 +236,15 @@ func (c *Client) SendKeys(text string, frequency int) error {
 	return err
 }
 
+// KeyboardInput presses hardware keyboard keys through XCUITest's typeKey
+// (/wda/element/0/keyboardInput, aimed at the app): XCUIKeyboardKey names
+// such as XCUIKeyboardKeyUpArrow. WebDriverAgent answers that typeKey is
+// unsupported before iOS 17 or when built with Xcode before 15.
+func (c *Client) KeyboardInput(keys ...string) error {
+	_, err := c.post(c.sessionPath("/wda/element/0/keyboardInput"), map[string]interface{}{"keys": keys})
+	return err
+}
+
 // ElementSendKeys types text into an element. If frequency > 0, it overrides the session typing speed (keys/sec).
 func (c *Client) ElementSendKeys(elementID, text string, frequency int) error {
 	body := map[string]interface{}{

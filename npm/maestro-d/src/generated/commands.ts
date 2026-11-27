@@ -956,14 +956,14 @@ export interface PasteTextParams {
   platform?: string
 }
 
-/** Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. */
+/** Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field. */
 export interface PressKeyParams {
   optional?: boolean
   label?: string
   timeout?: number
   /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
   platform?: string
-  /** The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device */
+  /** The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later) */
   key?: string
 }
 
@@ -1703,7 +1703,7 @@ export const COMMANDS = {
   openNotifications: { name: 'openNotifications', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Pulls down the Android notification shade. Android-only (no-op on iOS).' },
   openTab: { name: 'openTab', scalar: 'url', bareField: 'url', valueLess: false, compound: false, doc: 'Opens a new browser tab.' },
   pasteText: { name: 'pasteText', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Pastes text.' },
-  pressKey: { name: 'pressKey', scalar: 'key', bareField: 'key', valueLess: false, compound: false, doc: 'Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.' },
+  pressKey: { name: 'pressKey', scalar: 'key', bareField: 'key', valueLess: false, compound: false, doc: 'Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest\'s typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field.' },
   removeMedia: { name: 'removeMedia', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Clears media added by addMedia (Android: MediaStore index).' },
   repeat: { name: 'repeat', scalar: null, bareField: null, valueLess: false, compound: true, doc: 'Repeats steps.' },
   resetPermissions: { name: 'resetPermissions', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Resets all browser permissions.' },

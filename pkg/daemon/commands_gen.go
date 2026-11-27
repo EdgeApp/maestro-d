@@ -657,12 +657,12 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 	}},
-	"pressKey": {Name: "pressKey", Scalar: "key", BareField: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode.", Fields: []FieldSpec{
+	"pressKey": {Name: "pressKey", Scalar: "key", BareField: "key", ValueLess: false, Compound: false, FreeForm: false, Doc: "Presses a key. Native iOS supports LOCK and UNLOCK to set and verify screen lock state; UNLOCK does not bypass a passcode. On iOS (WebDriverAgent) up, down, left, right (or dpad_up, …) and escape (or esc) are hardware keys sent with XCUITest's typeKey, which needs iOS or iPadOS 17: an older device answers UNSUPPORTED for them. tab, enter, delete and space are typed into the focused field.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "key", Type: "string", Doc: "The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device"},
+		{Key: "key", Type: "string", Doc: "The key; escape (or esc) works on Android too (KEYCODE_ESCAPE), as in the browser and on the computer device, and on iOS with up, down, left and right (typeKey, iOS 17 or later)"},
 	}},
 	"removeMedia": {Name: "removeMedia", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Clears media added by addMedia (Android: MediaStore index).", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
