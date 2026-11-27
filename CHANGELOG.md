@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.4.1 (2026-11-27)
+
 - added: The browser (`cdp`, `--platform web`) records its screen. `startRecording` starts the page's DevTools screencast at the viewport's size and keeps each frame with the time it was drawn; `stopRecording` has FFmpeg (on `PATH`, else `/opt/homebrew/bin`, `/usr/local/bin` or `/usr/bin`) encode them into an MP4 with that timing, at the same `recordings/<name>.mp4` as Android's and iOS's recordings, with `{path, durationMs, frames}` as its data. Without FFmpeg `startRecording` fails naming it. Both steps used to answer "not supported on web platform". See `docs/daemon/streaming.md#recording-the-browser`.
 
 ## 3.4.0 (2026-11-27)
