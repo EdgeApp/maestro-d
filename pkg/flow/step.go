@@ -853,11 +853,12 @@ type WaitForDownloadStep struct {
 	AssertFilename string `yaml:"assertFilename"` // Expected filename (optional)
 }
 
-// GrantPermissionsStep grants browser permissions (notifications, camera, etc).
+// GrantPermissionsStep grants browser permissions (clipboard-read, camera,
+// notifications, etc) to the page's origin.
 type GrantPermissionsStep struct {
 	BaseStep    `yaml:",inline"`
-	Permissions []string `yaml:"permissions"`
-	Origin      string   `yaml:"origin"` // Optional: specific origin
+	Permissions []string `yaml:"permissions"` // Maestro-style names (clipboard-read, camera, …) or CDP types (clipboardReadWrite, …)
+	Origin      string   `yaml:"origin"`      // Optional: the http(s) origin to grant to; default the current page's
 }
 
 // ResetPermissionsStep resets all browser permissions.

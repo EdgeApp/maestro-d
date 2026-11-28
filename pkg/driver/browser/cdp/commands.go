@@ -1951,27 +1951,41 @@ func (d *Driver) waitForDownload(step *flow.WaitForDownloadStep) *core.CommandRe
 	}
 }
 
-// grantPermissions grants browser permissions.
+// grantPermissions grants browser permissions, by Maestro-style name
+// (clipboard-read, camera, …) or CDP type, to the step's origin or else the
+// current page's.
 func (d *Driver) grantPermissions(step *flow.GrantPermissionsStep) *core.CommandResult {
 	if len(step.Permissions) == 0 {
 		return errorResult(fmt.Errorf("grantPermissions: no permissions provided"), "")
 	}
 
-	perms := make([]proto.BrowserPermissionType, len(step.Permissions))
-	for i, p := range step.Permissions {
-		perms[i] = proto.BrowserPermissionType(p)
+	perms, err := browserPermissionTypes(step.Permissions)
+	if err != nil {
+		return errorResult(fmt.Errorf("grantPermissions: %w", err), "")
+	}
+	origin, err := d.permissionOrigin(step.Origin)
+	if err != nil {
+		return errorResult(fmt.Errorf("grantPermissions: %w", err), "")
 	}
 
-	req := proto.BrowserGrantPermissions{Permissions: perms}
-	if step.Origin != "" {
-		req.Origin = step.Origin
-	}
-
+	req := proto.BrowserGrantPermissions{Permissions: perms, Origin: origin}
 	if err := req.Call(d.browser); err != nil {
 		return errorResult(fmt.Errorf("grantPermissions: %w", err), "")
 	}
 
-	return successResult(fmt.Sprintf("Granted %d permission(s)", len(step.Permissions)), nil)
+	// The Clipboard API refuses a document without focus, which a headless
+	// or background tab never has: emulate focus on the page.
+	if d.page != nil && grantsClipboard(perms) {
+		if err := (proto.EmulationSetFocusEmulationEnabled{Enabled: true}).Call(d.page); err != nil {
+			return errorResult(fmt.Errorf("grantPermissions: emulate page focus for the clipboard: %w", err), "")
+		}
+	}
+
+	where := "all origins"
+	if origin != "" {
+		where = origin
+	}
+	return successResult(fmt.Sprintf("Granted %d permission(s) to %s", len(step.Permissions), where), nil)
 }
 
 // resetPermissions resets all browser permissions.

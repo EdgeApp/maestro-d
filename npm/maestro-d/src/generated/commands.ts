@@ -618,15 +618,16 @@ export interface GetCookiesParams {
   output?: string
 }
 
-/** Grants browser permissions (notifications, camera, etc). */
+/** Grants browser permissions to the current page's origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, '-' and '_' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones. */
 export interface GrantPermissionsParams {
   optional?: boolean
   label?: string
   timeout?: number
   /** Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). */
   platform?: string
+  /** Maestro-style names (clipboard-read, camera, …) or CDP types (clipboardReadWrite, …) */
   permissions?: string[]
-  /** Optional: specific origin */
+  /** Optional: the http(s) origin to grant to; default the current page's */
   origin?: string
 }
 
@@ -1847,7 +1848,7 @@ export const COMMANDS = {
   extractTextWithAI: { name: 'extractTextWithAI', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Uses AI to extract text from screen.' },
   getConsoleLogs: { name: 'getConsoleLogs', scalar: 'output', bareField: 'output', valueLess: false, compound: false, doc: 'Retrieves captured browser console logs as JSON.' },
   getCookies: { name: 'getCookies', scalar: 'output', bareField: 'output', valueLess: false, compound: false, doc: 'Retrieves browser cookies and stores them as JSON.' },
-  grantPermissions: { name: 'grantPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Grants browser permissions (notifications, camera, etc).' },
+  grantPermissions: { name: 'grantPermissions', scalar: null, bareField: null, valueLess: false, compound: false, doc: 'Grants browser permissions to the current page\'s origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, \'-\' and \'_\' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones.' },
   hideKeyboard: { name: 'hideKeyboard', scalar: null, bareField: null, valueLess: true, compound: false, doc: 'Hides the keyboard.' },
   holdOn: { name: 'holdOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS.' },
   hoverOn: { name: 'hoverOn', scalar: 'text', bareField: 'text', valueLess: false, compound: false, doc: 'Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED.' },

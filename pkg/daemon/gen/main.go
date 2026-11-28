@@ -75,6 +75,10 @@ var commandOverrides = map[string]func(*Command){
 	"stopRecording": func(c *Command) {
 		c.Doc = "Stops the running recording and saves it; path is ignored. Its data is the file's path relative to the report; on the browser it is {path, durationMs, frames}."
 	},
+	// maestro-d: the cdp driver maps the names (browser/cdp/permissions.go).
+	"grantPermissions": func(c *Command) {
+		c.Doc = "Grants browser permissions to the current page's origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, '-' and '_' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones."
+	},
 	// Decoded by a helper (flow/trafficshape.go), which the AST walk does
 	// not follow: it takes a map of its fields, each optional.
 	"setTrafficShape": func(c *Command) { c.ValueLess = false },

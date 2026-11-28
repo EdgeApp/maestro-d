@@ -45,7 +45,7 @@ accepted by every command and passed as CLI flags / JS `opts`.
 | [`extractTextWithAI`](#extracttextwithai) | — | Uses AI to extract text from screen. |
 | [`getConsoleLogs`](#getconsolelogs) | `output` | Retrieves captured browser console logs as JSON. |
 | [`getCookies`](#getcookies) | `output` | Retrieves browser cookies and stores them as JSON. |
-| [`grantPermissions`](#grantpermissions) | — | Grants browser permissions (notifications, camera, etc). |
+| [`grantPermissions`](#grantpermissions) | — | Grants browser permissions to the current page's origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, '-' and '_' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones. |
 | [`hideKeyboard`](#hidekeyboard) | _none_ | Hides the keyboard. |
 | [`holdOn`](#holdon) | `text` | Presses an element (at its point:, default the centre) or a point on the screen, holds it for duration, then releases: on the browser, Android and iOS. |
 | [`hoverOn`](#hoveron) | `text` | Moves the pointer onto an element (at its point:, default the centre) or a point on the screen without pressing, then waits duration: the browser and the computer device. A touch screen has no hover: Android and iOS answer UNSUPPORTED. |
@@ -938,7 +938,7 @@ await m.getCookies({ output: '<output>', … })
 
 ## `grantPermissions`
 
-Grants browser permissions (notifications, camera, etc).
+Grants browser permissions to the current page's origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, '-' and '_' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones.
 
 ```sh
 maestro-d grantPermissions --key value […]
@@ -953,8 +953,8 @@ await m.grantPermissions({ … })
 | `label` | `string` |  |
 | `timeout` | `number` |  |
 | `platform` | `string` | Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353). |
-| `permissions` | `string[]` |  |
-| `origin` | `string` | Optional: specific origin |
+| `permissions` | `string[]` | Maestro-style names (clipboard-read, camera, …) or CDP types (clipboardReadWrite, …) |
+| `origin` | `string` | Optional: the http(s) origin to grant to; default the current page's |
 
 ## `hideKeyboard`
 
