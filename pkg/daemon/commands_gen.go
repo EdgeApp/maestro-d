@@ -436,13 +436,13 @@ var CommandSpecs = map[string]CommandSpec{
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
 		{Key: "output", Type: "string", Doc: "Variable name to store JSON result"},
 	}},
-	"grantPermissions": {Name: "grantPermissions", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Grants browser permissions (notifications, camera, etc).", Fields: []FieldSpec{
+	"grantPermissions": {Name: "grantPermissions", Scalar: "", ValueLess: false, Compound: false, FreeForm: false, Doc: "Grants browser permissions to the current page's origin (or origin:), all origins on a page without one such as about:blank. Takes Maestro and Permissions API names: clipboard-read (CDP clipboardReadWrite), clipboard-write (clipboardSanitizedWrite), camera (videoCapture), microphone (audioCapture), location (geolocation), notifications, persistent-storage (durableStorage), screen-wake-lock, accelerometer and the other sensors (sensors), and any CDP Browser.PermissionType by its own name; case, '-' and '_' do not matter. A clipboard grant also emulates focus on the page, which the Clipboard API needs. An unknown name fails, listing the known ones.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},
 		{Key: "label", Type: "string", Doc: ""},
 		{Key: "timeout", Type: "int", Doc: ""},
 		{Key: "platform", Type: "string", Doc: "Platform restricts this step to a single platform; when set and it doesn't match the running driver, the step is skipped (Maestro #1353)."},
-		{Key: "permissions", Type: "[]string", Doc: ""},
-		{Key: "origin", Type: "string", Doc: "Optional: specific origin"},
+		{Key: "permissions", Type: "[]string", Doc: "Maestro-style names (clipboard-read, camera, …) or CDP types (clipboardReadWrite, …)"},
+		{Key: "origin", Type: "string", Doc: "Optional: the http(s) origin to grant to; default the current page's"},
 	}},
 	"hideKeyboard": {Name: "hideKeyboard", Scalar: "", ValueLess: true, Compound: false, FreeForm: false, Doc: "Hides the keyboard.", Fields: []FieldSpec{
 		{Key: "optional", Type: "bool", Doc: ""},

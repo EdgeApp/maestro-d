@@ -104,3 +104,14 @@ func TestAIOverridesAndThresholdsType(t *testing.T) {
 		}
 	}
 }
+
+// maestro-d: grantPermissions documents the browser's permission names.
+func TestGrantPermissionsOverride(t *testing.T) {
+	c := Command{Name: "grantPermissions", Doc: "Grants browser permissions."}
+	commandOverrides["grantPermissions"](&c)
+	for _, s := range []string{"clipboard-read", "clipboardReadWrite", "clipboardSanitizedWrite", "origin"} {
+		if !strings.Contains(c.Doc, s) {
+			t.Errorf("doc lacks %s: %q", s, c.Doc)
+		}
+	}
+}
