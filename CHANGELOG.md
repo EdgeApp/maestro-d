@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.4.2 (2026-11-27)
+
 - fixed: The browser's `grantPermissions` takes Maestro-style names. `clipboard-read` and `clipboard-write` used to reach Chrome as they were written and fail "Unknown permission type"; they now grant CDP's `clipboardReadWrite` and `clipboardSanitizedWrite`, and `camera`, `microphone`, `location`, `persistent-storage`, `screen-wake-lock`, the sensors and the other Permissions API names map to their CDP types, beside every CDP type under its own name (case, `-` and `_` do not matter). The grant goes to the current page's origin unless `origin:` names one (all origins on `about:blank`). A clipboard grant also emulates focus on the page, so `navigator.clipboard.readText()` works in a headless or background tab. An unknown name fails listing the known ones. See `docs/daemon/commands.md#grantpermissions`.
 
 ## 3.4.1 (2026-11-27)
